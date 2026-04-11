@@ -3677,6 +3677,19 @@ var DatabaseManager = class {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS explore_reports (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, environment TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        report_path TEXT
+      );
+      CREATE TABLE IF NOT EXISTS explore_candidates (
+        id TEXT PRIMARY KEY, report_id TEXT NOT NULL,
+        name TEXT NOT NULL, description TEXT, route TEXT NOT NULL,
+        screenshot_path TEXT, graph TEXT NOT NULL DEFAULT '{}',
+        confirmed INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (report_id) REFERENCES explore_reports(id) ON DELETE CASCADE
+      );
     `);
   }
   // ---- Flows ----
@@ -3883,6 +3896,47 @@ var DatabaseManager = class {
       lastRunAt: r.last_run_at ? new Date(r.last_run_at) : null,
       lastRunStatus: r.last_run_status
     };
+  }
+  // ---- Explore Reports ----
+  createExploreReport(url, environment) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare(`INSERT INTO explore_reports (id, url, environment, status) VALUES (?, ?, ?, 'pending')`).run(id, url, environment);
+    return this.getExploreReport(id);
+  }
+  getExploreReport(id) {
+    const r = this.db.prepare("SELECT * FROM explore_reports WHERE id = ?").get(id);
+    return r ? { id: r.id, url: r.url, environment: r.environment, status: r.status, reportPath: r.report_path } : null;
+  }
+  findExploreReportByPartialId(q) {
+    const rows = this.db.prepare("SELECT * FROM explore_reports WHERE id LIKE ?").all(q + "%");
+    if (rows.length !== 1) return null;
+    const r = rows[0];
+    return { id: r.id, url: r.url, environment: r.environment, status: r.status, reportPath: r.report_path };
+  }
+  updateExploreReport(id, data) {
+    const updates = [];
+    const values = [];
+    if (data.status) {
+      updates.push("status = ?");
+      values.push(data.status);
+    }
+    if (data.reportPath) {
+      updates.push("report_path = ?");
+      values.push(data.reportPath);
+    }
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE explore_reports SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+  }
+  createExploreCandidate(data) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare(`INSERT INTO explore_candidates (id, report_id, name, description, route, screenshot_path, graph) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, data.reportId, data.name, data.description, data.route, data.screenshotPath || null, JSON.stringify(data.graph));
+    return id;
+  }
+  listExploreCandidates(reportId) {
+    return this.db.prepare("SELECT * FROM explore_candidates WHERE report_id = ? ORDER BY rowid").all(reportId).map((r) => ({ id: r.id, reportId: r.report_id, name: r.name, description: r.description, route: r.route, screenshotPath: r.screenshot_path, graph: r.graph, confirmed: Boolean(r.confirmed) }));
+  }
+  confirmExploreCandidate(id) {
+    this.db.prepare("UPDATE explore_candidates SET confirmed = 1 WHERE id = ?").run(id);
   }
   close() {
     this.db.close();
@@ -4845,11 +4899,607 @@ async function runStatus() {
   }
   console.log();
 }
+async function runDesktopApp() {
+  const { execFile } = await import("child_process");
+  const electronBin = path.join(__dirname, "..", "node_modules", ".bin", "electron");
+  const mainJs = path.join(__dirname, "..", "apps", "electron", "main.js");
+  if (!fs.existsSync(mainJs)) {
+    errorMsg("Desktop app not found at: " + mainJs);
+    process.exit(1);
+  }
+  info("Launching FlowMind desktop...");
+  const child = execFile(electronBin, [mainJs], {
+    detached: true,
+    stdio: "ignore",
+    cwd: path.join(__dirname, "..")
+  });
+  child.unref();
+  success("Desktop app launched.");
+}
+async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
+  const origin = new URL(startUrl).origin;
+  const normalize = (u) => u.replace(/#.*$/, "").replace(/\/$/, "") || "/";
+  const visited = /* @__PURE__ */ new Set();
+  const queue = [normalize(startUrl)];
+  const pages = [];
+  const browser = await import_playwright.chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  while (queue.length > 0 && pages.length < maxPages) {
+    const url = queue.shift();
+    const key = normalize(url);
+    if (visited.has(key)) continue;
+    visited.add(key);
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15e3 });
+      onProgress(pages.length + 1, url);
+      const title = await page.title().catch(() => "");
+      const headings = await page.$$eval("h1,h2,h3", (els) => els.slice(0, 8).map((e) => e.innerText.trim()).filter(Boolean)).catch(() => []);
+      const links = await page.$$eval(
+        "a[href]",
+        (els, orig) => els.map((e) => e.href).filter((h) => h && h.startsWith(orig) && !h.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2|ttf)(\?|$)/i)),
+        origin
+      ).catch(() => []);
+      const ssPath = path.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
+      await page.screenshot({ path: ssPath, type: "jpeg", quality: 60 }).catch(() => {
+      });
+      const ssExists = fs.existsSync(ssPath);
+      pages.push({ url, title, headings, links, screenshotPath: ssExists ? ssPath : null });
+      for (const link of links) {
+        const norm = normalize(link);
+        if (!visited.has(norm) && !queue.includes(norm)) queue.push(norm);
+      }
+    } catch {
+    }
+  }
+  await browser.close();
+  return pages;
+}
+async function analyzePages(pages) {
+  const candidates = [];
+  const BATCH = 5;
+  for (let i = 0; i < pages.length; i += BATCH) {
+    const batch = pages.slice(i, i + BATCH);
+    const batchResults = await Promise.all(batch.map(async (page) => {
+      const prompt = `You are analyzing a web page to suggest automation test flows.
+
+Page URL: ${page.url}
+Page title: ${page.title}
+Headings: ${page.headings.join(" | ") || "none"}
+Links found: ${page.links.slice(0, 10).join(", ") || "none"}
+
+Suggest 1-3 automation flows a developer would want to test on this page.
+Respond ONLY with valid JSON array, no other text:
+[{"name":"Flow Name","description":"One sentence description of what to test","route":"${page.url}"}]`;
+      const result = await callAI(prompt);
+      if (!result) return [];
+      try {
+        const parsed = JSON.parse(result.text.replace(/```json\n?|\n?```/g, "").trim());
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [{ name: page.title || "Page Check", description: "Verify page loads correctly", route: page.url }];
+      }
+    }));
+    for (const results of batchResults) candidates.push(...results);
+    if (i + BATCH < pages.length) await new Promise((r) => setTimeout(r, 300));
+  }
+  return candidates;
+}
+function generateExploreHtml(report, pages, candidates) {
+  const thumbs = pages.map((p, i) => {
+    let imgTag = '<div class="no-screenshot">No screenshot</div>';
+    if (p.screenshotPath && fs.existsSync(p.screenshotPath)) {
+      const b64 = fs.readFileSync(p.screenshotPath).toString("base64");
+      imgTag = `<img src="data:image/jpeg;base64,${b64}" alt="${p.title}" loading="lazy">`;
+    }
+    return `
+    <div class="page-card">
+      <div class="page-thumb">${imgTag}</div>
+      <div class="page-info">
+        <div class="page-num">#${i + 1}</div>
+        <div class="page-title">${escapeHtml(p.title || "(no title)")}</div>
+        <a class="page-url" href="${escapeHtml(p.url)}" target="_blank">${escapeHtml(p.url.replace(new URL(report.url).origin, ""))}</a>
+        <div class="page-meta">${p.headings.slice(0, 2).map((h) => `<span class="heading-pill">${escapeHtml(h)}</span>`).join("")}</div>
+      </div>
+    </div>`;
+  }).join("");
+  const candidateCards = candidates.map((c, i) => `
+    <div class="candidate-card" data-id="${i}">
+      <label class="candidate-check">
+        <input type="checkbox" class="confirm-cb" data-route="${escapeHtml(c.route)}" data-name="${escapeHtml(c.name)}" checked>
+        <span class="candidate-name">${escapeHtml(c.name)}</span>
+      </label>
+      <div class="candidate-desc">${escapeHtml(c.description)}</div>
+      <div class="candidate-route">${escapeHtml(c.route)}</div>
+    </div>`).join("");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlowMind Explore Report \u2014 ${escapeHtml(report.url)}</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.5; }
+  a { color: #58a6ff; }
+  .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 24px 32px; display: flex; align-items: center; gap: 16px; }
+  .logo { font-size: 22px; font-weight: 700; color: #58a6ff; letter-spacing: -0.5px; }
+  .header-meta { font-size: 13px; color: #8b949e; }
+  .env-badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 8px; }
+  .env-prod { background: #3d0014; color: #ff7b7b; }
+  .env-staging { background: #1a2d00; color: #7ee787; }
+  .env-preprod { background: #271e00; color: #e3b341; }
+  .env-local { background: #0d1d3b; color: #79c0ff; }
+  .main { max-width: 1200px; margin: 0 auto; padding: 32px; }
+  .section-title { font-size: 18px; font-weight: 600; color: #f0f6fc; margin-bottom: 4px; }
+  .section-sub { font-size: 13px; color: #8b949e; margin-bottom: 20px; }
+  .stats-row { display: flex; gap: 16px; margin-bottom: 40px; flex-wrap: wrap; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; min-width: 140px; }
+  .stat-num { font-size: 28px; font-weight: 700; color: #f0f6fc; }
+  .stat-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+  section { margin-bottom: 48px; }
+  .page-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .page-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .page-thumb { height: 160px; overflow: hidden; background: #0d1117; display: flex; align-items: center; justify-content: center; }
+  .page-thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+  .no-screenshot { font-size: 12px; color: #484f58; }
+  .page-info { padding: 12px; }
+  .page-num { font-size: 11px; color: #484f58; margin-bottom: 4px; }
+  .page-title { font-size: 14px; font-weight: 600; color: #f0f6fc; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .page-url { font-size: 12px; color: #58a6ff; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px; }
+  .page-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+  .heading-pill { background: #1f2d3d; color: #79c0ff; font-size: 11px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; overflow: hidden; max-width: 120px; text-overflow: ellipsis; }
+  .candidate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .candidate-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; transition: border-color 0.15s; }
+  .candidate-card:has(.confirm-cb:checked) { border-color: #238636; }
+  .candidate-check { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+  .confirm-cb { width: 16px; height: 16px; margin-top: 2px; accent-color: #238636; flex-shrink: 0; cursor: pointer; }
+  .candidate-name { font-size: 15px; font-weight: 600; color: #f0f6fc; }
+  .candidate-desc { font-size: 13px; color: #8b949e; margin: 8px 0 8px 26px; }
+  .candidate-route { font-size: 12px; color: #58a6ff; margin-left: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .confirm-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #161b22; border-top: 1px solid #30363d; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; z-index: 100; }
+  .confirm-bar-left { font-size: 14px; color: #8b949e; }
+  .confirm-bar-left strong { color: #f0f6fc; }
+  .confirm-btn { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
+  .confirm-btn:hover { background: #2ea043; }
+  .cmd-box { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; font-family: monospace; font-size: 13px; color: #7ee787; margin-top: 8px; word-break: break-all; }
+  .copy-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; margin-left: 8px; }
+  .copy-btn:hover { background: #30363d; }
+  body { padding-bottom: 80px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">\u26A1 FlowMind</div>
+  <div class="header-meta">
+    Explore Report \xB7 <a href="${escapeHtml(report.url)}" target="_blank">${escapeHtml(report.url)}</a>
+    <span class="env-badge env-${report.environment}">${report.environment}</span>
+  </div>
+</div>
+<div class="main">
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num">${pages.length}</div><div class="stat-label">Pages crawled</div></div>
+    <div class="stat-card"><div class="stat-num">${candidates.length}</div><div class="stat-label">Flow candidates</div></div>
+    <div class="stat-card"><div class="stat-num">${new Set(pages.map((p) => new URL(p.url).pathname.split("/")[1] || "/")).size}</div><div class="stat-label">Unique sections</div></div>
+  </div>
+
+  <section>
+    <div class="section-title">Flow Candidates</div>
+    <div class="section-sub">AI-suggested flows based on your site's pages. Check the ones you want to save.</div>
+    <div class="candidate-grid">${candidateCards}</div>
+  </section>
+
+  <section>
+    <div class="section-title">Pages Crawled</div>
+    <div class="section-sub">${pages.length} page${pages.length !== 1 ? "s" : ""} discovered from <strong>${escapeHtml(report.url)}</strong></div>
+    <div class="page-grid">${thumbs}</div>
+  </section>
+
+  <section>
+    <div class="section-title">Confirm Selected Flows</div>
+    <div class="section-sub">After reviewing above, run this command to import selected flows:</div>
+    <div class="cmd-box" id="cmd-box">node flowmind.js explore:confirm ${report.id.slice(0, 8)}<button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-text').textContent)">Copy</button></div>
+    <span id="cmd-text" style="display:none">node flowmind.js explore:confirm ${report.id.slice(0, 8)}</span>
+  </section>
+</div>
+<div class="confirm-bar">
+  <div class="confirm-bar-left"><strong id="selected-count">${candidates.length}</strong> flows selected</div>
+  <button class="confirm-btn" onclick="copyConfirmCmd()">Copy confirm command</button>
+</div>
+<script>
+  const cbs = document.querySelectorAll('.confirm-cb');
+  const countEl = document.getElementById('selected-count');
+  function updateCount() { countEl.textContent = [...cbs].filter(c => c.checked).length; }
+  cbs.forEach(cb => cb.addEventListener('change', updateCount));
+  function copyConfirmCmd() {
+    navigator.clipboard.writeText('node flowmind.js explore:confirm ${report.id.slice(0, 8)}');
+    const btn = document.querySelector('.confirm-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy confirm command'; }, 1500);
+  }
+</script>
+</body>
+</html>`;
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+async function runExplore(url) {
+  const clack = await import("@clack/prompts");
+  const { intro, select, text, password, confirm, spinner, isCancel, outro, note } = clack;
+  intro(import_chalk.default.cyan(" FlowMind Explorer "));
+  const env = await select({
+    message: "Environment type:",
+    options: [
+      { value: "local", label: "Local", hint: "localhost / 127.0.0.1" },
+      { value: "staging", label: "Staging", hint: "staging.yourapp.com" },
+      { value: "preprod", label: "Pre-prod", hint: "pre.yourapp.com" },
+      { value: "prod", label: "Production", hint: "yourapp.com" }
+    ],
+    initialValue: url.includes("localhost") || url.includes("127.0.0.1") ? "local" : "prod"
+  });
+  if (isCancel(env)) {
+    outro("Cancelled.");
+    return;
+  }
+  const needsLogin = await confirm({ message: "Does this site require login to explore?" });
+  if (isCancel(needsLogin)) {
+    outro("Cancelled.");
+    return;
+  }
+  let loginCreds = null;
+  if (needsLogin) {
+    const username = await text({ message: "Username / email:", validate: (v) => !v ? "Required" : void 0 });
+    if (isCancel(username)) {
+      outro("Cancelled.");
+      return;
+    }
+    const loginPassword = await password({ message: "Password:", validate: (v) => !v ? "Required" : void 0 });
+    if (isCancel(loginPassword)) {
+      outro("Cancelled.");
+      return;
+    }
+    loginCreds = { username, loginPassword };
+  }
+  const maxPagesStr = await text({
+    message: "Max pages to crawl:",
+    initialValue: "30",
+    validate: (v) => !v || isNaN(Number(v)) || Number(v) < 1 ? "Enter a number >= 1" : void 0
+  });
+  if (isCancel(maxPagesStr)) {
+    outro("Cancelled.");
+    return;
+  }
+  const maxPages = Math.min(parseInt(maxPagesStr, 10), 100);
+  const report = db.createExploreReport(url, env);
+  const exploreDir = path.join(DATA_PATH, "explore", report.id);
+  fs.mkdirSync(exploreDir, { recursive: true });
+  let cookiesJson = null;
+  if (loginCreds) {
+    note("A browser will open. Log in, then come back and press Enter.", "Login Required");
+    const loginBrowser = await import_playwright.chromium.launch({ headless: false });
+    const loginPage = await loginBrowser.newPage();
+    await loginPage.goto(url, { waitUntil: "domcontentloaded", timeout: 15e3 }).catch(() => {
+    });
+    try {
+      await loginPage.fill('input[type="email"], input[name="email"], input[name="username"]', loginCreds.username, { timeout: 3e3 });
+      await loginPage.fill('input[type="password"]', loginCreds.loginPassword, { timeout: 3e3 });
+    } catch {
+    }
+    await new Promise((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.question(import_chalk.default.cyan("\n  Press Enter once you are logged in... "), () => {
+        rl.close();
+        resolve();
+      });
+    });
+    const cookies = await loginPage.context().cookies();
+    cookiesJson = JSON.stringify(cookies);
+    await loginBrowser.close();
+  }
+  console.log();
+  const s = spinner();
+  s.start("Crawling pages...");
+  let crawlCount = 0;
+  const pages = await bfsCrawl(url, exploreDir, maxPages, (visited, current) => {
+    crawlCount = visited;
+    s.message(`Crawling... ${visited} pages found \u2014 ${new URL(current).pathname}`);
+  });
+  s.stop(`Crawled ${pages.length} pages`);
+  if (pages.length === 0) {
+    outro(import_chalk.default.red("No pages could be crawled. Check the URL and try again."));
+    return;
+  }
+  const hasAI = !!await isOllamaRunning() || !!process.env.ANTHROPIC_API_KEY;
+  let candidates = [];
+  if (hasAI) {
+    const s2 = spinner();
+    s2.start("Analyzing pages with AI...");
+    candidates = await analyzePages(pages);
+    s2.stop(`${candidates.length} flow candidates identified`);
+  } else {
+    candidates = pages.map((p) => ({
+      name: p.title || `Check ${new URL(p.url).pathname}`,
+      description: `Verify ${p.url} loads correctly`,
+      route: p.url
+    }));
+    note("No AI available \u2014 generated basic candidates. Set up Ollama or ANTHROPIC_API_KEY for smarter suggestions.", "Note");
+  }
+  const seen = /* @__PURE__ */ new Set();
+  candidates = candidates.filter((c) => {
+    if (seen.has(c.route)) return false;
+    seen.add(c.route);
+    return true;
+  });
+  for (const c of candidates) {
+    const pageForRoute = pages.find((p) => p.url === c.route);
+    db.createExploreCandidate({
+      reportId: report.id,
+      name: c.name,
+      description: c.description,
+      route: c.route,
+      screenshotPath: pageForRoute?.screenshotPath || void 0,
+      graph: {
+        nodes: [{ id: "n1", type: "action", action: "navigate", url: c.route, name: `Navigate to ${c.name}` }],
+        edges: []
+      }
+    });
+  }
+  const s3 = spinner();
+  s3.start("Generating report...");
+  const reportHtml = generateExploreHtml(report, pages, candidates);
+  const reportPath = path.join(exploreDir, "report.html");
+  fs.writeFileSync(reportPath, reportHtml, "utf-8");
+  db.updateExploreReport(report.id, { status: "complete", reportPath });
+  s3.stop("Report generated");
+  console.log();
+  note(
+    [
+      `  Pages crawled:      ${import_chalk.default.white(String(pages.length))}`,
+      `  Flow candidates:    ${import_chalk.default.white(String(candidates.length))}`,
+      `  Report:             ${import_chalk.default.cyan(reportPath)}`,
+      "",
+      `  Open the report in your browser to review candidates,`,
+      `  then run:`,
+      `    ${import_chalk.default.cyan("node flowmind.js explore:confirm " + report.id.slice(0, 8))}`
+    ].join("\n"),
+    "Explore Complete"
+  );
+  outro("");
+}
+async function runExploreConfirm(reportId) {
+  const clack = await import("@clack/prompts");
+  const { intro, multiselect, isCancel, outro, spinner, note } = clack;
+  const report = db.findExploreReportByPartialId(reportId);
+  if (!report) {
+    errorMsg("Report not found: " + reportId);
+    process.exit(1);
+  }
+  const candidates = db.listExploreCandidates(report.id);
+  if (candidates.length === 0) {
+    warn("No candidates found for this report.");
+    return;
+  }
+  intro(import_chalk.default.cyan(" Confirm Flows "));
+  if (report.reportPath) {
+    note(`Report: ${import_chalk.default.cyan(report.reportPath)}`, "Tip: open in browser to review with screenshots");
+  }
+  const chosen = await multiselect({
+    message: `Select flows to save (${candidates.length} candidates):`,
+    options: candidates.map((c) => ({
+      value: c.id,
+      label: c.name,
+      hint: c.route.replace(report.url, "") || "/"
+    })),
+    required: false
+  });
+  if (isCancel(chosen) || chosen.length === 0) {
+    outro("No flows saved.");
+    return;
+  }
+  const s = spinner();
+  s.start("Saving flows...");
+  const selected = chosen;
+  for (const id of selected) {
+    const c = candidates.find((x) => x.id === id);
+    db.createFlow({ name: c.name, description: c.description, appUrl: c.route, graph: JSON.parse(c.graph) });
+    db.confirmExploreCandidate(c.id);
+  }
+  db.updateExploreReport(report.id, { status: "confirmed" });
+  s.stop(`${selected.length} flow${selected.length !== 1 ? "s" : ""} saved`);
+  const saved = selected.map((id) => candidates.find((c) => c.id === id).name);
+  note(
+    saved.map((n) => `  ${import_chalk.default.green("\u2713")} ${n}`).join("\n"),
+    "Saved Flows"
+  );
+  note(
+    `Run any flow with:
+  ${import_chalk.default.cyan("node flowmind.js run <name>")}`,
+    "Next Step"
+  );
+  outro("");
+}
+async function runInteractive() {
+  const clack = await import("@clack/prompts");
+  const { intro, outro, select, text, confirm, spinner, isCancel, note, log } = clack;
+  console.clear();
+  printLogo();
+  const flows = db.listFlows();
+  const runs = db.listRuns(void 0, 100);
+  const passed = runs.filter((r) => r.status === "passed").length;
+  const ollamaModel = await isOllamaRunning();
+  const aiProvider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? "Anthropic" : "none";
+  intro(import_chalk.default.cyan(" FlowMind \u2014 Memory-driven Web Automation "));
+  note(
+    [
+      `  Flows:    ${import_chalk.default.white(String(flows.length))}     Runs: ${import_chalk.default.white(String(runs.length))}`,
+      `  Passed:   ${import_chalk.default.green(String(passed))}     Failed: ${import_chalk.default.red(String(runs.length - passed))}`,
+      `  AI:       ${ollamaModel ? import_chalk.default.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? import_chalk.default.cyan(aiProvider) : import_chalk.default.gray(aiProvider)}`
+    ].join("\n"),
+    "Status"
+  );
+  while (true) {
+    const action = await select({
+      message: "What do you want to do?",
+      options: [
+        { value: "run", label: "\u25B6  Run a flow", hint: flows.length > 0 ? `${flows.length} saved` : "no flows yet" },
+        { value: "record", label: "\u23FA  Record a new flow", hint: "opens real browser" },
+        { value: "reports", label: "\u{1F4CB} View run reports", hint: runs.length > 0 ? `${runs.length} runs` : "no runs yet" },
+        { value: "explore", label: "\u{1F50D} Explore a URL", hint: "auto-discover flows with AI" },
+        { value: "schedule", label: "\u{1F550} Manage schedules", hint: "cron-based automation" },
+        { value: "status", label: "\u{1F4CA} System status", hint: "stats + AI provider" },
+        { value: "app", label: "\u{1F5A5}  Open desktop app", hint: "Electron UI" },
+        { value: "exit", label: "\u2715  Exit" }
+      ]
+    });
+    if (isCancel(action) || action === "exit") {
+      outro(import_chalk.default.gray("Bye."));
+      process.exit(0);
+    }
+    if (action === "run") {
+      const currentFlows = db.listFlows();
+      if (currentFlows.length === 0) {
+        log.warn("No flows saved yet. Record one first.");
+        continue;
+      }
+      const flowChoice = await select({
+        message: "Which flow?",
+        options: currentFlows.map((f) => ({
+          value: f.id,
+          label: f.name,
+          hint: f.appUrl || ""
+        }))
+      });
+      if (isCancel(flowChoice)) continue;
+      console.log();
+      await runFlow(flowChoice);
+      console.log();
+      await _pause();
+    } else if (action === "record") {
+      const url = await text({
+        message: "URL to record:",
+        placeholder: "https://yourapp.com",
+        validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+      });
+      if (isCancel(url)) continue;
+      const name = await text({
+        message: "Flow name:",
+        placeholder: "e.g. Login Flow",
+        defaultValue: new URL(url).hostname
+      });
+      if (isCancel(name)) continue;
+      console.log();
+      await runLearn(url, name);
+    } else if (action === "reports") {
+      const recentRuns = db.listRuns(void 0, 20);
+      if (recentRuns.length === 0) {
+        log.warn("No runs yet. Run a flow first.");
+        continue;
+      }
+      const runChoice = await select({
+        message: "Which run?",
+        options: recentRuns.map((r) => {
+          const flow = db.getFlow(r.flowId);
+          const icon = r.status === "passed" ? import_chalk.default.green("\u2713") : import_chalk.default.red("\u2717");
+          const dur = r.duration ? ` ${r.duration}ms` : "";
+          return {
+            value: r.id,
+            label: `${icon}  ${flow?.name || "Unknown"}${dur}`,
+            hint: r.id.slice(0, 8)
+          };
+        })
+      });
+      if (isCancel(runChoice)) continue;
+      console.log();
+      await runShowRun(runChoice.slice(0, 8));
+      console.log();
+      await _pause();
+    } else if (action === "explore") {
+      const url = await text({
+        message: "URL to explore:",
+        placeholder: "https://yourapp.com",
+        validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+      });
+      if (isCancel(url)) continue;
+      console.log();
+      await runExplore(url);
+      console.log();
+      await _pause();
+    } else if (action === "schedule") {
+      const schedAction = await select({
+        message: "Schedule management:",
+        options: [
+          { value: "list", label: "List schedules" },
+          { value: "add", label: "Add a schedule" },
+          { value: "remove", label: "Remove a schedule" },
+          { value: "back", label: "\u2190 Back" }
+        ]
+      });
+      if (isCancel(schedAction) || schedAction === "back") continue;
+      if (schedAction === "list") {
+        console.log();
+        await runScheduleList();
+        console.log();
+        await _pause();
+      } else if (schedAction === "add") {
+        const currentFlows = db.listFlows();
+        if (currentFlows.length === 0) {
+          log.warn("No flows to schedule.");
+          continue;
+        }
+        const flowChoice = await select({
+          message: "Which flow?",
+          options: currentFlows.map((f) => ({ value: f.id, label: f.name }))
+        });
+        if (isCancel(flowChoice)) continue;
+        const cron = await text({
+          message: "Cron expression:",
+          placeholder: "0 9 * * *  (daily at 9am)",
+          validate: (v) => !v ? "Required" : void 0
+        });
+        if (isCancel(cron)) continue;
+        await runScheduleAdd(flowChoice, cron);
+      } else if (schedAction === "remove") {
+        const schedules = db.listSchedules();
+        if (schedules.length === 0) {
+          log.warn("No schedules.");
+          continue;
+        }
+        const schedChoice = await select({
+          message: "Which schedule?",
+          options: schedules.map((s) => ({ value: s.id, label: `${s.name} \u2192 ${s.cronExpression}` }))
+        });
+        if (isCancel(schedChoice)) continue;
+        await runScheduleRemove(schedChoice);
+      }
+    } else if (action === "app") {
+      await runDesktopApp();
+    } else if (action === "status") {
+      console.log();
+      await runStatus();
+      console.log();
+      await _pause();
+    }
+  }
+}
+function _pause() {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(import_chalk.default.gray("  Press Enter to continue..."), () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
 var args = process.argv.slice(2);
 var cmd = args[0];
 var db = new DatabaseManager();
 async function main() {
-  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
+  if (!cmd) {
+    await runInteractive();
+    db.close();
+    return;
+  }
+  if (cmd === "help" || cmd === "--help" || cmd === "-h") {
     printLogo();
     divider();
     console.log();
@@ -4971,6 +5621,23 @@ async function main() {
         process.exit(1);
       }
       await runAnalyzeRun(args[1]);
+      break;
+    case "explore":
+      if (!args[1]) {
+        errorMsg("URL required");
+        process.exit(1);
+      }
+      await runExplore(args[1]);
+      break;
+    case "explore:confirm":
+      if (!args[1]) {
+        errorMsg("Report ID required");
+        process.exit(1);
+      }
+      await runExploreConfirm(args[1]);
+      break;
+    case "app":
+      await runDesktopApp();
       break;
     case "status":
       await runStatus();

@@ -1,6 +1,6 @@
 {
   "name": "flowmind",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Memory-driven web automation that learns, replays, and tests flows",
   "main": "flowmind.js",
   "bin": {
@@ -11,12 +11,13 @@
     "start": "node flowmind.js",
     "cli": "node flowmind.js",
     "mcp": "npx tsx mcp-server.ts",
-    "build": "npx esbuild flowmind.ts --platform=node --format=cjs --outfile=flowmind.js --bundle --external:playwright --external:better-sqlite3 --external:chalk --external:uuid --external:@anthropic-ai/sdk && npx esbuild mcp-server.ts --platform=node --format=cjs --outfile=mcp-server.js --bundle --external:playwright --external:better-sqlite3 --external:uuid --external:@anthropic-ai/sdk --external:@modelcontextprotocol/sdk",
+    "build": "npx esbuild flowmind.ts --platform=node --format=cjs --outfile=flowmind.js --bundle --external:playwright --external:better-sqlite3 --external:chalk --external:uuid --external:@anthropic-ai/sdk --external:@clack/prompts && npx esbuild mcp-server.ts --platform=node --format=cjs --outfile=mcp-server.js --bundle --external:playwright --external:better-sqlite3 --external:uuid --external:@anthropic-ai/sdk --external:@modelcontextprotocol/sdk",
     "test": "./TEST-DEMO.sh",
     "demo": "./TEST-DEMO.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
+    "@clack/prompts": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^9.4.3",
     "chalk": "^4.1.2",
