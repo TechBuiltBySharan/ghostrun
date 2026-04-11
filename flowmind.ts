@@ -1200,8 +1200,8 @@ async function runStatus() {
 
 async function runDesktopApp() {
   const { execFile } = await import('child_process');
-  const electronBin = path.join(__dirname, '..', 'node_modules', '.bin', 'electron');
-  const mainJs = path.join(__dirname, '..', 'apps', 'electron', 'main.js');
+  const electronBin = path.join(__dirname, 'node_modules', '.bin', 'electron');
+  const mainJs = path.join(__dirname, 'apps', 'electron', 'main.js');
 
   if (!fs.existsSync(mainJs)) {
     errorMsg('Desktop app not found at: ' + mainJs);
@@ -1212,7 +1212,7 @@ async function runDesktopApp() {
   const child = (execFile as Function)(electronBin, [mainJs], {
     detached: true,
     stdio: 'ignore',
-    cwd: path.join(__dirname, '..'),
+    cwd: __dirname,
   });
   child.unref();
   success('Desktop app launched.');
