@@ -299,16 +299,25 @@ function buildFailurePrompt(ctx: {
   const stepsSummary = ctx.steps.map(s =>
     `  Step ${s.stepNumber} [${s.status}]: ${s.name} (${s.action}${s.selector ? ` on "${s.selector}"` : ''})`
   ).join('\n');
-  return `A web automation flow named "${ctx.flowName}" failed.
+  return `A web automation flow named "${ctx.flowName}" failed during a browser test.
 
-Steps:
+Steps run:
 ${stepsSummary}
 
 Failed step: "${ctx.failedStep.name}"
 Action: ${ctx.failedStep.action}${ctx.failedStep.selector ? ` on selector "${ctx.failedStep.selector}"` : ''}
 Error: ${ctx.failedStep.errorMessage}
 
-In 2-3 sentences, explain what likely went wrong and how to fix it. Be specific and practical.`;
+Respond in exactly this format (no extra text):
+
+WHAT FAILED
+<one sentence describing which step failed and what it was trying to do>
+
+WHY IT FAILED
+<one or two sentences on the likely root cause — selector broken, page changed, timing issue, etc.>
+
+HOW TO FIX IT
+<one or two specific, actionable steps the developer can take right now>`;
 }
 
 // ============================================
@@ -614,7 +623,20 @@ async function executeFlow(flowId: string): Promise<{ passed: boolean; runId: st
   divider();
   if (failed) {
     errorMsg('Flow failed');
-    if (summary) { console.log(); console.log(chalk.yellow('  AI Analysis:')); console.log(chalk.white('  ' + summary.split('\n').join('\n  '))); }
+    if (summary) {
+      console.log();
+      console.log(chalk.bgRed.white.bold('  FAILURE REPORT  '));
+      console.log();
+      for (const line of summary.split('\n')) {
+        const trimmed = line.trim();
+        if (/^(WHAT FAILED|WHY IT FAILED|HOW TO FIX IT)$/.test(trimmed)) {
+          console.log(chalk.yellow.bold('  ' + trimmed));
+        } else if (trimmed) {
+          console.log(chalk.white('    ' + trimmed));
+        }
+      }
+      console.log();
+    }
   } else {
     success(`Flow passed! (${totalDuration}ms)`);
   }
@@ -930,13 +952,48 @@ async function runShowRun(id: string) {
   console.log(chalk.gray('  │ ') + `Status:   ${statusColor(run.status).padEnd(53)}` + chalk.gray('│'));
   console.log(chalk.gray('  │ ') + `Duration: ${(run.duration ? run.duration + 'ms' : '-').padEnd(44)}` + chalk.gray('│'));
   console.log(chalk.gray(`  └${b}┘`));
-  if (run.summary) { console.log(); console.log(chalk.yellow('  AI Analysis:')); console.log(chalk.white('  ' + run.summary.split('\n').join('\n  '))); }
   console.log(chalk.bold('\n  Steps\n'));
   for (const step of steps) {
     const icon = step.status === 'passed' ? chalk.green('✓') : step.status === 'failed' ? chalk.red('✗') : chalk.gray('○');
     console.log(`    ${chalk.gray(String(step.stepNumber).padStart(2))}  ${icon}  ${chalk.white(step.name)} ${chalk.gray(step.duration ? step.duration + 'ms' : '')}`);
     if (step.status === 'failed' && step.errorMessage) console.log(`         ${chalk.red('└─ ' + step.errorMessage.slice(0, 80))}`);
     if (step.screenshotPath) console.log(`         ${chalk.gray('📷 ' + step.screenshotPath)}`);
+  }
+
+  // Show or auto-generate AI analysis for failed runs
+  if (run.status === 'failed') {
+    let summary = run.summary;
+    if (!summary) {
+      process.stdout.write(chalk.gray('\n  Analyzing failure...\n'));
+      const failedStep = steps.find(s => s.status === 'failed');
+      if (failedStep) {
+        const result = await callAI(buildFailurePrompt({
+          flowName: flow?.name || 'Unknown',
+          steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })),
+          failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || 'Unknown error' },
+        }));
+        if (result) {
+          summary = result.text;
+          db.updateRun(run.id, { summary });
+        }
+      }
+    }
+    if (summary) {
+      console.log();
+      console.log(chalk.bgRed.white.bold('  FAILURE REPORT  '));
+      console.log();
+      for (const line of summary.split('\n')) {
+        const trimmed = line.trim();
+        if (/^(WHAT FAILED|WHY IT FAILED|HOW TO FIX IT)$/.test(trimmed)) {
+          console.log(chalk.yellow.bold('  ' + trimmed));
+        } else if (trimmed) {
+          console.log(chalk.white('    ' + trimmed));
+        }
+      }
+    } else {
+      console.log();
+      warn('No AI provider available for analysis. Run Ollama locally or set ANTHROPIC_API_KEY.');
+    }
   }
   console.log();
 }
