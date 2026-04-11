@@ -2,7 +2,7 @@
 
 /**
  * Flowmind CLI — Memory-driven Web Automation
- * v0.3.0
+ * v0.5.0
  */
 
 import { chromium } from 'playwright';
@@ -29,6 +29,7 @@ class DatabaseManager {
     fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
     this.db = new Database(DB_PATH);
     this.initialize();
+    this.runMigrations();
   }
 
   private initialize() {
@@ -60,6 +61,21 @@ class DatabaseManager {
         last_run_at TEXT, last_run_status TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS suites (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS suite_flows (
+        id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, flow_id TEXT NOT NULL,
+        order_index INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (suite_id) REFERENCES suites(id) ON DELETE CASCADE,
+        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS baselines (
+        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, step_number INTEGER NOT NULL,
+        screenshot_path TEXT NOT NULL, captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(flow_id, step_number)
       );
       CREATE TABLE IF NOT EXISTS explore_reports (
         id TEXT PRIMARY KEY, url TEXT NOT NULL, environment TEXT NOT NULL,
@@ -167,12 +183,13 @@ class DatabaseManager {
   listSteps(runId: string) {
     return (this.db.prepare('SELECT * FROM steps WHERE run_id = ? ORDER BY step_number').all(runId) as Record<string, unknown>[]).map(r => this.mapStep(r));
   }
-  updateStep(id: string, data: Partial<{ status: string; duration: number; errorMessage: string; screenshotPath: string }>) {
+  updateStep(id: string, data: Partial<{ status: string; duration: number; errorMessage: string; screenshotPath: string; diffPercent: number }>) {
     const updates: string[] = []; const values: unknown[] = [];
     if (data.status !== undefined) { updates.push('status = ?'); values.push(data.status); }
     if (data.duration !== undefined) { updates.push('duration = ?'); values.push(data.duration); }
     if (data.errorMessage !== undefined) { updates.push('error_message = ?'); values.push(data.errorMessage); }
     if (data.screenshotPath !== undefined) { updates.push('screenshot_path = ?'); values.push(data.screenshotPath); }
+    if (data.diffPercent !== undefined) { updates.push('diff_percent = ?'); values.push(data.diffPercent); }
     values.push(id);
     if (updates.length > 0) this.db.prepare(`UPDATE steps SET ${updates.join(', ')} WHERE id = ?`).run(...values);
     return this.getStep(id);
@@ -181,7 +198,8 @@ class DatabaseManager {
     return { id: r.id as string, runId: r.run_id as string, stepNumber: r.step_number as number,
       name: r.name as string, action: r.action as string, selector: r.selector as string | null,
       value: r.value as string | null, status: r.status as string, duration: r.duration as number | null,
-      errorMessage: r.error_message as string | null, screenshotPath: r.screenshot_path as string | null };
+      errorMessage: r.error_message as string | null, screenshotPath: r.screenshot_path as string | null,
+      diffPercent: r.diff_percent as number | null };
   }
   getScreenshotsPath(runId: string) {
     const dir = path.join(DATA_PATH, 'screenshots', runId);
@@ -211,6 +229,62 @@ class DatabaseManager {
     return { id: r.id as string, flowId: r.flow_id as string, flowName: r.flow_name as string | undefined,
       name: r.name as string, cronExpression: r.cron_expression as string, enabled: Boolean(r.enabled),
       lastRunAt: r.last_run_at ? new Date(r.last_run_at as string) : null, lastRunStatus: r.last_run_status as string | null };
+  }
+
+  // ---- DB migrations ----
+  private runMigrations() {
+    try { this.db.exec('ALTER TABLE steps ADD COLUMN diff_percent REAL'); } catch {}
+  }
+
+  // ---- Suites ----
+  createSuite(data: { name: string; description?: string }) {
+    const id = uuidv4();
+    this.db.prepare(`INSERT INTO suites (id, name, description) VALUES (?, ?, ?)`).run(id, data.name, data.description || null);
+    return this.getSuite(id)!;
+  }
+  getSuite(id: string) {
+    const r = this.db.prepare('SELECT * FROM suites WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? { id: r.id as string, name: r.name as string, description: r.description as string | null, createdAt: new Date(r.created_at as string) } : null;
+  }
+  findSuiteByNameOrId(q: string) {
+    const byId = this.db.prepare('SELECT * FROM suites WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
+    if (byId.length === 1) return this.getSuite(byId[0].id as string);
+    const byName = this.db.prepare('SELECT * FROM suites WHERE LOWER(name) LIKE ?').all(`%${q.toLowerCase()}%`) as Record<string, unknown>[];
+    if (byName.length === 1) return this.getSuite(byName[0].id as string);
+    if (byName.length > 1) return this.getSuite(byName[0].id as string);
+    return null;
+  }
+  listSuites() {
+    return (this.db.prepare('SELECT * FROM suites ORDER BY created_at DESC').all() as Record<string, unknown>[]).map(r => ({ id: r.id as string, name: r.name as string, description: r.description as string | null, createdAt: new Date(r.created_at as string) }));
+  }
+  deleteSuite(id: string) { return this.db.prepare('DELETE FROM suites WHERE id = ?').run(id).changes > 0; }
+  addFlowToSuite(suiteId: string, flowId: string) {
+    const count = (this.db.prepare('SELECT COUNT(*) as c FROM suite_flows WHERE suite_id = ?').get(suiteId) as { c: number }).c;
+    const id = uuidv4();
+    this.db.prepare(`INSERT INTO suite_flows (id, suite_id, flow_id, order_index) VALUES (?, ?, ?, ?)`).run(id, suiteId, flowId, count);
+  }
+  removeFlowFromSuite(suiteId: string, flowId: string) {
+    this.db.prepare('DELETE FROM suite_flows WHERE suite_id = ? AND flow_id = ?').run(suiteId, flowId);
+  }
+  getSuiteFlows(suiteId: string) {
+    return (this.db.prepare('SELECT sf.*, f.name as flow_name FROM suite_flows sf JOIN flows f ON sf.flow_id = f.id WHERE sf.suite_id = ? ORDER BY sf.order_index').all(suiteId) as Record<string, unknown>[]).map(r => ({ id: r.id as string, suiteId: r.suite_id as string, flowId: r.flow_id as string, flowName: r.flow_name as string, orderIndex: r.order_index as number }));
+  }
+
+  // ---- Baselines ----
+  setBaseline(flowId: string, stepNumber: number, screenshotPath: string) {
+    const existing = this.db.prepare('SELECT id FROM baselines WHERE flow_id = ? AND step_number = ?').get(flowId, stepNumber) as { id: string } | undefined;
+    if (existing) {
+      this.db.prepare('UPDATE baselines SET screenshot_path = ?, captured_at = datetime(\'now\') WHERE id = ?').run(screenshotPath, existing.id);
+    } else {
+      this.db.prepare('INSERT INTO baselines (id, flow_id, step_number, screenshot_path) VALUES (?, ?, ?, ?)').run(uuidv4(), flowId, stepNumber, screenshotPath);
+    }
+  }
+  getBaseline(flowId: string, stepNumber: number) {
+    return this.db.prepare('SELECT * FROM baselines WHERE flow_id = ? AND step_number = ?').get(flowId, stepNumber) as { id: string; flow_id: string; step_number: number; screenshot_path: string; captured_at: string } | undefined;
+  }
+  clearBaselines(flowId: string) { this.db.prepare('DELETE FROM baselines WHERE flow_id = ?').run(flowId); }
+  listBaselines(flowId: string) {
+    return (this.db.prepare('SELECT * FROM baselines WHERE flow_id = ? ORDER BY step_number').all(flowId) as Record<string, unknown>[]).map(r => ({ stepNumber: r.step_number as number, screenshotPath: r.screenshot_path as string, capturedAt: new Date(r.captured_at as string) }));
   }
 
   // ---- Explore Reports ----
@@ -496,16 +570,54 @@ const RECORDER_SCRIPT = `
 `;
 
 interface RecordedAction {
-  type: string; selector?: string; value?: string; url?: string; label?: string; timestamp: number;
+  type: string; selector?: string; value?: string; url?: string; label?: string; timestamp: number; assertType?: string;
+}
+
+// ============================================
+// VARIABLES SUPPORT
+// ============================================
+
+function parseVars(argv: string[]): Record<string, string> {
+  const vars: Record<string, string> = {};
+  // Parse --var key=value from argv
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--var' && argv[i + 1]) {
+      const eq = argv[i + 1].indexOf('=');
+      if (eq !== -1) {
+        vars[argv[i + 1].slice(0, eq)] = argv[i + 1].slice(eq + 1);
+      }
+      i++;
+    }
+  }
+  // Also read .flowmind.env from CWD
+  const envFile = path.join(process.cwd(), '.flowmind.env');
+  if (fs.existsSync(envFile)) {
+    const lines = fs.readFileSync(envFile, 'utf8').split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq !== -1) {
+        const key = trimmed.slice(0, eq).trim();
+        const val = trimmed.slice(eq + 1).trim();
+        if (key && !(key in vars)) vars[key] = val; // argv takes precedence
+      }
+    }
+  }
+  return vars;
+}
+
+function resolveVars(text: string, vars: Record<string, string>): string {
+  return text.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] !== undefined ? vars[k] : `{{${k}}}`);
 }
 
 // ============================================
 // COMMANDS — learn
 // ============================================
 
-async function runLearn(url: string) {
+async function runLearn(url: string, nameOverride?: string) {
   printLogo(); divider();
-  let flowName = args[2];
+  let flowName = nameOverride || args[2];
   if (!flowName) { console.log(chalk.cyan('\n  Enter flow name: ')); flowName = await askQuestion('  > '); }
   if (!flowName) { errorMsg('Flow name required'); process.exit(1); }
 
@@ -554,10 +666,57 @@ async function runLearn(url: string) {
 
   browser.on('disconnected', () => { browserClosed = true; });
 
+  // Multi-tab support: capture actions from popups/new tabs
+  context.on('page', async (newPage) => {
+    capturedActions.push({ type: 'navigate', url: newPage.url(), timestamp: Date.now(), label: '[new tab]' });
+    await newPage.exposeFunction('__flowmindRecord', (action: RecordedAction) => {
+      const last = capturedActions[capturedActions.length - 1];
+      if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
+      const tabAction = { ...action, label: action.label ? `[popup] ${action.label}` : action.label };
+      const sanitized = { ...tabAction, value: tabAction.value ? sanitizePII(tabAction.value) : tabAction.value };
+      capturedActions.push(sanitized);
+      process.stdout.write(`  ${chalk.cyan('[popup]')} ${sanitized.type} ${sanitized.label ? chalk.white(`"${sanitized.label}"`) : ''} ${chalk.gray(sanitized.selector || '')}\n`);
+    });
+    await newPage.addInitScript(RECORDER_SCRIPT);
+    newPage.on('framenavigated', (frame) => {
+      if (frame !== newPage.mainFrame()) return;
+      const navUrl = frame.url();
+      if (navUrl === 'about:blank') return;
+      capturedActions.push({ type: 'navigate', url: navUrl, timestamp: Date.now(), label: '[popup nav]' });
+      process.stdout.write(`  ${chalk.cyan('[popup]')} navigate → ${chalk.cyan(navUrl)}\n`);
+    });
+  });
+
   console.log(chalk.bold('  Browser is open — interact with it normally.\n'));
-  console.log(chalk.gray('  Every click, fill, and navigation is captured automatically.\n'));
+  console.log(chalk.gray('  Every click, fill, and navigation is captured automatically.'));
+  console.log(chalk.gray('  Type "a text: Welcome" to add assertion, Enter to stop\n'));
   await page.goto(url);
-  if (!browserClosed) await waitForDone().catch(() => {});
+
+  // Custom readline that supports assertion commands
+  if (!browserClosed) {
+    await new Promise<void>((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      rl.on('line', (line) => {
+        const trimmed = line.trim();
+        if (!trimmed || ['done', 'stop', 'finish'].includes(trimmed.toLowerCase())) {
+          rl.close(); resolve(); return;
+        }
+        // Assertion commands: a text: <val>, a url: <val>, a el: <sel>, a title: <val>
+        const assertMatch = trimmed.match(/^a (text|url|el|title):\s*(.+)$/i);
+        if (assertMatch) {
+          const assertType = assertMatch[1].toLowerCase();
+          const assertValue = assertMatch[2].trim();
+          const typeMap: Record<string, string> = { text: 'assert:text', url: 'assert:url', el: 'assert:element', title: 'assert:title' };
+          const actionType = typeMap[assertType] || `assert:${assertType}`;
+          const isEl = assertType === 'el';
+          const action: RecordedAction = { type: actionType, timestamp: Date.now(), assertType, ...(isEl ? { selector: assertValue } : { value: assertValue }) };
+          capturedActions.push(action);
+          process.stdout.write(`  ${chalk.magenta('✓')} assertion added: ${chalk.yellow(actionType)} ${chalk.white(assertValue)}\n`);
+        }
+      });
+      rl.on('close', () => resolve());
+    }).catch(() => {});
+  }
   if (!browserClosed) await browser.close();
 
   if (capturedActions.length === 0) {
@@ -577,6 +736,10 @@ async function runLearn(url: string) {
     else if (action.type === 'fill') node = { id: nodeId, type: 'action', label: `Fill ${action.selector}`, action: 'fill', selector: action.selector, value: action.value };
     else if (action.type === 'select') node = { id: nodeId, type: 'action', label: `Select "${action.value}" in ${action.selector}`, action: 'select', selector: action.selector, value: action.value };
     else if (action.type === 'check') node = { id: nodeId, type: 'action', label: `${action.value === 'true' ? 'Check' : 'Uncheck'} ${action.selector}`, action: 'check', selector: action.selector, value: action.value };
+    else if (action.type.startsWith('assert:')) {
+      const isEl = action.type === 'assert:element';
+      node = { id: nodeId, type: 'action', label: `Assert ${action.type.replace('assert:', '')} "${isEl ? action.selector : action.value}"`, action: action.type, ...(isEl ? { selector: action.selector } : { value: action.value }) };
+    }
     else return;
     nodes.push(node);
     edges.push({ id: `e${i}`, source: prevId, target: nodeId });
@@ -599,7 +762,7 @@ async function runLearn(url: string) {
 // COMMANDS — run
 // ============================================
 
-async function executeFlow(flowId: string): Promise<{ passed: boolean; runId: string; duration: number }> {
+async function executeFlow(flowId: string, vars?: Record<string, string>): Promise<{ passed: boolean; runId: string; duration: number }> {
   let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
 
@@ -607,6 +770,10 @@ async function executeFlow(flowId: string): Promise<{ passed: boolean; runId: st
   try { graph = JSON.parse(flow.graph); } catch { errorMsg('Invalid graph'); process.exit(1); return { passed: false, runId: '', duration: 0 }; }
 
   if (!graph.nodes?.length) { warn('Empty flow.'); return { passed: false, runId: '', duration: 0 }; }
+
+  if (vars && Object.keys(vars).length > 0) {
+    console.log(chalk.gray('  Variables: ' + Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(', ')));
+  }
 
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
@@ -620,13 +787,29 @@ async function executeFlow(flowId: string): Promise<{ passed: boolean; runId: st
   let failedStepInfo: { name: string; action: string; selector?: string | null; errorMessage: string } | null = null;
   const runStart = Date.now();
 
+  // Load pixelmatch for baseline diffs (optional)
+  let PNG: typeof import('pngjs').PNG | null = null;
+  let pixelmatch: ((img1: Uint8Array, img2: Uint8Array, output: Uint8Array | null, width: number, height: number, options?: object) => number) | null = null;
+  try {
+    const pngjs = await import('pngjs');
+    PNG = pngjs.PNG;
+    pixelmatch = (await import('pixelmatch')).default;
+  } catch { /* optional */ }
+
   for (const node of actionNodes) {
     const label = node.label as string, action = node.action as string;
     console.log(chalk.cyan(`\n  [${stepNum}/${actionNodes.length}] ${label}`));
     const step = db.createStep({ runId: run.id, stepNumber: stepNum, name: label, action, selector: node.selector as string | undefined, value: node.value as string | undefined });
     const t = Date.now();
     try {
-      await executeAction(page, action, node);
+      // Resolve vars in node fields
+      const resolvedNode = vars ? {
+        ...node,
+        url: node.url ? resolveVars(node.url as string, vars) : node.url,
+        value: node.value ? resolveVars(node.value as string, vars) : node.value,
+        selector: node.selector ? resolveVars(node.selector as string, vars) : node.selector,
+      } : node;
+      await executeAction(page, action, resolvedNode);
       // Auto wait-for-nav after clicks — resolves immediately if no navigation occurred
       if (action === 'click') {
         await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
@@ -635,11 +818,55 @@ async function executeFlow(flowId: string): Promise<{ passed: boolean; runId: st
       const screenshot = await page.screenshot();
       const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
       fs.writeFileSync(sp, screenshot);
-      db.updateStep(step.id, { status: 'passed', duration, screenshotPath: sp });
+
+      // Visual baseline diff
+      let diffPercent: number | undefined;
+      const baseline = db.getBaseline(flow!.id, stepNum);
+      if (baseline && PNG && pixelmatch && fs.existsSync(baseline.screenshot_path)) {
+        try {
+          const img1 = PNG.sync.read(fs.readFileSync(baseline.screenshot_path));
+          const img2 = PNG.sync.read(screenshot);
+          const w = Math.min(img1.width, img2.width);
+          const h = Math.min(img1.height, img2.height);
+          const diff = new PNG({ width: w, height: h });
+          const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
+          diffPercent = parseFloat(((numDiff / (w * h)) * 100).toFixed(1));
+          if (diffPercent > 5) {
+            console.log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
+          }
+        } catch { /* skip diff on error */ }
+      }
+
+      db.updateStep(step.id, { status: 'passed', duration, screenshotPath: sp, ...(diffPercent !== undefined ? { diffPercent } : {}) });
+      if (diffPercent !== undefined && diffPercent > 5) {
+        db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
+      }
       console.log(chalk.green(`      ✓ passed (${duration}ms)`));
     } catch (err) {
       const duration = Date.now() - t;
-      const errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      let errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
+
+      // Healing selectors: try AI-suggested selector on click/fill/select failures
+      if (['click', 'fill', 'select'].includes(action)) {
+        const healed = await attemptHeal(page, label, node.selector as string, action);
+        if (healed) {
+          try {
+            const healedNode = { ...node, selector: healed };
+            await executeAction(page, action, healedNode);
+            if (action === 'click') await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+            const healDuration = Date.now() - t;
+            const screenshot = await page.screenshot();
+            const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
+            fs.writeFileSync(sp, screenshot);
+            console.log(chalk.yellow(`      ~ healed selector: ${healed}`));
+            db.updateStep(step.id, { status: 'passed', duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
+            console.log(chalk.green(`      ✓ passed after heal (${healDuration}ms)`));
+            stepNum++;
+            continue;
+          } catch { /* healing also failed, fall through */ }
+        }
+      }
+
       try {
         const screenshot = await page.screenshot();
         const sp = path.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
@@ -708,15 +935,119 @@ async function executeAction(page: import('playwright').Page, action: string, no
       break;
     case 'wait':     await page.waitForSelector(node.selector as string, { timeout: 10000 }); break;
     case 'press':    await page.press(node.selector as string, (node.value as string) || 'Enter'); break;
+    case 'assert:text': {
+      // Use first() to handle multiple matches, or fall back to body text check
+      const val = node.value as string;
+      const count = await page.getByText(val, { exact: false }).count();
+      const visible = count > 0
+        ? await page.getByText(val, { exact: false }).first().isVisible({ timeout: 5000 }).catch(() => false)
+        : false;
+      if (!visible) {
+        // Final fallback: check raw body text
+        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+        if (!bodyText.includes(val)) throw new Error(`assert:text failed — "${val}" not visible on page`);
+      }
+      break;
+    }
+    case 'assert:url': {
+      const currentUrl = page.url();
+      if (!currentUrl.includes(node.value as string)) throw new Error(`assert:url failed — URL "${currentUrl}" does not contain "${node.value}"`);
+      break;
+    }
+    case 'assert:element': {
+      const count = await page.locator(node.selector as string).count();
+      if (count === 0) throw new Error(`assert:element failed — selector "${node.selector}" not found`);
+      break;
+    }
+    case 'assert:title': {
+      const title = await page.title();
+      if (!title.toLowerCase().includes((node.value as string).toLowerCase())) throw new Error(`assert:title failed — title "${title}" does not contain "${node.value}"`);
+      break;
+    }
+    case 'assert:no-errors': {
+      // Checked via console error tracking; just passes by default here
+      break;
+    }
   }
 }
 
-async function runFlow(id: string) {
+// ============================================
+// HEALING SELECTORS
+// ============================================
+
+async function attemptHeal(page: import('playwright').Page, label: string, selector: string, _action: string): Promise<string | null> {
+  if (!selector) return null;
+  process.stdout.write(chalk.yellow('      ~ attempting selector heal...\n'));
+
+  // Strategy 1: Text-based heuristics — extract meaningful words from label
+  // e.g. "Click Login link" → "Login", "Fill email field" → "email"
+  const cleaned = label
+    .replace(/^(click|tap|press|fill|type in|type|select|check|uncheck|submit|go to|navigate to)\s+/i, '')
+    .replace(/\s+(link|button|field|input|checkbox|dropdown|option|element|btn|tab|menu|item)$/i, '')
+    .trim();
+
+  const textCandidates: Array<[string, string]> = [
+    [`a:has-text("${cleaned}")`, 'text-link'],
+    [`button:has-text("${cleaned}")`, 'text-button'],
+    [`:has-text("${cleaned}") >> visible=true`, 'text-any'],
+    // Try partial label words
+    ...cleaned.split(/\s+/).filter(w => w.length > 2).slice(0, 3).flatMap(word => [
+      [`a:has-text("${word}")`, 'word-link'],
+      [`button:has-text("${word}")`, 'word-button'],
+    ] as Array<[string, string]>),
+  ];
+
+  for (const [candidate, strategy] of textCandidates) {
+    try {
+      const count = await page.locator(candidate).count();
+      if (count > 0) {
+        process.stdout.write(chalk.yellow(`      ~ healed via ${strategy}: ${candidate}\n`));
+        return candidate;
+      }
+    } catch { /* invalid selector syntax, skip */ }
+  }
+
+  // Strategy 2: AI-based heal (only if AI available)
+  const hasAI = !!(await isOllamaRunning()) || !!process.env.ANTHROPIC_API_KEY;
+  if (!hasAI) return null;
+  try {
+    const pageTitle = await page.title().catch(() => '');
+    const elementsHtml = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"]'));
+      return els.slice(0, 30).map(el => {
+        const attrs = Array.from(el.attributes).map(a => `${a.name}="${a.value}"`).join(' ');
+        const text = (el as HTMLElement).innerText?.trim().slice(0, 40) || '';
+        return `<${el.tagName.toLowerCase()} ${attrs}>${text}</${el.tagName.toLowerCase()}>`;
+      }).join('\n');
+    }).catch(() => '');
+
+    const prompt = `Given these interactive elements on a web page, return ONLY the CSS selector (no explanation) for: "${label}"
+
+Page: ${pageTitle}
+Elements:
+${elementsHtml}
+
+Return just the selector, like: a[href="/login"]`;
+
+    const result = await callAI(prompt);
+    if (result?.text) {
+      const healed = result.text.trim().replace(/^['"`]|['"`]$/g, '').split('\n')[0].trim();
+      if (healed && !healed.includes(' ') && healed.length < 100) {
+        // Validate it actually finds something on page
+        const count = await page.locator(healed).count().catch(() => 0);
+        if (count > 0) return healed;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function runFlow(id: string, vars?: Record<string, string>) {
   printLogo(); divider();
   let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
   console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + '\n');
-  await executeFlow(id);
+  await executeFlow(id, vars);
 }
 
 // ============================================
@@ -771,6 +1102,9 @@ async function runFixFlow(id: string) {
       const msg = err instanceof Error ? err.message.split('\n')[0] : String(err);
       console.log(chalk.red(`      ✗ failed: ${msg}`));
       console.log(chalk.yellow(`\n      Current selector: ${chalk.white(node.selector || '(none)')}`));
+      // Show AI healing suggestion
+      const aiSuggestion = await attemptHeal(page, node.label as string, node.selector as string, node.action as string);
+      if (aiSuggestion) console.log(chalk.yellow(`      AI suggests: ${chalk.white(aiSuggestion)}`));
       console.log(chalk.yellow('      Click the correct element in the browser...'));
 
       // Highlight broken element area if possible
@@ -1005,8 +1339,11 @@ async function runShowRun(id: string) {
   console.log(chalk.bold('\n  Steps\n'));
   for (const step of steps) {
     const icon = step.status === 'passed' ? chalk.green('✓') : step.status === 'failed' ? chalk.red('✗') : chalk.gray('○');
-    console.log(`    ${chalk.gray(String(step.stepNumber).padStart(2))}  ${icon}  ${chalk.white(step.name)} ${chalk.gray(step.duration ? step.duration + 'ms' : '')}`);
-    if (step.status === 'failed' && step.errorMessage) console.log(`         ${chalk.red('└─ ' + step.errorMessage.slice(0, 80))}`);
+    const diffStr = step.diffPercent && step.diffPercent > 0 ? chalk.yellow(` ~${step.diffPercent}%`) : '';
+    console.log(`    ${chalk.gray(String(step.stepNumber).padStart(2))}  ${icon}  ${chalk.white(step.name)} ${chalk.gray(step.duration ? step.duration + 'ms' : '')}${diffStr}`);
+    if (step.errorMessage && step.errorMessage.startsWith('[DIFF:')) console.log(`         ${chalk.yellow('└─ ' + step.errorMessage)}`);
+    else if (step.errorMessage && step.errorMessage.startsWith('[HEALED:')) console.log(`         ${chalk.yellow('└─ ' + step.errorMessage)}`);
+    else if (step.status === 'failed' && step.errorMessage) console.log(`         ${chalk.red('└─ ' + step.errorMessage.slice(0, 80))}`);
     if (step.screenshotPath) console.log(`         ${chalk.gray('📷 ' + step.screenshotPath)}`);
   }
 
@@ -1683,6 +2020,351 @@ async function runExploreConfirm(reportId: string) {
 }
 
 // ============================================
+// COMMANDS — test suites
+// ============================================
+
+async function runSuiteCreate(name: string) {
+  const suite = db.createSuite({ name });
+  success(`Suite created: ${chalk.white(suite.name)}`);
+  info('ID: ' + chalk.gray(suite.id.slice(0, 8)));
+  console.log();
+}
+
+async function runSuiteAdd(suiteName: string, flowName: string) {
+  const suite = db.findSuiteByNameOrId(suiteName);
+  if (!suite) { errorMsg('Suite not found: ' + suiteName); process.exit(1); }
+  const flow = db.findFlowByPartialId(flowName) || db.findFlowByName(flowName);
+  if (!flow) { errorMsg('Flow not found: ' + flowName); process.exit(1); }
+  db.addFlowToSuite(suite.id, flow.id);
+  success(`Added "${flow.name}" to suite "${suite.name}"`);
+  console.log();
+}
+
+async function runSuiteList() {
+  const suites = db.listSuites();
+  console.log(chalk.bold('\n  Test Suites\n'));
+  if (suites.length === 0) { warn('No suites. Create one: ' + chalk.cyan('node flowmind.js suite:create <name>')); console.log(); return; }
+  console.log(chalk.gray('  ID        Name                          Flows'));
+  console.log(chalk.gray('  ' + '─'.repeat(50)));
+  for (const suite of suites) {
+    const flows = db.getSuiteFlows(suite.id);
+    console.log(`  ${chalk.gray(suite.id.slice(0, 8))} ${chalk.white(suite.name.padEnd(28).slice(0, 28))} ${chalk.gray(String(flows.length))}`);
+  }
+  console.log();
+}
+
+async function runSuiteShow(name: string) {
+  const suite = db.findSuiteByNameOrId(name);
+  if (!suite) { errorMsg('Suite not found: ' + name); process.exit(1); }
+  const flows = db.getSuiteFlows(suite.id);
+  console.log(chalk.bold(`\n  Suite: ${suite.name}\n`));
+  if (flows.length === 0) { warn('No flows in this suite.'); console.log(); return; }
+  console.log(chalk.gray('  #   Flow Name'));
+  console.log(chalk.gray('  ' + '─'.repeat(44)));
+  flows.forEach((f, i) => console.log(`  ${chalk.gray(String(i + 1).padStart(2))}  ${chalk.white(f.flowName)}`));
+  console.log();
+}
+
+async function runSuiteRun(name: string, vars?: Record<string, string>) {
+  printLogo(); divider();
+  const suite = db.findSuiteByNameOrId(name);
+  if (!suite) { errorMsg('Suite not found: ' + name); process.exit(1); }
+  const flows = db.getSuiteFlows(suite.id);
+  if (flows.length === 0) { warn('No flows in this suite.'); return; }
+
+  console.log(chalk.bold(`\n  Suite: ${suite.name}\n`));
+  const lineWidth = 45;
+  console.log(chalk.gray('  ' + '─'.repeat(lineWidth)));
+
+  const results: Array<{ index: number; name: string; passed: boolean; duration: number; error?: string }> = [];
+  const suiteStart = Date.now();
+
+  for (let i = 0; i < flows.length; i++) {
+    const sf = flows[i];
+    process.stdout.write(`   ${chalk.gray(String(i + 1))}  ${chalk.white(sf.flowName.padEnd(22).slice(0, 22))}  `);
+    try {
+      const result = await executeFlow(sf.flowId, vars);
+      const dur = result.duration;
+      process.stdout.write(result.passed ? chalk.green('✓') : chalk.red('✗'));
+      process.stdout.write('  ' + chalk.gray(dur + 'ms') + '\n');
+      results.push({ index: i + 1, name: sf.flowName, passed: result.passed, duration: dur });
+    } catch (err) {
+      process.stdout.write(chalk.red('✗') + '  ' + chalk.gray('error') + '\n');
+      results.push({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) });
+    }
+  }
+
+  const totalDuration = Date.now() - suiteStart;
+  const passed = results.filter(r => r.passed).length;
+  const failed = results.length - passed;
+
+  console.log(chalk.gray('  ' + '─'.repeat(lineWidth)));
+  console.log();
+  console.log(`  ${chalk.green(passed + '/' + results.length + ' passed')}  · Total: ${chalk.gray((totalDuration / 1000).toFixed(1) + 's')}`);
+  console.log();
+
+  if (failed > 0) {
+    console.log(chalk.bold('  Failed:'));
+    results.filter(r => !r.passed).forEach(r => console.log(`    ${chalk.red('✗')} ${chalk.white(r.name)}${r.error ? ' — ' + chalk.gray(r.error.slice(0, 60)) : ''}`));
+    console.log();
+    process.exitCode = 1;
+  }
+}
+
+// ============================================
+// COMMANDS — baselines
+// ============================================
+
+async function runBaselineSet(id: string) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
+
+  info(`Setting baselines for: ${chalk.white(flow.name)}`);
+  const result = await executeFlow(flow.id);
+  if (!result.runId) { errorMsg('Flow run failed, no baselines set.'); return; }
+
+  const steps = db.listSteps(result.runId);
+  let count = 0;
+  const baselinesDir = path.join(DATA_PATH, 'baselines', flow.id);
+  fs.mkdirSync(baselinesDir, { recursive: true });
+
+  for (const step of steps) {
+    if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
+      const dest = path.join(baselinesDir, `step-${step.stepNumber}.png`);
+      fs.copyFileSync(step.screenshotPath, dest);
+      db.setBaseline(flow.id, step.stepNumber, dest);
+      count++;
+    }
+  }
+  success(`Baseline set: ${count} screenshots saved`);
+  info(`Path: ${chalk.cyan(baselinesDir)}`);
+  console.log();
+}
+
+async function runBaselineClear(id: string) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
+  db.clearBaselines(flow.id);
+  success(`Baselines cleared for: ${chalk.white(flow.name)}`);
+  console.log();
+}
+
+async function runBaselineShow(id: string) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
+  const baselines = db.listBaselines(flow.id);
+  console.log(chalk.bold(`\n  Baselines: ${flow.name}\n`));
+  if (baselines.length === 0) { warn('No baselines. Run: ' + chalk.cyan('node flowmind.js baseline:set ' + id)); console.log(); return; }
+  for (const b of baselines) {
+    console.log(`  Step ${chalk.gray(String(b.stepNumber).padStart(2))}  ${chalk.cyan(b.screenshotPath)}  ${chalk.gray(b.capturedAt.toLocaleDateString())}`);
+  }
+  console.log();
+}
+
+// ============================================
+// COMMANDS — natural language create
+// ============================================
+
+async function runCreate(description?: string) {
+  printLogo(); divider();
+
+  if (!description) {
+    description = await askQuestion(chalk.cyan('\n  Describe the automation flow: '));
+    if (!description) { errorMsg('Description required'); process.exit(1); }
+  }
+
+  const baseUrl = await askQuestion(chalk.cyan('  Base URL for this flow (e.g. http://localhost:3000): '));
+  if (!baseUrl) { errorMsg('Base URL required'); process.exit(1); }
+
+  const hasAI = !!(await isOllamaRunning()) || !!process.env.ANTHROPIC_API_KEY;
+  if (!hasAI) { errorMsg('No AI provider available. Run Ollama locally or set ANTHROPIC_API_KEY.'); process.exit(1); }
+
+  info('Generating flow from description...');
+
+  const prompt = `Convert this automation test description into a Playwright test flow.
+
+Description: "${description}"
+Base URL: "${baseUrl}"
+
+Output ONLY a valid JSON array of steps, no other text:
+[
+  {"name": "Step name", "action": "navigate|click|fill|select|assert:text|assert:url|assert:element", "url": "...", "selector": "...", "value": "..."}
+]
+
+Rules:
+- Use "navigate" for page navigation (include full URL)
+- Use "click" for button/link clicks (guess a reasonable selector)
+- Use "fill" for text inputs (include the test value)
+- Use "assert:text" to verify text appears on page
+- Use "assert:url" to verify URL contains a string
+- Only include fields relevant to each action
+- selector and url fields must be CSS selectors or full URLs`;
+
+  const result = await callAI(prompt);
+  if (!result) { errorMsg('AI failed to generate flow.'); process.exit(1); }
+
+  let steps: Array<{ name: string; action: string; url?: string; selector?: string; value?: string }>;
+  try {
+    const cleaned = result.text.replace(/```json\n?|\n?```/g, '').trim();
+    steps = JSON.parse(cleaned);
+    if (!Array.isArray(steps)) throw new Error('Not an array');
+  } catch {
+    errorMsg('AI returned invalid JSON. Try again with a clearer description.');
+    console.log(chalk.gray('  AI response: ' + result.text.slice(0, 200)));
+    process.exit(1);
+    return;
+  }
+
+  // Extract flow name from description
+  const flowName = description.slice(0, 50).replace(/[^a-zA-Z0-9 ]/g, '').trim() || 'Generated Flow';
+
+  const nodes: object[] = [{ id: 'start', type: 'start', label: 'Start', url: baseUrl }];
+  const edges: object[] = [];
+  let prevId = 'start';
+
+  steps.forEach((step, i) => {
+    const nodeId = `step-${i + 1}`;
+    const node: Record<string, unknown> = { id: nodeId, type: 'action', label: step.name, action: step.action };
+    if (step.url) node.url = step.url;
+    if (step.selector) node.selector = step.selector;
+    if (step.value) node.value = step.value;
+    nodes.push(node);
+    edges.push({ id: `e${i}`, source: prevId, target: nodeId });
+    prevId = nodeId;
+  });
+
+  nodes.push({ id: 'end', type: 'end', label: 'End' });
+  edges.push({ id: `e${steps.length}`, source: prevId, target: 'end' });
+
+  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl } });
+
+  divider();
+  success(`Flow created: ${chalk.white(flowName)}`);
+  info(`Steps: ${chalk.white(String(steps.length))}`);
+  info(`Run with: ${chalk.green('node flowmind.js run ' + flow.id.slice(0, 8))}`);
+  console.log();
+}
+
+// ============================================
+// COMMANDS — code:scan
+// ============================================
+
+async function runCodeScan(dir: string) {
+  printLogo(); divider();
+  if (!fs.existsSync(dir)) { errorMsg('Directory not found: ' + dir); process.exit(1); }
+
+  info(`Scanning: ${chalk.cyan(dir)}`);
+
+  // Detect framework
+  let framework = 'Generic';
+  if (fs.existsSync(path.join(dir, 'next.config.js')) || fs.existsSync(path.join(dir, 'next.config.ts'))) {
+    framework = 'Next.js';
+  } else if (fs.existsSync(path.join(dir, 'package.json'))) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      if (pkg.dependencies?.express || pkg.devDependencies?.express) framework = 'Express';
+    } catch {}
+  }
+  info(`Framework: ${chalk.cyan(framework)}`);
+
+  const routes: string[] = [];
+
+  if (framework === 'Next.js') {
+    // Walk app/ or pages/ directory
+    const appDir = path.join(dir, 'app');
+    const pagesDir = path.join(dir, 'pages');
+    const rootDir = fs.existsSync(appDir) ? appDir : fs.existsSync(pagesDir) ? pagesDir : null;
+    if (rootDir) {
+      const walkDir = (d: string, base: string) => {
+        for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+          const full = path.join(d, entry.name);
+          if (entry.isDirectory()) { walkDir(full, base); continue; }
+          if (/^(page|route)\.(tsx?|jsx?)$/.test(entry.name)) {
+            const rel = path.dirname(full).replace(base, '').replace(/\\/g, '/') || '/';
+            const route = rel || '/';
+            if (!routes.includes(route)) routes.push(route);
+          }
+        }
+      };
+      walkDir(rootDir, rootDir);
+    }
+  } else if (framework === 'Express') {
+    // Grep for route patterns
+    const walkFiles = (d: string): string[] => {
+      const files: string[] = [];
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory() && !['node_modules', '.git', 'dist', 'build'].includes(entry.name)) { files.push(...walkFiles(full)); }
+        else if (entry.isFile() && /\.(js|ts)$/.test(entry.name)) files.push(full);
+      }
+      return files;
+    };
+    for (const file of walkFiles(dir)) {
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        const matches = content.matchAll(/(?:app|router)\.\w+\(['"]([/][^'"]*)['"]/g);
+        for (const m of matches) { if (!routes.includes(m[1])) routes.push(m[1]); }
+      } catch {}
+    }
+  } else {
+    // Generic: grep all JS/TS files for URL-like patterns
+    const walkFiles = (d: string): string[] => {
+      const files: string[] = [];
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory() && !['node_modules', '.git', 'dist', 'build'].includes(entry.name)) { files.push(...walkFiles(full)); }
+        else if (entry.isFile() && /\.(js|ts|tsx|jsx)$/.test(entry.name)) files.push(full);
+      }
+      return files;
+    };
+    for (const file of walkFiles(dir)) {
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        const matches = content.matchAll(/['"]([/][a-z][a-z0-9\-/]*)['"]/gi);
+        for (const m of matches) { if (!routes.includes(m[1])) routes.push(m[1]); }
+      } catch {}
+    }
+  }
+
+  if (routes.length === 0) {
+    warn('No routes discovered. Try a different directory or framework.');
+    return;
+  }
+
+  const baseUrl = await askQuestion(chalk.cyan('\n  Base URL for this app? (e.g. http://localhost:3000): '));
+  if (!baseUrl) { errorMsg('Base URL required'); process.exit(1); }
+
+  console.log(chalk.bold('\n  Discovered Routes\n'));
+  console.log(chalk.gray('  Route                          Flow'));
+  console.log(chalk.gray('  ' + '─'.repeat(55)));
+
+  let created = 0;
+  for (const route of routes.slice(0, 50)) {
+    const fullUrl = baseUrl.replace(/\/$/, '') + route;
+    const flowName = `Check ${route}`;
+    const nodes = [
+      { id: 'start', type: 'start', label: 'Start', url: fullUrl },
+      { id: 'step-1', type: 'action', label: `Navigate to ${route}`, action: 'navigate', url: fullUrl },
+      { id: 'step-2', type: 'action', label: `Assert URL contains ${route}`, action: 'assert:url', value: route },
+      { id: 'end', type: 'end', label: 'End' },
+    ];
+    const edges = [
+      { id: 'e0', source: 'start', target: 'step-1' },
+      { id: 'e1', source: 'step-1', target: 'step-2' },
+      { id: 'e2', source: 'step-2', target: 'end' },
+    ];
+    db.createFlow({ name: flowName, appUrl: fullUrl, graph: { nodes, edges, appUrl: fullUrl } });
+    created++;
+    console.log(`  ${chalk.white(route.padEnd(30))} ${chalk.green('✓ ' + flowName)}`);
+  }
+
+  console.log();
+  success(`Found ${routes.length} routes → created ${created} draft flows`);
+  info(`Run: ${chalk.green('node flowmind.js flow:list')}`);
+  console.log();
+}
+
+// ============================================
 // INTERACTIVE MODE
 // ============================================
 
@@ -1716,6 +2398,7 @@ async function runInteractive() {
       options: [
         { value: 'run',      label: '▶  Run a flow',              hint: flows.length > 0 ? `${flows.length} saved` : 'no flows yet' },
         { value: 'record',   label: '⏺  Record a new flow',       hint: 'opens real browser' },
+        { value: 'suite',    label: '🧪 Run a test suite',          hint: 'run multiple flows' },
         { value: 'reports',  label: '📋 View run reports',         hint: runs.length > 0 ? `${runs.length} runs` : 'no runs yet' },
         { value: 'explore',  label: '🔍 Explore a URL',            hint: 'auto-discover flows with AI' },
         { value: 'schedule', label: '🕐 Manage schedules',         hint: 'cron-based automation' },
@@ -1771,6 +2454,25 @@ async function runInteractive() {
 
       console.log();
       await runLearn(url as string, name as string);
+    }
+
+    // ── SUITE ───────────────────────────────────────────────
+    else if (action === 'suite') {
+      const suites = db.listSuites();
+      if (suites.length === 0) {
+        log.warn('No suites. Create one with: node flowmind.js suite:create <name>');
+        continue;
+      }
+      const { select: sel2, isCancel: isCan2 } = await import('@clack/prompts');
+      const suiteChoice = await sel2({
+        message: 'Which suite?',
+        options: suites.map(s => ({ value: s.id, label: s.name })),
+      });
+      if (isCan2(suiteChoice)) continue;
+      console.log();
+      await runSuiteRun(suiteChoice as string);
+      console.log();
+      await _pause();
     }
 
     // ── REPORTS ─────────────────────────────────────────────
@@ -1889,6 +2591,7 @@ function _pause(): Promise<void> {
 
 const args = process.argv.slice(2);
 const cmd = args[0];
+const globalVars = parseVars(process.argv.slice(2));
 const db = new DatabaseManager();
 
 async function main() {
@@ -1906,7 +2609,8 @@ async function main() {
     const pad = 36;
     console.log(`  ${C('init').padEnd(pad)}${G('Initialize Flowmind')}`);
     console.log(`  ${C('learn <url> [name]').padEnd(pad)}${G('Record a flow (real browser)')}`);
-    console.log(`  ${C('run <id|name>').padEnd(pad)}${G('Execute a flow')}`);
+    console.log(`  ${C('run <id|name> [--var k=v]').padEnd(pad)}${G('Execute a flow (supports variables)')}`);
+    console.log(`  ${C('create [description]').padEnd(pad)}${G('Create flow from natural language [AI]')}`);
     console.log(`  ${C('flow:list').padEnd(pad)}${G('List all flows')}`);
     console.log(`  ${C('flow:fix <id|name>').padEnd(pad)}${G('Repair broken selectors interactively')}`);
     console.log(`  ${C('flow:delete <id|name>').padEnd(pad)}${G('Delete a flow')}`);
@@ -1916,13 +2620,23 @@ async function main() {
     console.log(`  ${C('schedule:list').padEnd(pad)}${G('List all schedules')}`);
     console.log(`  ${C('schedule:remove <id>').padEnd(pad)}${G('Remove a schedule')}`);
     console.log(`  ${C('serve').padEnd(pad)}${G('Start scheduler daemon')}`);
+    console.log(`  ${C('suite:create <name>').padEnd(pad)}${G('Create a test suite')}`);
+    console.log(`  ${C('suite:add <suite> <flow>').padEnd(pad)}${G('Add a flow to a suite')}`);
+    console.log(`  ${C('suite:list').padEnd(pad)}${G('List all suites')}`);
+    console.log(`  ${C('suite:show <suite>').padEnd(pad)}${G('Show flows in a suite')}`);
+    console.log(`  ${C('suite:run <suite> [--var k=v]').padEnd(pad)}${G('Run all flows in a suite')}`);
+    console.log(`  ${C('baseline:set <flow-id>').padEnd(pad)}${G('Capture visual baseline screenshots')}`);
+    console.log(`  ${C('baseline:clear <flow-id>').padEnd(pad)}${G('Clear baselines for a flow')}`);
+    console.log(`  ${C('baseline:show <flow-id>').padEnd(pad)}${G('List baseline screenshots')}`);
     console.log(`  ${C('run:list').padEnd(pad)}${G('List recent runs')}`);
     console.log(`  ${C('run:show <id>').padEnd(pad)}${G('Show run details + screenshots')}`);
     console.log(`  ${C('run:diff <id1> <id2>').padEnd(pad)}${G('Visual screenshot diff between two runs')}`);
     console.log(`  ${C('run:analyze <id>').padEnd(pad)}${G('AI analysis of a failed run [AI]')}`);
+    console.log(`  ${C('code:scan <directory>').padEnd(pad)}${G('Scan codebase and create draft flows')}`);
     console.log(`  ${C('status').padEnd(pad)}${G('Statistics and AI provider info')}`);
     console.log();
     console.log(`  ${G('[AI] = enhanced by AI if available (Ollama local or Anthropic cloud)')}`);
+    console.log(`  ${G('Variables: --var key=value  or  .flowmind.env file in CWD')}`);
     console.log();
     process.exit(0);
   }
@@ -1934,7 +2648,7 @@ async function main() {
       await runLearn(args[1]); break;
     case 'run':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
-      await runFlow(args[1]); break;
+      await runFlow(args[1], globalVars); break;
     case 'flow:list':       await runListFlows(); break;
     case 'flow:fix':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
@@ -1974,6 +2688,32 @@ async function main() {
       await runExploreConfirm(args[1]); break;
     case 'app':             await runDesktopApp(); break;
     case 'status':          await runStatus(); break;
+    case 'suite:create':
+      if (!args[1]) { errorMsg('Suite name required'); process.exit(1); }
+      await runSuiteCreate(args[1]); break;
+    case 'suite:add':
+      if (!args[1] || !args[2]) { errorMsg('Usage: suite:add <suite> <flow>'); process.exit(1); }
+      await runSuiteAdd(args[1], args[2]); break;
+    case 'suite:list':      await runSuiteList(); break;
+    case 'suite:show':
+      if (!args[1]) { errorMsg('Suite name or ID required'); process.exit(1); }
+      await runSuiteShow(args[1]); break;
+    case 'suite:run':
+      if (!args[1]) { errorMsg('Suite name or ID required'); process.exit(1); }
+      await runSuiteRun(args[1], globalVars); break;
+    case 'baseline:set':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runBaselineSet(args[1]); break;
+    case 'baseline:clear':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runBaselineClear(args[1]); break;
+    case 'baseline:show':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runBaselineShow(args[1]); break;
+    case 'create':          await runCreate(args[1]); break;
+    case 'code:scan':
+      if (!args[1]) { errorMsg('Directory required'); process.exit(1); }
+      await runCodeScan(args[1]); break;
     default:
       errorMsg('Unknown command: ' + cmd);
       console.log('  Run without args for help.');
