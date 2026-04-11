@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flowmind Test Report</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; padding: 40px; }
+    .container { max-width: 900px; margin: 0 auto; }
+    h1 { color: #667eea; margin-bottom: 30px; text-align: center; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+    .summary-card { background: white; padding: 20px; border-radius: 12px; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+    .summary-value { font-size: 2.5em; font-weight: bold; color: #667eea; }
+    .summary-label { color: #666; margin-top: 5px; }
+    .test { background: white; border-radius: 12px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+    .test-header { padding: 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; }
+    .test-name { font-size: 1.2em; font-weight: 600; }
+    .status { padding: 6px 16px; border-radius: 20px; font-weight: 600; font-size: 0.9em; }
+    .status.passed { background: #dcfce7; color: #16a34a; }
+    .status.failed { background: #fee2e2; color: #dc2626; }
+    .steps { padding: 20px; }
+    .step { display: flex; align-items: flex-start; gap: 15px; padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
+    .step:last-child { border-bottom: none; }
+    .step-icon { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8em; }
+    .step-icon.passed { background: #dcfce7; color: #16a34a; }
+    .step-icon.failed { background: #fee2e2; color: #dc2626; }
+    .step-content { flex: 1; }
+    .step-name { font-weight: 500; }
+    .step-duration { color: #888; font-size: 0.85em; }
+    .step-error { color: #dc2626; font-size: 0.9em; margin-top: 5px; }
+    .screenshot { max-width: 100%; border-radius: 8px; margin-top: 10px; border: 1px solid #eee; }
+    .footer { text-align: center; color: #888; margin-top: 40px; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧠 Flowmind Test Report</h1>
+    
+    <div class="summary">
+      <div class="summary-card">
+        <div class="summary-value">2</div>
+        <div class="summary-label">Total Tests</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-value" style="color: #16a34a">2</div>
+        <div class="summary-label">Passed</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-value" style="color: #dc2626">0</div>
+        <div class="summary-label">Failed</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-value">100%</div>
+        <div class="summary-label">Success Rate</div>
+      </div>
+    </div>
+
+    
+    <div class="test">
+      <div class="test-header">
+        <div class="test-name">Login Flow</div>
+        <div class="status passed">PASSED</div>
+      </div>
+      <div class="steps">
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Navigate to login</div>
+            <div class="step-duration">43ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-1-navigate-to-login.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill email</div>
+            <div class="step-duration">27ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-2-fill-email.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill phone</div>
+            <div class="step-duration">5ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-3-fill-phone.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill password</div>
+            <div class="step-duration">31ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-4-fill-password.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Wait for submit button</div>
+            <div class="step-duration">6ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-5-wait-for-submit-button.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Click submit</div>
+            <div class="step-duration">45ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-6-click-submit.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Verify dashboard</div>
+            <div class="step-duration">1ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/step-7-verify-dashboard.png" alt="Screenshot">
+          </div>
+        </div>
+        
+      </div>
+    </div>
+    
+    <div class="test">
+      <div class="test-header">
+        <div class="test-name">Failed Login Flow</div>
+        <div class="status passed">PASSED</div>
+      </div>
+      <div class="steps">
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Navigate to login</div>
+            <div class="step-duration">4ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-1-navigate-to-login.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill email</div>
+            <div class="step-duration">4ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-2-fill-email.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill phone</div>
+            <div class="step-duration">2ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-3-fill-phone.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Fill wrong password</div>
+            <div class="step-duration">31ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-4-fill-wrong-password.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Wait for submit button</div>
+            <div class="step-duration">3ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-5-wait-for-submit-button.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Click submit</div>
+            <div class="step-duration">36ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-6-click-submit.png" alt="Screenshot">
+          </div>
+        </div>
+        
+        <div class="step">
+          <div class="step-icon passed">✓</div>
+          <div class="step-content">
+            <div class="step-name">Verify error message</div>
+            <div class="step-duration">2ms</div>
+            
+            <img class="screenshot" src="file:///Volumes/DevAPFS/FlowMind/flowmind/mock-app/test-output/fail-7-verify-error-message.png" alt="Screenshot">
+          </div>
+        </div>
+        
+      </div>
+    </div>
+    
+
+    <div class="footer">
+      Generated by Flowmind • 4/11/2026, 11:44:08 AM
+    </div>
+  </div>
+</body>
+</html>

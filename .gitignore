@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.turbo/
+.vite/
+.env
+*.log
+.DS_Store
+
+# Data directories (created at runtime)
+.data/
+.flowmind/
+
+# Build outputs
+*.tsbuildinfo
+.rustfmt.toml
+*.mjs
+
+# IDE
+.idea/
+.vscode/
+*.swp

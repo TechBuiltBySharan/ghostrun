@@ -1,0 +1,38 @@
+{
+  "name": "@flowmind/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "flowmind": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "tsx src/cli.ts flow:list"
+  },
+  "dependencies": {
+    "@flowmind/core": "workspace:*",
+    "@flowmind/database": "workspace:*",
+    "@flowmind/memory": "workspace:*",
+    "@flowmind/executor": "workspace:*",
+    "@flowmind/reporting": "workspace:*",
+    "@flowmind/privacy": "workspace:*",
+    "@flowmind/adapters-web": "workspace:*",
+    "chalk": "^5.3.0",
+    "commander": "^11.1.0",
+    "ora": "^8.0.1",
+    "figlet": "^1.7.0",
+    "figures": "^5.0.0",
+    "cli-table3": "^0.6.3",
+    "playwright": "^1.41.0",
+    "listr2": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/figlet": "^1.5.8",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@flowmind/desktop-viewer",
+  "version": "0.1.0",
+  "description": "Flowmind Desktop Viewer - Visual interface for flow management",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron src/main.js",
+    "dev": "electron src/main.js --dev"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3"
+  },
+  "devDependencies": {
+    "electron": "^28.1.0"
+  }
+}
