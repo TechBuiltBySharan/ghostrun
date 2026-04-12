@@ -82,7 +82,7 @@ ipcMain.handle('flows:list', () => {
   try {
     const rows = db.prepare('SELECT * FROM flows ORDER BY updated_at DESC').all();
     db.close();
-    return rows.map(r => ({ id: r.id, name: r.name, description: r.description, appUrl: r.app_url, updatedAt: r.updated_at }));
+    return rows.map(r => ({ id: r.id, name: r.name, description: r.description, appUrl: r.app_url, updatedAt: r.updated_at, createdBy: r.created_by || 'human' }));
   } catch (e) {
     try { db.close(); } catch {}
     return [];

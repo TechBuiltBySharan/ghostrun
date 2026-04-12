@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "template": true,
+  "name": "Smoke Homepage",
+  "description": "Quick smoke test — navigate to homepage and assert key text is visible",
+  "tags": ["smoke", "homepage", "ci"],
+  "variables": ["BASE_URL", "EXPECTED_TITLE"],
+  "flow": {
+    "name": "Smoke Homepage",
+    "description": "Verify homepage loads and shows expected title text",
+    "appUrl": "{{BASE_URL}}",
+    "graph": {
+      "nodes": [
+        { "id": "start",  "type": "start",  "label": "Start", "url": "{{BASE_URL}}" },
+        { "id": "step-1", "type": "action", "label": "Navigate to homepage", "action": "navigate", "url": "{{BASE_URL}}" },
+        { "id": "step-2", "type": "action", "label": "Assert page title visible", "action": "assert:title", "value": "{{EXPECTED_TITLE}}" },
+        { "id": "step-3", "type": "action", "label": "Assert no 404 text", "action": "assert:text", "value": "{{EXPECTED_TITLE}}" },
+        { "id": "end",    "type": "end",    "label": "End" }
+      ],
+      "edges": [
+        { "id": "e0", "source": "start",  "target": "step-1" },
+        { "id": "e1", "source": "step-1", "target": "step-2" },
+        { "id": "e2", "source": "step-2", "target": "step-3" },
+        { "id": "e3", "source": "step-3", "target": "end" }
+      ]
+    }
+  }
+}

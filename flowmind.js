@@ -6017,7 +6017,17 @@ Rules:
     process.exit(1);
     return;
   }
-  const flowName = description.slice(0, 50).replace(/[^a-zA-Z0-9 ]/g, "").trim() || "Generated Flow";
+  let flowName = "Generated Flow";
+  {
+    const nameResult = await callAI(`Give a short (2-5 words) flow name for this automation: "${description}". Reply with ONLY the name, title-cased, no punctuation. Examples: "Login Flow", "Checkout Guest", "Search Products".`);
+    if (nameResult?.text) {
+      const candidate = nameResult.text.replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 40);
+      if (candidate.length >= 3) flowName = candidate;
+    }
+    if (flowName === "Generated Flow") {
+      flowName = description.trim().split(/\s+/).slice(0, 5).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+    }
+  }
   const nodes = [{ id: "start", type: "start", label: "Start", url: baseUrl }];
   const edges = [];
   let prevId = "start";
@@ -6159,6 +6169,94 @@ async function runCodeScan(dir) {
   console.log();
   success(`Found ${routes.length} routes \u2192 created ${created} draft flows`);
   info(`Run: ${import_chalk.default.green("node flowmind.js flow:list")}`);
+  console.log();
+}
+function getTemplatesDir() {
+  const candidates = [
+    path.join(__dirname, "templates"),
+    path.join(process.cwd(), "templates")
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
+async function runStoreList() {
+  const dir = getTemplatesDir();
+  if (!fs.existsSync(dir)) {
+    errorMsg("Templates directory not found at " + dir);
+    return;
+  }
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".flow.json"));
+  if (files.length === 0) {
+    warn("No templates found.");
+    return;
+  }
+  console.log(import_chalk.default.bold("\n  Flow Templates\n"));
+  console.log(import_chalk.default.gray("  Name                     Tags                    Variables"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(72)));
+  for (const file of files) {
+    try {
+      const t = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      const slug = file.replace(".flow.json", "");
+      const tags = (t.tags || []).slice(0, 3).map((g) => import_chalk.default.cyan(g)).join(import_chalk.default.gray(", "));
+      const vars = (t.variables || []).map((v) => import_chalk.default.yellow(`{{${v}}}`)).join(import_chalk.default.gray(", "));
+      console.log(`  ${import_chalk.default.white(slug.padEnd(24))} ${tags.padEnd(30)} ${vars}`);
+      console.log(`  ${import_chalk.default.gray(" ".repeat(24))} ${import_chalk.default.gray(t.description.slice(0, 60))}`);
+    } catch {
+    }
+  }
+  console.log();
+  console.log(import_chalk.default.gray("  Install with: node flowmind.js store install <name>"));
+  console.log(import_chalk.default.gray("  Variables:   node flowmind.js run <flow-name> --var BASE_URL=https://..."));
+  console.log();
+}
+async function runStoreInstall(slug) {
+  const dir = getTemplatesDir();
+  const file = path.join(dir, slug.endsWith(".flow.json") ? slug : slug + ".flow.json");
+  if (!fs.existsSync(file)) {
+    errorMsg(`Template not found: ${slug}`);
+    info("Available templates: " + import_chalk.default.cyan("node flowmind.js store list"));
+    process.exit(1);
+  }
+  let t;
+  try {
+    t = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    errorMsg("Invalid template file");
+    process.exit(1);
+    return;
+  }
+  const existing = db.findFlowByName(t.flow.name);
+  if (existing) {
+    warn(`Flow "${t.flow.name}" already installed (id: ${existing.id.slice(0, 8)})`);
+    const overwrite = await askQuestion(import_chalk.default.cyan("  Overwrite? (y/N) "));
+    if (overwrite.toLowerCase() !== "y") {
+      info("Skipped.");
+      return;
+    }
+    db.deleteFlow(existing.id);
+  }
+  const flow = db.createFlow({ name: t.flow.name, description: t.flow.description, appUrl: t.flow.appUrl, graph: t.flow.graph, createdBy: "agent" });
+  divider();
+  success(`Template installed: ${import_chalk.default.white(t.flow.name)}`);
+  info(`ID: ${import_chalk.default.gray(flow.id.slice(0, 8))}`);
+  if (t.variables?.length) {
+    console.log();
+    console.log(import_chalk.default.bold("  Variables required:\n"));
+    for (const v of t.variables) {
+      console.log(`  ${import_chalk.default.yellow("{{" + v + "}}")}  \u2192  ${import_chalk.default.gray("--var " + v + "=<value>")}`);
+    }
+    console.log();
+    console.log(import_chalk.default.gray("  Or set them in .flowmind.env:\n"));
+    for (const v of t.variables) {
+      console.log(import_chalk.default.gray(`  ${v}=your-value`));
+    }
+    console.log();
+    info(`Run with: ${import_chalk.default.green(`node flowmind.js run "${t.flow.name}" --var BASE_URL=https://...`)}`);
+  } else {
+    info(`Run with: ${import_chalk.default.green(`node flowmind.js run ${flow.id.slice(0, 8)}`)}`);
+  }
   console.log();
 }
 async function runInteractive() {
@@ -6414,6 +6512,10 @@ async function main() {
     console.log(`  ${C("run:diff <id1> <id2>")}${G("Pixel-diff screenshots between two runs")}`);
     console.log(`  ${C("run:analyze <id>")}${G("Plain-English failure analysis          \u{1F916} AI")}`);
     console.log();
+    H("Template Store");
+    console.log(`  ${C("store list")}${G("Browse 10+ ready-made flow templates")}`);
+    console.log(`  ${C("store install <name>")}${G("Install a template (sets {{variables}})")}`);
+    console.log();
     H("Exploration & System");
     console.log(`  ${C("explore <url>")}${G("Auto-discover flows via BFS crawl       \u{1F916} AI")}`);
     console.log(`  ${C("explore:confirm <report-id>")}${G("Save confirmed flows from explore")}`);
@@ -6600,6 +6702,17 @@ async function main() {
         process.exit(1);
       }
       await runCodeScan(args[1]);
+      break;
+    case "store":
+    case "store:list":
+      await runStoreList();
+      break;
+    case "store:install":
+      if (!args[1]) {
+        errorMsg("Template name required. Run store:list to see options.");
+        process.exit(1);
+      }
+      await runStoreInstall(args[1]);
       break;
     default:
       errorMsg("Unknown command: " + cmd);

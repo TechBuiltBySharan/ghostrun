@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "template": true,
+  "name": "Logout",
+  "description": "Click logout button or link and assert redirect to login/home page",
+  "tags": ["auth", "logout", "smoke"],
+  "variables": ["BASE_URL"],
+  "flow": {
+    "name": "Logout",
+    "description": "Logout and verify session ended",
+    "appUrl": "{{BASE_URL}}",
+    "graph": {
+      "nodes": [
+        { "id": "start",  "type": "start",  "label": "Start", "url": "{{BASE_URL}}" },
+        { "id": "step-1", "type": "action", "label": "Navigate to dashboard", "action": "navigate", "url": "{{BASE_URL}}/dashboard" },
+        { "id": "step-2", "type": "action", "label": "Click logout", "action": "click", "selector": "a[href*='logout'], button:has-text('Logout'), button:has-text('Sign out'), .logout-btn" },
+        { "id": "step-3", "type": "action", "label": "Assert redirected to login", "action": "assert:url", "value": "/login" },
+        { "id": "end",    "type": "end",    "label": "End" }
+      ],
+      "edges": [
+        { "id": "e0", "source": "start",  "target": "step-1" },
+        { "id": "e1", "source": "step-1", "target": "step-2" },
+        { "id": "e2", "source": "step-2", "target": "step-3" },
+        { "id": "e3", "source": "step-3", "target": "end" }
+      ]
+    }
+  }
+}

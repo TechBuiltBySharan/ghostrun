@@ -317,15 +317,16 @@ function renderFlows() {
     return;
   }
   wrap.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>URL</th><th>Updated</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Creator</th><th>URL</th><th>Updated</th><th></th></tr></thead>
     <tbody>${state.flows.map(f => `
       <tr>
         <td><div class="flow-name">${esc(f.name)}</div>${f.description ? `<div class="flow-url">${esc(f.description)}</div>` : ''}</td>
+        <td><span title="${f.createdBy === 'agent' ? 'AI-generated' : 'Human-recorded'}" style="font-size:16px">${f.createdBy === 'agent' ? '🤖' : '👤'}</span></td>
         <td><div class="flow-url">${f.appUrl ? `<a href="#" onclick="window.flowmind.openFile('${esc(f.appUrl)}')" style="color:var(--accent)">${esc(f.appUrl)}</a>` : '—'}</div></td>
         <td><div class="flow-date">${fmtDate(f.updatedAt)}</div></td>
         <td><div class="actions">
-          <button class="btn" onclick="runFlowById('${f.id}', '${esc(f.name)}')">▶ Run</button>
-          <button class="btn btn-danger" onclick="deleteFlow('${f.id}', '${esc(f.name)}')">Delete</button>
+          <button class="btn btn-primary" onclick="runFlowById('${f.id}', '${esc(f.name)}')">▶ Run</button>
+          <button class="btn btn-danger" onclick="deleteFlow('${f.id}', '${esc(f.name)}')">✕ Delete</button>
         </div></td>
       </tr>`).join('')}
     </tbody>
@@ -353,13 +354,18 @@ function renderRecentRuns() {
     el.innerHTML = `<div style="color:var(--text-dim);font-size:13px">No runs yet.</div>`;
     return;
   }
-  el.innerHTML = recent.map(r => `
-    <div class="run-mini" onclick="openRunDetail('${r.id}')">
+  el.innerHTML = recent.map(r => {
+    const flow = state.flows.find(f => f.id === r.flowId);
+    const dur = r.duration ? (r.duration >= 1000 ? (r.duration/1000).toFixed(1)+'s' : r.duration+'ms') : '';
+    return `
+    <div class="run-mini" style="cursor:default">
       <div class="run-status-dot" style="background:${r.status==='passed'?'var(--green)':r.status==='failed'?'var(--red)':'var(--yellow)'}"></div>
-      <div class="run-mini-name">${esc(r.flowName)}</div>
-      <div class="run-mini-dur">${r.duration ? r.duration+'ms' : ''}</div>
+      <div class="run-mini-name" style="cursor:pointer" onclick="openRunDetail('${r.id}')">${esc(r.flowName)}</div>
+      <div class="run-mini-dur">${dur}</div>
       <div class="run-mini-time">${fmtRelative(r.startedAt)}</div>
-    </div>`).join('');
+      ${flow ? `<button class="btn" style="padding:2px 8px;font-size:11px;margin-left:4px" onclick="runFlowById('${flow.id}','${esc(r.flowName)}')">▶</button>` : ''}
+    </div>`;
+  }).join('');
 }
 
 function openRunDetail(runId) {
@@ -412,15 +418,19 @@ async function selectRun(runId) {
 
   const failureReport = run.status === 'failed' ? parseFailureReport(run.summary) : null;
 
+  const flow = state.flows.find(f => f.id === run.flowId);
   detail.innerHTML = `
-    <div class="detail-header">
-      <div class="detail-flow-name">${esc(run.flowName)}</div>
-      <div class="detail-meta">
-        <span class="badge ${run.status==='passed'?'badge-pass':run.status==='failed'?'badge-fail':'badge-run'}">${run.status}</span>
-        ${run.duration ? `<span>${run.duration}ms</span>` : ''}
-        <span style="font-family:monospace">${run.id.slice(0,8)}</span>
-        <span>${fmtDate(run.startedAt)}</span>
+    <div class="detail-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+      <div>
+        <div class="detail-flow-name">${esc(run.flowName)}</div>
+        <div class="detail-meta">
+          <span class="badge ${run.status==='passed'?'badge-pass':run.status==='failed'?'badge-fail':'badge-run'}">${run.status}</span>
+          ${run.duration ? `<span>${run.duration >= 1000 ? (run.duration/1000).toFixed(1)+'s' : run.duration+'ms'}</span>` : ''}
+          <span style="font-family:monospace">${run.id.slice(0,8)}</span>
+          <span>${fmtRelative(run.startedAt)}</span>
+        </div>
       </div>
+      ${flow ? `<button class="btn btn-primary" style="flex-shrink:0;margin-top:2px" onclick="runFlowById('${flow.id}', '${esc(run.flowName)}')">▶ Re-run</button>` : ''}
     </div>
     ${failureReport ? `
     <div class="failure-report">
