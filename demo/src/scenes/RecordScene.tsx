@@ -5,30 +5,31 @@ import {
   interpolate,
   spring,
   useVideoConfig,
+  Img,
+  staticFile,
 } from "remotion";
-import { BrowserMock, LoginFormMock } from "../components/BrowserMock";
 
-// Each line config: text, color key, and which frame offset to start appearing
 const RECORD_LINES: {
   text: string;
   color: string;
   startFrame: number;
   bold?: boolean;
 }[] = [
-  { text: "$ node ghostrun.js learn https://app.example.com", color: "#e6edf3", startFrame: 0 },
-  { text: "", color: "#e6edf3", startFrame: 18 },
-  { text: "  RECORDING  👤 human flow — browser is live", color: "#00d4ff", startFrame: 20, bold: true },
+  { text: "$ ghostrun learn https://myapp.com login-flow", color: "#e6edf3", startFrame: 10 },
   { text: "", color: "#e6edf3", startFrame: 30 },
-  { text: "  🌐 navigate → https://app.example.com", color: "#8b949e", startFrame: 32 },
-  { text: "  🖱  click \"Login\"", color: "#8b949e", startFrame: 42 },
-  { text: "  ⌨️  fill #email = \"user@example.com\"", color: "#8b949e", startFrame: 53 },
-  { text: "  ⌨️  fill #password = \"••••••••\"", color: "#8b949e", startFrame: 66 },
-  { text: "  🖱  click \"Sign in\"", color: "#8b949e", startFrame: 78 },
-  { text: "  ✅ assert text: Dashboard", color: "#3fb950", startFrame: 89 },
+  { text: "  👤  RECORDING  —  browser is live", color: "#39d0d8", startFrame: 32, bold: true },
+  { text: "", color: "#e6edf3", startFrame: 42 },
+  { text: "  🌐  navigate → https://myapp.com/login", color: "#8b949e", startFrame: 44 },
+  { text: "  🖱   click \"Login\" button", color: "#8b949e", startFrame: 56 },
+  { text: "  ⌨️   fill #email = \"user@myapp.com\"", color: "#8b949e", startFrame: 70 },
+  { text: "  ⌨️   fill #password = \"••••••••\"", color: "#8b949e", startFrame: 84 },
+  { text: "  🖱   click \"Sign In\"", color: "#8b949e", startFrame: 98 },
+  { text: "  ✅  assert: redirected to /dashboard", color: "#3fb950", startFrame: 115 },
+  { text: "", color: "#e6edf3", startFrame: 125 },
+  { text: "  ✓ Flow saved! → login-flow (6 steps)", color: "#3fb950", startFrame: 127, bold: true },
 ];
 
-// Characters typed per frame
-const CPF = 4;
+const CPF = 5;
 
 function useTypedLines(frame: number) {
   return RECORD_LINES.map((line) => {
@@ -38,18 +39,6 @@ function useTypedLines(frame: number) {
     const chars = Math.min(line.text.length, elapsed * CPF);
     return { text: line.text.slice(0, chars), color: line.color, bold: line.bold };
   }).filter(Boolean) as { text: string; color: string; bold?: boolean }[];
-}
-
-// Determine browser state from frame
-function getBrowserState(frame: number): {
-  highlight: "email" | "password" | "button" | null;
-  showDash: boolean;
-} {
-  if (frame >= 89) return { highlight: null, showDash: true };
-  if (frame >= 78) return { highlight: "button", showDash: false };
-  if (frame >= 66) return { highlight: "password", showDash: false };
-  if (frame >= 53) return { highlight: "email", showDash: false };
-  return { highlight: null, showDash: false };
 }
 
 export const RecordScene: React.FC = () => {
@@ -62,7 +51,7 @@ export const RecordScene: React.FC = () => {
     config: { damping: 18, stiffness: 100 },
   });
 
-  const opacity = interpolate(frame, [0, 10], [0, 1], {
+  const opacity = interpolate(frame, [0, 12], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -70,15 +59,32 @@ export const RecordScene: React.FC = () => {
   const translateX = interpolate(slideIn, [0, 1], [-30, 0]);
 
   const typedLines = useTypedLines(frame);
-  const { highlight, showDash } = getBrowserState(frame);
 
   // Recording indicator pulse
   const recPulse = Math.sin((frame / fps) * Math.PI * 3) * 0.3 + 0.7;
 
+  // Help screenshot slides in on right side
+  const screenshotOpacity = interpolate(frame, [8, 25], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const screenshotX = interpolate(slideIn, [0, 1], [30, 0]);
+
+  // Saved badge
+  const savedOpacity = interpolate(frame, [128, 148], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const savedScale = spring({
+    frame: frame - 128,
+    fps,
+    config: { damping: 12, stiffness: 200, mass: 0.6 },
+  });
+
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: "#0d1117",
+        backgroundColor: "#080c10",
         padding: 40,
         flexDirection: "row",
         gap: 24,
@@ -94,15 +100,15 @@ export const RecordScene: React.FC = () => {
           left: 40,
           fontSize: 11,
           color: "#6e7681",
-          fontFamily: "Menlo, Consolas, monospace",
-          letterSpacing: 1,
+          fontFamily: "'JetBrains Mono', Menlo, monospace",
+          letterSpacing: 2,
           textTransform: "uppercase",
         }}
       >
         01 / RECORD
       </div>
 
-      {/* Recording dot */}
+      {/* Recording indicator */}
       <div
         style={{
           position: "absolute",
@@ -120,15 +126,15 @@ export const RecordScene: React.FC = () => {
             borderRadius: "50%",
             backgroundColor: "#f85149",
             opacity: recPulse,
-            boxShadow: `0 0 8px rgba(248, 81, 73, ${recPulse * 0.8})`,
+            boxShadow: `0 0 10px rgba(248, 81, 73, ${recPulse * 0.9})`,
           }}
         />
         <span
           style={{
             fontSize: 11,
             color: "#f85149",
-            fontFamily: "Menlo, monospace",
-            letterSpacing: 0.5,
+            fontFamily: "'JetBrains Mono', Menlo, monospace",
+            letterSpacing: 1,
           }}
         >
           REC
@@ -148,13 +154,14 @@ export const RecordScene: React.FC = () => {
       >
         <div
           style={{
-            backgroundColor: "#161b22",
-            borderRadius: 10,
+            backgroundColor: "#0d1117",
+            borderRadius: 12,
             padding: "20px 24px",
-            border: "1px solid #30363d",
-            height: 520,
+            border: "1px solid #21262d",
+            height: 540,
             display: "flex",
             flexDirection: "column",
+            boxShadow: "0 0 40px rgba(57,208,216,0.06), 0 20px 40px rgba(0,0,0,0.5)",
           }}
         >
           {/* Terminal chrome */}
@@ -162,7 +169,14 @@ export const RecordScene: React.FC = () => {
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ff5f57" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ffbd2e" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#28ca41" }} />
-            <span style={{ marginLeft: 8, color: "#6e7681", fontSize: 11, fontFamily: "Menlo, monospace" }}>
+            <span
+              style={{
+                marginLeft: 8,
+                color: "#6e7681",
+                fontSize: 11,
+                fontFamily: "'JetBrains Mono', Menlo, monospace",
+              }}
+            >
               ghostrun — zsh
             </span>
           </div>
@@ -174,26 +188,27 @@ export const RecordScene: React.FC = () => {
                 key={i}
                 style={{
                   color: line.color,
-                  fontFamily: "Menlo, Consolas, 'Courier New', monospace",
+                  fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
                   fontSize: 12.5,
-                  lineHeight: 1.75,
-                  fontWeight: line.bold ? 600 : 400,
-                  minHeight: "1.75em",
+                  lineHeight: 1.8,
+                  fontWeight: line.bold ? 700 : 400,
+                  minHeight: "1.8em",
                   whiteSpace: "pre",
                 }}
               >
                 {line.text}
-                {/* Cursor on last line that's still typing */}
                 {i === typedLines.length - 1 &&
-                  line.text.length < RECORD_LINES.filter((l) => frame >= l.startFrame).slice(-1)[0]?.text.length && (
+                  line.text.length <
+                    RECORD_LINES.filter((l) => frame >= l.startFrame).slice(-1)[0]?.text.length && (
                     <span
                       style={{
                         display: "inline-block",
                         width: 7,
                         height: "0.9em",
-                        backgroundColor: "#00d4ff",
+                        backgroundColor: "#39d0d8",
                         marginLeft: 1,
                         verticalAlign: "text-bottom",
+                        borderRadius: 1,
                         opacity: Math.floor(frame / 15) % 2 === 0 ? 1 : 0,
                       }}
                     />
@@ -204,7 +219,7 @@ export const RecordScene: React.FC = () => {
         </div>
       </div>
 
-      {/* Browser panel */}
+      {/* Right panel: help screenshot + saved badge */}
       <div
         style={{
           flex: 1,
@@ -212,18 +227,57 @@ export const RecordScene: React.FC = () => {
           display: "flex",
           flexDirection: "column",
           justifyContent: "center",
-          opacity: interpolate(frame, [5, 20], [0, 1], {
-            extrapolateLeft: "clamp",
-            extrapolateRight: "clamp",
-          }),
+          alignItems: "center",
+          gap: 20,
+          opacity: screenshotOpacity,
+          transform: `translateX(${screenshotX}px)`,
         }}
       >
-        <BrowserMock
-          url="https://app.example.com"
-          style={{ height: 520 }}
+        <div
+          style={{
+            borderRadius: 10,
+            overflow: "hidden",
+            border: "1px solid #21262d",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+            width: "100%",
+          }}
         >
-          <LoginFormMock highlightField={highlight} showDashboard={showDash} />
-        </BrowserMock>
+          <Img
+            src={staticFile("screen-help.png")}
+            style={{ width: "100%", display: "block" }}
+          />
+        </div>
+
+        {/* Saved badge */}
+        {frame >= 127 && (
+          <div
+            style={{
+              opacity: savedOpacity,
+              transform: `scale(${interpolate(savedScale, [0, 1], [0.7, 1])})`,
+              backgroundColor: "rgba(63, 185, 80, 0.12)",
+              border: "1px solid rgba(63, 185, 80, 0.4)",
+              borderRadius: 24,
+              padding: "10px 24px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              boxShadow: "0 0 20px rgba(63, 185, 80, 0.2)",
+            }}
+          >
+            <span style={{ fontSize: 18, color: "#3fb950" }}>✓</span>
+            <span
+              style={{
+                color: "#3fb950",
+                fontFamily: "'JetBrains Mono', Menlo, monospace",
+                fontSize: 13,
+                fontWeight: 700,
+              }}
+            >
+              Flow saved!
+            </span>
+            <span style={{ color: "#6e7681", fontSize: 12 }}>6 steps recorded</span>
+          </div>
+        )}
       </div>
     </AbsoluteFill>
   );

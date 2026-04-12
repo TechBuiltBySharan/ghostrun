@@ -1,6 +1,19 @@
+import React from "react";
+import { Composition } from "remotion";
 import { registerRoot } from "remotion";
-import { Composition } from "./Composition";
+import { MainVideo, TOTAL_FRAMES, FPS, WIDTH, HEIGHT } from "./Composition";
 
-registerRoot(() => {
-  return <Composition />;
-});
+const Root: React.FC = () => {
+  return (
+    <Composition
+      id="GhostRunDemo"
+      component={MainVideo}
+      durationInFrames={TOTAL_FRAMES}
+      fps={FPS}
+      width={WIDTH}
+      height={HEIGHT}
+    />
+  );
+};
+
+registerRoot(Root);

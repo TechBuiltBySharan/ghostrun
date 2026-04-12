@@ -1,60 +1,96 @@
 import React from "react";
-import { AbsoluteFill, useCurrentFrame, interpolate, spring, useVideoConfig } from "remotion";
+import {
+  AbsoluteFill,
+  useCurrentFrame,
+  interpolate,
+  spring,
+  useVideoConfig,
+  Img,
+  staticFile,
+} from "remotion";
 
 export const Intro: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // Logo fades + scales in
-  const logoProgress = spring({
+  // Logo fades + scales in with spring
+  const logoSpring = spring({
     frame,
     fps,
-    config: { damping: 18, stiffness: 80, mass: 1 },
+    config: { damping: 16, stiffness: 70, mass: 1 },
   });
 
-  const logoOpacity = interpolate(frame, [0, 15], [0, 1], {
+  const logoOpacity = interpolate(frame, [0, 20], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  const logoScale = interpolate(logoProgress, [0, 1], [0.7, 1]);
+  const logoScale = interpolate(logoSpring, [0, 1], [0.5, 1]);
 
-  // Tagline fades in after logo
-  const taglineOpacity = interpolate(frame, [20, 40], [0, 1], {
+  // Title typewriter effect
+  const TITLE = "GhostRun";
+  const titleChars = Math.floor(
+    interpolate(frame, [25, 65], [0, TITLE.length], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    })
+  );
+
+  const titleOpacity = interpolate(frame, [25, 35], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  const taglineY = interpolate(frame, [20, 45], [12, 0], {
+  // Tagline fades in
+  const taglineOpacity = interpolate(frame, [70, 90], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const taglineY = interpolate(frame, [70, 90], [16, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
   // Glow pulse
   const glowIntensity = interpolate(
-    Math.sin((frame / fps) * Math.PI * 2),
+    Math.sin((frame / fps) * Math.PI * 1.5),
     [-1, 1],
-    [20, 40]
+    [24, 48]
   );
+
+  const glowOpacity = interpolate(
+    Math.sin((frame / fps) * Math.PI * 1.5),
+    [-1, 1],
+    [0.4, 0.7]
+  );
+
+  // Background radial animation
+  const bgGlow = interpolate(frame, [0, 60], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const cursorVisible = Math.floor(frame / 15) % 2 === 0 && titleChars < TITLE.length;
 
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: "#0d1117",
+        backgroundColor: "#080c10",
         alignItems: "center",
         justifyContent: "center",
         flexDirection: "column",
-        gap: 20,
+        gap: 0,
       }}
     >
-      {/* Background radial glow */}
+      {/* Animated background radial glow */}
       <div
         style={{
           position: "absolute",
-          width: 600,
-          height: 300,
+          width: 800,
+          height: 400,
           borderRadius: "50%",
-          background: `radial-gradient(ellipse, rgba(0, 212, 255, 0.08) 0%, transparent 70%)`,
+          background: `radial-gradient(ellipse, rgba(57, 208, 216, ${0.1 * bgGlow}) 0%, transparent 70%)`,
           top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
@@ -62,7 +98,23 @@ export const Intro: React.FC = () => {
         }}
       />
 
-      {/* Logo mark + text */}
+      {/* Secondary glow ring */}
+      <div
+        style={{
+          position: "absolute",
+          width: 300,
+          height: 300,
+          borderRadius: "50%",
+          border: `1px solid rgba(57, 208, 216, ${0.08 * bgGlow})`,
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          boxShadow: `0 0 60px rgba(57, 208, 216, ${0.06 * bgGlow})`,
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* Logo image */}
       <div
         style={{
           opacity: logoOpacity,
@@ -70,83 +122,55 @@ export const Intro: React.FC = () => {
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          gap: 12,
+          gap: 28,
         }}
       >
-        {/* Logo mark */}
-        <svg
-          width="72"
-          height="72"
-          viewBox="0 0 72 72"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <defs>
-            <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#00d4ff" />
-              <stop offset="100%" stopColor="#0066ff" />
-            </linearGradient>
-            <filter id="glow">
-              <feGaussianBlur stdDeviation="3" result="coloredBlur" />
-              <feMerge>
-                <feMergeNode in="coloredBlur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-          {/* Hexagon background */}
-          <polygon
-            points="36,4 64,20 64,52 36,68 8,52 8,20"
-            fill="url(#logoGrad)"
-            opacity="0.15"
-          />
-          <polygon
-            points="36,4 64,20 64,52 36,68 8,52 8,20"
-            stroke="url(#logoGrad)"
-            strokeWidth="2"
-            fill="none"
-            filter="url(#glow)"
-          />
-          {/* Flow arrows */}
-          <path
-            d="M22 36 C22 28 30 24 36 24 C42 24 50 28 50 36"
-            stroke="url(#logoGrad)"
-            strokeWidth="3"
-            fill="none"
-            strokeLinecap="round"
-            filter="url(#glow)"
-          />
-          <circle cx="36" cy="36" r="5" fill="url(#logoGrad)" filter="url(#glow)" />
-          <path
-            d="M46 33 L50 36 L46 39"
-            stroke="url(#logoGrad)"
-            strokeWidth="2.5"
-            fill="none"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          {/* Memory dots */}
-          <circle cx="22" cy="48" r="3" fill="#00d4ff" opacity="0.8" />
-          <circle cx="36" cy="52" r="3" fill="#00d4ff" opacity="0.6" />
-          <circle cx="50" cy="48" r="3" fill="#00d4ff" opacity="0.8" />
-          <line x1="22" y1="48" x2="36" y2="52" stroke="#00d4ff" strokeWidth="1" opacity="0.5" />
-          <line x1="36" y1="52" x2="50" y2="48" stroke="#00d4ff" strokeWidth="1" opacity="0.5" />
-        </svg>
-
-        {/* GhostRun text */}
         <div
           style={{
-            fontSize: 56,
-            fontWeight: 800,
-            fontFamily: "system-ui, -apple-system, sans-serif",
-            letterSpacing: -2,
-            color: "#ffffff",
-            textShadow: `0 0 ${glowIntensity}px rgba(0, 212, 255, 0.6), 0 0 60px rgba(0, 212, 255, 0.3)`,
-            lineHeight: 1,
+            width: 120,
+            height: 120,
+            borderRadius: 28,
+            overflow: "hidden",
+            boxShadow: `0 0 ${glowIntensity}px rgba(57, 208, 216, ${glowOpacity}), 0 0 80px rgba(57, 208, 216, 0.2)`,
           }}
         >
-          Flow
-          <span style={{ color: "#00d4ff" }}>Mind</span>
+          <Img
+            src={staticFile("logo.png")}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        </div>
+
+        {/* GhostRun typewriter title */}
+        <div
+          style={{
+            opacity: titleOpacity,
+            fontSize: 68,
+            fontWeight: 800,
+            fontFamily:
+              "'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace",
+            letterSpacing: -2,
+            color: "#ffffff",
+            textShadow: `0 0 ${glowIntensity}px rgba(57, 208, 216, ${glowOpacity * 0.8}), 0 0 60px rgba(57, 208, 216, 0.2)`,
+            lineHeight: 1,
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ color: "#39d0d8" }}>Ghost</span>
+          <span>{TITLE.slice(5, titleChars)}</span>
+          {cursorVisible && (
+            <span
+              style={{
+                display: "inline-block",
+                width: 4,
+                height: "0.85em",
+                backgroundColor: "#39d0d8",
+                marginLeft: 2,
+                verticalAlign: "text-bottom",
+                borderRadius: 2,
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -155,14 +179,25 @@ export const Intro: React.FC = () => {
         style={{
           opacity: taglineOpacity,
           transform: `translateY(${taglineY}px)`,
-          fontSize: 18,
-          fontFamily: "system-ui, -apple-system, sans-serif",
+          marginTop: 24,
+          fontSize: 19,
+          fontFamily:
+            "'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace",
           color: "#8b949e",
           fontWeight: 400,
-          letterSpacing: 0.5,
+          letterSpacing: 0.3,
+          textAlign: "center",
         }}
       >
-        Memory-driven web automation
+        Record once.{" "}
+        <span
+          style={{
+            color: "#39d0d8",
+            textShadow: `0 0 20px rgba(57, 208, 216, 0.5)`,
+          }}
+        >
+          Replay as a ghost.
+        </span>
       </div>
     </AbsoluteFill>
   );

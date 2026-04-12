@@ -5,26 +5,26 @@ import {
   interpolate,
   spring,
   useVideoConfig,
+  Img,
+  staticFile,
 } from "remotion";
-import { ScreenshotCard } from "../components/ScreenshotCard";
 
 interface RunStep {
   num: number;
+  total: number;
   label: string;
   ms: number;
   startFrame: number;
+  barFull: number; // how many full blocks (out of 20)
 }
 
 const RUN_STEPS: RunStep[] = [
-  { num: 1, label: 'Navigate to app', ms: 68, startFrame: 25 },
-  { num: 2, label: 'Click "Login"', ms: 45, startFrame: 38 },
-  { num: 3, label: 'Fill email', ms: 12, startFrame: 51 },
-  { num: 4, label: 'Fill password', ms: 11, startFrame: 62 },
-  { num: 5, label: 'Click "Sign in"', ms: 890, startFrame: 73 },
-  { num: 6, label: 'Assert: Dashboard', ms: 34, startFrame: 90 },
+  { num: 1, total: 5, label: "Navigate to login page",      ms: 312,  startFrame: 20, barFull: 16 },
+  { num: 2, total: 5, label: "Fill email field",            ms: 89,   startFrame: 38, barFull: 20 },
+  { num: 3, total: 5, label: "Fill password field",         ms: 76,   startFrame: 54, barFull: 20 },
+  { num: 4, total: 5, label: 'Click "Sign In" button',      ms: 445,  startFrame: 70, barFull: 20 },
+  { num: 5, total: 5, label: "Assert redirect to /dashboard", ms: 201, startFrame: 88, barFull: 20 },
 ];
-
-const SEPARATOR = "  ──────────────────────────────────";
 
 const CheckMark: React.FC<{ startFrame: number; frame: number }> = ({
   startFrame,
@@ -33,27 +33,81 @@ const CheckMark: React.FC<{ startFrame: number; frame: number }> = ({
   const progress = spring({
     frame: frame - startFrame,
     fps: 30,
-    config: { damping: 12, stiffness: 200, mass: 0.5 },
+    config: { damping: 10, stiffness: 250, mass: 0.4 },
   });
 
-  const scale = interpolate(progress, [0, 1], [0, 1]);
-  const opacity = interpolate(frame - startFrame, [0, 6], [0, 1], {
+  const scale = interpolate(progress, [0, 1], [0, 1.2]);
+  const finalScale = frame > startFrame + 10 ? 1 : scale;
+  const opacity = interpolate(frame - startFrame, [0, 5], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  if (frame < startFrame) return <span style={{ color: "transparent" }}>✓</span>;
+  const flashOpacity = interpolate(frame - startFrame, [0, 3, 8], [0, 1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  if (frame < startFrame) return null;
 
   return (
-    <span
-      style={{
-        color: "#3fb950",
-        display: "inline-block",
-        transform: `scale(${scale})`,
-        opacity,
-      }}
-    >
-      ✓
+    <span style={{ position: "relative", display: "inline-block" }}>
+      <span
+        style={{
+          color: "#3fb950",
+          display: "inline-block",
+          transform: `scale(${finalScale})`,
+          opacity,
+          textShadow: `0 0 ${interpolate(frame - startFrame, [0, 5, 15], [20, 30, 8], {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+          })}px rgba(63, 185, 80, 0.8)`,
+        }}
+      >
+        ✓
+      </span>
+      {/* Flash burst */}
+      <span
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 30,
+          height: 30,
+          borderRadius: "50%",
+          backgroundColor: "rgba(63, 185, 80, 0.3)",
+          opacity: flashOpacity,
+          pointerEvents: "none",
+        }}
+      />
+    </span>
+  );
+};
+
+const ProgressBar: React.FC<{ full: number; startFrame: number; frame: number }> = ({
+  full,
+  startFrame,
+  frame,
+}) => {
+  const progress = interpolate(frame - startFrame, [0, 12], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const filledBlocks = Math.round(progress * full);
+  const emptyBlocks = 20 - full;
+
+  return (
+    <span>
+      <span style={{ color: "#39d0d8", letterSpacing: 0, fontSize: 11 }}>
+        {"█".repeat(filledBlocks)}
+      </span>
+      <span style={{ color: "#39d0d818", fontSize: 11 }}>
+        {"█".repeat(full - filledBlocks)}
+      </span>
+      <span style={{ color: "#39d0d818", fontSize: 11 }}>
+        {"░".repeat(emptyBlocks)}
+      </span>
     </span>
   );
 };
@@ -62,25 +116,30 @@ export const RunScene: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  const sceneIn = spring({
+  const opacity = interpolate(frame, [0, 10], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const passedSpring = spring({
+    frame: frame - 98,
+    fps,
+    config: { damping: 14, stiffness: 120, mass: 0.8 },
+  });
+
+  const passedOpacity = interpolate(frame, [98, 112], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  // Screenshot panel slide in
+  const ssSpring = spring({
     frame,
     fps,
-    config: { damping: 18, stiffness: 100 },
+    config: { damping: 18, stiffness: 80 },
   });
-
-  const opacity = interpolate(frame, [0, 8], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  // Passed banner appears after last step
-  const passedOpacity = interpolate(frame, [100, 115], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  // Header lines appear
-  const headerOpacity = interpolate(frame, [0, 12], [0, 1], {
+  const ssX = interpolate(ssSpring, [0, 1], [40, 0]);
+  const ssOpacity = interpolate(frame, [5, 22], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -88,10 +147,10 @@ export const RunScene: React.FC = () => {
   return (
     <AbsoluteFill
       style={{
-        backgroundColor: "#0d1117",
+        backgroundColor: "#080c10",
         padding: 40,
         flexDirection: "row",
-        gap: 24,
+        gap: 28,
         alignItems: "center",
         opacity,
       }}
@@ -104,8 +163,8 @@ export const RunScene: React.FC = () => {
           left: 40,
           fontSize: 11,
           color: "#6e7681",
-          fontFamily: "Menlo, Consolas, monospace",
-          letterSpacing: 1,
+          fontFamily: "'JetBrains Mono', Menlo, monospace",
+          letterSpacing: 2,
           textTransform: "uppercase",
         }}
       >
@@ -124,13 +183,14 @@ export const RunScene: React.FC = () => {
       >
         <div
           style={{
-            backgroundColor: "#161b22",
-            borderRadius: 10,
+            backgroundColor: "#0d1117",
+            borderRadius: 12,
             padding: "20px 24px",
-            border: "1px solid #30363d",
-            height: 520,
+            border: "1px solid #21262d",
+            height: 540,
             display: "flex",
             flexDirection: "column",
+            boxShadow: "0 0 40px rgba(57,208,216,0.06), 0 20px 40px rgba(0,0,0,0.5)",
           }}
         >
           {/* Terminal chrome */}
@@ -138,100 +198,140 @@ export const RunScene: React.FC = () => {
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ff5f57" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ffbd2e" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#28ca41" }} />
-            <span style={{ marginLeft: 8, color: "#6e7681", fontSize: 11, fontFamily: "Menlo, monospace" }}>
+            <span
+              style={{
+                marginLeft: 8,
+                color: "#6e7681",
+                fontSize: 11,
+                fontFamily: "'JetBrains Mono', Menlo, monospace",
+              }}
+            >
               ghostrun — zsh
             </span>
           </div>
 
           <div
             style={{
-              fontFamily: "Menlo, Consolas, 'Courier New', monospace",
+              fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
               fontSize: 12.5,
-              lineHeight: 1.75,
+              lineHeight: 1.85,
               flex: 1,
               overflow: "hidden",
             }}
           >
-            {/* Command line */}
-            <div style={{ color: "#e6edf3", opacity: headerOpacity }}>
-              $ node ghostrun.js run login-flow
+            <div style={{ color: "#e6edf3" }}>
+              <span style={{ color: "#6e7681" }}>$</span> ghostrun run a3f8c2b1
             </div>
-            <div style={{ minHeight: "1.75em" }} />
-
-            {/* Header */}
-            <div style={{ color: "#e6edf3", opacity: headerOpacity, fontWeight: 600 }}>
-              Running: Login Flow  👤
+            <div style={{ minHeight: "1.85em" }} />
+            <div style={{ color: "#e6edf3", fontWeight: 700, fontSize: 14 }}>
+              Running: Login Flow 👤
             </div>
-            <div style={{ color: "#6e7681", opacity: headerOpacity }}>
-              URL: https://app.example.com
+            <div style={{ color: "#6e7681", fontSize: 12, marginBottom: 16 }}>
+              a3f8c2b1 · production
             </div>
-            <div style={{ minHeight: "1.75em" }} />
-
-            {/* Separator */}
-            {frame >= 20 && (
-              <div style={{ color: "#30363d" }}>{SEPARATOR}</div>
-            )}
 
             {/* Steps */}
             {RUN_STEPS.map((step) => {
-              if (frame < step.startFrame) return null;
+              if (frame < step.startFrame - 2) return null;
               const stepOpacity = interpolate(
+                frame - step.startFrame + 2,
+                [0, 10],
+                [0, 1],
+                { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+              );
+              const resultOpacity = interpolate(
                 frame - step.startFrame,
-                [0, 8],
+                [8, 18],
                 [0, 1],
                 { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
               );
               return (
                 <div
                   key={step.num}
-                  style={{
-                    opacity: stepOpacity,
-                    display: "flex",
-                    gap: 8,
-                    color: "#e6edf3",
-                    whiteSpace: "pre",
-                  }}
+                  style={{ opacity: stepOpacity, marginBottom: 4 }}
                 >
-                  <span style={{ color: "#6e7681", minWidth: 18, textAlign: "right" }}>
-                    {step.num}
-                  </span>
-                  <span style={{ color: "#30363d" }}> </span>
-                  <CheckMark startFrame={step.startFrame} frame={frame} />
-                  <span style={{ color: "#30363d" }}> </span>
-                  <span style={{ flex: 1, color: "#e6edf3" }}>
-                    {step.label.padEnd(20)}
-                  </span>
-                  <span style={{ color: "#6e7681", textAlign: "right", minWidth: 50 }}>
-                    {step.ms}ms
-                  </span>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      color: "#e6edf3",
+                    }}
+                  >
+                    <span style={{ color: "#6e7681", fontSize: 11, minWidth: 36 }}>
+                      [{step.num}/{step.total}]
+                    </span>
+                    <ProgressBar
+                      full={step.barFull}
+                      startFrame={step.startFrame}
+                      frame={frame}
+                    />
+                    <span style={{ fontSize: 12.5 }}>{step.label}</span>
+                  </div>
+                  <div
+                    style={{
+                      paddingLeft: 48,
+                      opacity: resultOpacity,
+                      color: "#6e7681",
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <CheckMark startFrame={step.startFrame + 10} frame={frame} />
+                    <span style={{ marginLeft: 4 }}>passed ({step.ms}ms)</span>
+                  </div>
                 </div>
               );
             })}
 
-            {/* Separator */}
-            {frame >= 95 && (
-              <div style={{ color: "#30363d" }}>{SEPARATOR}</div>
+            {/* Separator + Passed */}
+            {frame >= 96 && (
+              <div style={{ color: "#21262d", marginTop: 8 }}>
+                ────────────────────────────────────────────
+              </div>
             )}
-
-            {/* Passed */}
-            {frame >= 100 && (
+            {frame >= 98 && (
               <div
                 style={{
                   opacity: passedOpacity,
-                  color: "#3fb950",
-                  fontWeight: 700,
+                  transform: `translateY(${interpolate(passedSpring, [0, 1], [10, 0])}px)`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
                   marginTop: 4,
-                  fontSize: 13,
                 }}
               >
-                ✓ Passed in 1.1s
+                <span
+                  style={{
+                    color: "#3fb950",
+                    fontSize: 16,
+                    fontWeight: 700,
+                    textShadow: "0 0 20px rgba(63, 185, 80, 0.6)",
+                  }}
+                >
+                  ✓ Flow passed!
+                </span>
+                <span style={{ color: "#6e7681", fontSize: 13 }}>(1123ms)</span>
+              </div>
+            )}
+            {frame >= 100 && (
+              <div
+                style={{
+                  opacity: interpolate(frame, [100, 114], [0, 1], {
+                    extrapolateLeft: "clamp",
+                    extrapolateRight: "clamp",
+                  }),
+                  color: "#6e7681",
+                  fontSize: 12,
+                }}
+              >
+                → Run ID: <span style={{ color: "#39d0d8" }}>a3f8c2b1</span>
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Screenshots panel */}
+      {/* Screenshot panel */}
       <div
         style={{
           flex: 1,
@@ -239,101 +339,74 @@ export const RunScene: React.FC = () => {
           display: "flex",
           flexDirection: "column",
           justifyContent: "center",
-          alignItems: "center",
-          gap: 0,
-          position: "relative",
+          opacity: ssOpacity,
+          transform: `translateX(${ssX}px)`,
         }}
       >
         <div
           style={{
-            fontSize: 11,
-            color: "#6e7681",
-            fontFamily: "Menlo, monospace",
-            letterSpacing: 1,
-            marginBottom: 24,
-            textTransform: "uppercase",
+            borderRadius: 12,
+            overflow: "hidden",
+            border: "1px solid #21262d",
+            boxShadow: "0 0 30px rgba(63,185,80,0.08), 0 20px 50px rgba(0,0,0,0.6)",
           }}
         >
-          Screenshots
+          <Img
+            src={staticFile("screen-run.png")}
+            style={{ width: "100%", display: "block" }}
+          />
         </div>
 
-        {/* Stacked polaroid cards */}
-        <div
-          style={{
-            position: "relative",
-            width: 260,
-            height: 340,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          {/* Card 3 - back */}
-          <div style={{ position: "absolute", top: 60, left: 30 }}>
-            <ScreenshotCard
-              src="step-7.png"
-              label="step-7 · assert dashboard"
-              startFrame={95}
-              rotation={5}
-            />
-          </div>
-
-          {/* Card 2 - middle */}
-          <div style={{ position: "absolute", top: 30, left: 15 }}>
-            <ScreenshotCard
-              src="step-3.png"
-              label="step-3 · fill credentials"
-              startFrame={65}
-              rotation={-3}
-            />
-          </div>
-
-          {/* Card 1 - front */}
-          <div style={{ position: "absolute", top: 0, left: 0 }}>
-            <ScreenshotCard
-              src="step-1.png"
-              label="step-1 · navigate"
-              startFrame={30}
-              rotation={1}
-            />
-          </div>
-        </div>
-
-        {/* Step counter badge */}
+        {/* Pass rate badge */}
         {frame >= 100 && (
           <div
             style={{
-              marginTop: 32,
-              backgroundColor: "#1c2128",
-              border: "1px solid #3fb95066",
-              borderRadius: 20,
-              padding: "6px 16px",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              opacity: interpolate(frame, [100, 110], [0, 1], {
+              marginTop: 16,
+              opacity: interpolate(frame, [100, 115], [0, 1], {
                 extrapolateLeft: "clamp",
                 extrapolateRight: "clamp",
               }),
+              transform: `scale(${interpolate(
+                spring({ frame: frame - 100, fps, config: { damping: 14, stiffness: 160, mass: 0.6 } }),
+                [0, 1],
+                [0.7, 1]
+              )})`,
+              display: "flex",
+              justifyContent: "center",
             }}
           >
             <div
               style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                backgroundColor: "#3fb950",
-              }}
-            />
-            <span
-              style={{
-                fontSize: 12,
-                color: "#3fb950",
-                fontFamily: "Menlo, monospace",
+                backgroundColor: "rgba(63, 185, 80, 0.1)",
+                border: "1px solid rgba(63, 185, 80, 0.35)",
+                borderRadius: 20,
+                padding: "8px 20px",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                boxShadow: "0 0 20px rgba(63, 185, 80, 0.15)",
               }}
             >
-              6 / 6 steps passed
-            </span>
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  backgroundColor: "#3fb950",
+                  boxShadow: "0 0 8px rgba(63, 185, 80, 0.8)",
+                }}
+              />
+              <span
+                style={{
+                  fontSize: 13,
+                  color: "#3fb950",
+                  fontFamily: "'JetBrains Mono', Menlo, monospace",
+                  fontWeight: 600,
+                }}
+              >
+                5 / 5 steps passed
+              </span>
+            </div>
           </div>
         )}
       </div>
