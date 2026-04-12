@@ -85,7 +85,7 @@ export const ChatScene: React.FC = () => {
     extrapolateRight: "clamp",
   });
   const runResultSpring = spring({
-    frame: frame - 130,
+    frame: Math.max(0, frame - 130),
     fps,
     config: { damping: 12, stiffness: 180, mass: 0.6 },
   });

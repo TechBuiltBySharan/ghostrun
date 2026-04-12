@@ -13,7 +13,7 @@ import {
 const StarCounter: React.FC<{ frame: number; fps: number }> = ({ frame, fps }) => {
   const targetStars = 1247;
   const countProgress = spring({
-    frame: frame - 20,
+    frame: Math.max(0, frame - 20),
     fps,
     config: { damping: 20, stiffness: 40, mass: 1.5 },
   });
@@ -144,7 +144,7 @@ export const CTAScene: React.FC = () => {
 
   // Tagline
   const taglineSpring = spring({
-    frame: frame - 40,
+    frame: Math.max(0, frame - 40),
     fps,
     config: { damping: 16, stiffness: 80, mass: 1 },
   });

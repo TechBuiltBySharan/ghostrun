@@ -76,7 +76,7 @@ export const RecordScene: React.FC = () => {
     extrapolateRight: "clamp",
   });
   const savedScale = spring({
-    frame: frame - 128,
+    frame: Math.max(0, frame - 128),
     fps,
     config: { damping: 12, stiffness: 200, mass: 0.6 },
   });

@@ -46,7 +46,7 @@ export const ProblemScene: React.FC = () => {
   });
 
   const untilNowScale = spring({
-    frame: frame - 70,
+    frame: Math.max(0, frame - 70),
     fps,
     config: { damping: 14, stiffness: 100, mass: 0.8 },
   });

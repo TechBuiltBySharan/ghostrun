@@ -31,19 +31,19 @@ const CheckMark: React.FC<{ startFrame: number; frame: number }> = ({
   frame,
 }) => {
   const progress = spring({
-    frame: frame - startFrame,
+    frame: Math.max(0, frame - startFrame),
     fps: 30,
     config: { damping: 10, stiffness: 250, mass: 0.4 },
   });
 
   const scale = interpolate(progress, [0, 1], [0, 1.2]);
   const finalScale = frame > startFrame + 10 ? 1 : scale;
-  const opacity = interpolate(frame - startFrame, [0, 5], [0, 1], {
+  const opacity = interpolate(Math.max(0, frame - startFrame), [0, 5], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  const flashOpacity = interpolate(frame - startFrame, [0, 3, 8], [0, 1, 0], {
+  const flashOpacity = interpolate(Math.max(0, frame - startFrame), [0, 3, 8], [0, 1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -58,7 +58,7 @@ const CheckMark: React.FC<{ startFrame: number; frame: number }> = ({
           display: "inline-block",
           transform: `scale(${finalScale})`,
           opacity,
-          textShadow: `0 0 ${interpolate(frame - startFrame, [0, 5, 15], [20, 30, 8], {
+          textShadow: `0 0 ${interpolate(Math.max(0, frame - startFrame), [0, 5, 15], [20, 30, 8], {
             extrapolateLeft: "clamp",
             extrapolateRight: "clamp",
           })}px rgba(63, 185, 80, 0.8)`,
@@ -90,7 +90,7 @@ const ProgressBar: React.FC<{ full: number; startFrame: number; frame: number }>
   startFrame,
   frame,
 }) => {
-  const progress = interpolate(frame - startFrame, [0, 12], [0, 1], {
+  const progress = interpolate(Math.max(0, frame - startFrame), [0, 12], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -122,7 +122,7 @@ export const RunScene: React.FC = () => {
   });
 
   const passedSpring = spring({
-    frame: frame - 98,
+    frame: Math.max(0, frame - 98),
     fps,
     config: { damping: 14, stiffness: 120, mass: 0.8 },
   });
@@ -367,7 +367,7 @@ export const RunScene: React.FC = () => {
                 extrapolateRight: "clamp",
               }),
               transform: `scale(${interpolate(
-                spring({ frame: frame - 100, fps, config: { damping: 14, stiffness: 160, mass: 0.6 } }),
+                spring({ frame: Math.max(0, frame - 100), fps, config: { damping: 14, stiffness: 160, mass: 0.6 } }),
                 [0, 1],
                 [0.7, 1]
               )})`,
