@@ -1,22 +1,34 @@
-# Flowmind MCP Server Setup
+# GhostRun MCP Server
 
-The Flowmind MCP server lets AI assistants (Claude, etc.) directly list flows, run them, and inspect results.
+GhostRun exposes a standard [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server. Any MCP-compatible AI client can connect to it — not just Claude Desktop.
+
+**Works with:** Claude Desktop · Cursor · Windsurf · OpenClaw · Zed · any MCP client
 
 ## Quick Start
 
-Run the server directly:
 ```bash
-npx tsx mcp-server.ts
-# or using compiled version:
+# Compiled version (recommended)
 node mcp-server.js
+
+# TypeScript source (dev)
+npx tsx mcp-server.ts
 ```
 
-## Claude Desktop Integration
+## Available Tools
 
-Add to your `claude_desktop_config.json`:
+| Tool | Description |
+|------|-------------|
+| `list_flows` | List all saved flows with pass rates |
+| `get_flow` | Get flow details and step graph |
+| `run_flow` | Execute a flow with Playwright (headless) |
+| `get_run_result` | Detailed per-step results with screenshots |
+| `list_runs` | Recent run history |
+| `delete_flow` | Remove a flow |
+| `get_status` | Statistics, AI provider, creator breakdown |
 
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+## Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -25,37 +37,46 @@ Add to your `claude_desktop_config.json`:
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/ghostrun/mcp-server.js"],
       "env": {
-        "ANTHROPIC_API_KEY": "your_key_here"
+        "ANTHROPIC_API_KEY": "optional — enables AI failure analysis"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. You'll see Flowmind tools available.
-
-## Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `list_flows` | List all saved flows |
-| `get_flow` | Get flow details and steps |
-| `run_flow` | Execute a flow with Playwright |
-| `get_run_result` | Detailed step-by-step results |
-| `list_runs` | Recent run history |
-| `delete_flow` | Remove a flow |
-| `get_status` | Statistics and system info |
-
-## Example Usage with Claude
-
-Once connected, you can ask Claude:
-- *"List all my Flowmind flows"*
+Restart Claude Desktop. Ask it:
+- *"List my GhostRun flows"*
 - *"Run the login flow and tell me if it passed"*
-- *"What failed in the last run of the checkout flow?"*
-- *"Run all flows and summarize the results"*
+- *"What failed in the last checkout run?"*
 
-## With AI Analysis
+## Cursor / Windsurf / Other MCP Clients
 
-Set `ANTHROPIC_API_KEY` in the env block above to enable Claude to generate
-plain-English failure summaries when flows fail. Claude will explain what
-went wrong and how to fix it.
+Point your MCP client at the server process:
+
+```
+command: node
+args:    ["/absolute/path/to/ghostrun/mcp-server.js"]
+```
+
+Refer to your client's MCP documentation for the exact config format.
+
+## Programmatic (stdio transport)
+
+```typescript
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const transport = new StdioClientTransport({
+  command: "node",
+  args: ["/path/to/mcp-server.js"],
+});
+const client = new Client({ name: "my-app", version: "1.0" }, { capabilities: {} });
+await client.connect(transport);
+
+// List flows
+const result = await client.callTool({ name: "list_flows", arguments: {} });
+```
+
+## AI Analysis
+
+Set `ANTHROPIC_API_KEY` (or run Ollama locally) to enable plain-English failure summaries. When a flow fails, GhostRun explains what broke and how to fix it.

@@ -860,7 +860,7 @@ async function runLearn(url: string, nameOverride?: string) {
 // COMMANDS — run
 // ============================================
 
-async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string> }> {
+async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean; visible?: boolean }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string> }> {
   const log = (s: string) => { if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + '\n'); };
 
   let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
@@ -893,7 +893,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
 
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: !opts?.visible });
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -1127,6 +1127,53 @@ async function executeAction(page: import('playwright').Page, action: string, no
       // Checked via console error tracking; just passes by default here
       break;
     }
+    case 'extract': {
+      const variable = (node.variable as string) || 'extracted';
+      const selector = node.selector as string;
+      let extractedValue = '';
+      if (selector) {
+        try {
+          extractedValue = await page.locator(selector).first().innerText({ timeout: 10000 });
+        } catch {
+          extractedValue = await page.locator(selector).first().getAttribute('value') || '';
+        }
+      } else if (node.attribute && node.selector) {
+        extractedValue = await page.locator(node.selector as string).first().getAttribute(node.attribute as string) || '';
+      }
+      (node as any).__extracted = { variable, value: extractedValue.trim() };
+      break;
+    }
+    case 'scroll:bottom':
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await new Promise(r => setTimeout(r, 1500));
+      break;
+    case 'scroll:up':
+      await page.evaluate(() => window.scrollTo(0, 0));
+      break;
+    case 'scroll:load': {
+      // Scroll to bottom N times, waiting for new content each time (infinite scroll)
+      const times = parseInt((node.value as string) || '5', 10);
+      for (let i = 0; i < times; i++) {
+        const prevHeight = await page.evaluate(() => document.body.scrollHeight);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await new Promise(r => setTimeout(r, 2000));
+        const newHeight = await page.evaluate(() => document.body.scrollHeight);
+        if (newHeight === prevHeight) break; // no more content loaded
+      }
+      break;
+    }
+    case 'next:page': {
+      const nextSel = (node.selector as string) || 'a[rel="next"], [aria-label="Next page"], [aria-label="Next"], button:has-text("Next"), .next-page, .pagination-next';
+      await page.click(nextSel, { timeout: 10000 });
+      await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
+      break;
+    }
+    case 'hover':
+      await page.hover(node.selector as string, { timeout: 10000 });
+      break;
+    case 'screenshot':
+      // No-op — screenshots are always taken after each step
+      break;
   }
 }
 
@@ -1202,11 +1249,15 @@ Return just the selector, like: a[href="/login"]`;
 }
 
 async function runFlow(id: string, vars?: Record<string, string>) {
-  printLogo(); divider();
+  const visible = process.argv.includes('--visible');
+  const outputIdx = process.argv.indexOf('--output');
+  const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === 'json';
+
+  if (!jsonOutput) { printLogo(); divider(); }
   let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
-  console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + '\n');
-  await executeFlow(id, vars);
+  if (!jsonOutput) console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + (visible ? chalk.yellow(' [visible]') : '') + '\n');
+  await executeFlow(id, vars, { visible, jsonOutput });
 }
 
 // ============================================
@@ -2670,6 +2721,396 @@ async function runStoreInstall(slug: string) {
 }
 
 // ============================================
+// COMMANDS — init wizard
+// ============================================
+
+async function runInit() {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  GhostRun Setup Wizard\n'));
+
+  // 1. Ensure data directories
+  fs.mkdirSync(path.join(DATA_PATH, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
+  fs.mkdirSync(path.join(DATA_PATH, 'sessions'), { recursive: true });
+  success('Data directory ready: ' + chalk.cyan(DATA_PATH));
+
+  // 2. Check Playwright / Chromium
+  const { execSync } = require('child_process') as typeof import('child_process');
+  let chromiumOk = false;
+  try {
+    execSync('node -e "require(\'playwright\')"', { stdio: 'ignore' });
+    chromiumOk = true;
+    success('Playwright: installed');
+  } catch { warn('Playwright not found'); }
+
+  if (!chromiumOk) {
+    const installPw = await askQuestion(chalk.cyan('  Install Playwright + Chromium? (Y/n) '));
+    if (installPw.toLowerCase() !== 'n') {
+      console.log(chalk.gray('  Running: npm install playwright...\n'));
+      try {
+        execSync('npm install playwright', { stdio: 'inherit', cwd: __dirname });
+        execSync('npx playwright install chromium', { stdio: 'inherit' });
+        success('Playwright + Chromium installed');
+      } catch { errorMsg('Installation failed. Run manually: npm install playwright && npx playwright install chromium'); }
+    }
+  } else {
+    // Check if chromium browser is actually installed
+    try {
+      execSync('npx playwright install chromium --dry-run', { stdio: 'ignore' });
+    } catch {
+      const installBrowser = await askQuestion(chalk.cyan('  Chromium browser not found. Install it? (Y/n) '));
+      if (installBrowser.toLowerCase() !== 'n') {
+        execSync('npx playwright install chromium', { stdio: 'inherit' });
+        success('Chromium installed');
+      }
+    }
+  }
+
+  // 3. Check AI provider
+  console.log();
+  const ollamaModel = await isOllamaRunning();
+  if (ollamaModel) {
+    success('AI: Ollama running — ' + chalk.cyan(ollamaModel));
+  } else if (process.env.ANTHROPIC_API_KEY) {
+    success('AI: Anthropic API key detected');
+  } else {
+    warn('No AI provider found');
+    console.log();
+    console.log(chalk.bold('  Choose an AI provider:\n'));
+    console.log(`  ${chalk.green('A)')} Ollama ${chalk.gray('(recommended — free, fully local, no internet needed)')}`);
+    console.log(chalk.gray('     brew install ollama && ollama pull gemma3:4b && ollama serve\n'));
+    console.log(`  ${chalk.cyan('B)')} Anthropic ${chalk.gray('(cloud — needs API key)')}`);
+    console.log(chalk.gray('     export ANTHROPIC_API_KEY=sk-ant-...\n'));
+
+    const choice = await askQuestion(chalk.cyan('  Try to start Ollama now? (y/N) '));
+    if (choice.toLowerCase() === 'y') {
+      try {
+        const { spawn: sp } = require('child_process') as typeof import('child_process');
+        sp('ollama', ['serve'], { detached: true, stdio: 'ignore' }).unref();
+        await new Promise(r => setTimeout(r, 2000));
+        const modelCheck = await isOllamaRunning();
+        if (modelCheck) success('Ollama started: ' + chalk.cyan(modelCheck));
+        else {
+          warn('Ollama started but no model found. Pull one:');
+          console.log(chalk.cyan('  ollama pull gemma3:4b'));
+        }
+      } catch { warn('Could not start Ollama. Install it from https://ollama.com'); }
+    }
+  }
+
+  // 4. Create .ghostrun.env template in CWD if missing
+  console.log();
+  const envFile = path.join(process.cwd(), '.ghostrun.env');
+  if (!fs.existsSync(envFile)) {
+    fs.writeFileSync(envFile, [
+      '# GhostRun variables — used as {{VARIABLE}} in flows',
+      '# BASE_URL=https://your-app.com',
+      '# EMAIL=test@example.com',
+      '# PASSWORD=secret',
+      '',
+    ].join('\n'));
+    info('.ghostrun.env template created in current directory');
+  } else {
+    info('.ghostrun.env already exists');
+  }
+
+  divider();
+  console.log(chalk.bold.green('\n  Setup complete!\n'));
+  console.log('  ' + chalk.gray('Record a flow:   ') + chalk.cyan('ghostrun learn https://your-app.com'));
+  console.log('  ' + chalk.gray('Run a flow:      ') + chalk.cyan('ghostrun run <name>'));
+  console.log('  ' + chalk.gray('Run (visible):   ') + chalk.cyan('ghostrun run <name> --visible'));
+  console.log('  ' + chalk.gray('Ask the bot:     ') + chalk.cyan('ghostrun chat'));
+  console.log('  ' + chalk.gray('Browse templates:') + chalk.cyan('ghostrun store list'));
+  console.log();
+}
+
+// ============================================
+// COMMANDS — monitor (extract + diff)
+// ============================================
+
+async function runMonitor(flowId: string) {
+  printLogo(); divider();
+
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
+
+  const outputIdx = process.argv.indexOf('--output');
+  const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === 'json';
+
+  console.log(chalk.bold('\n  Monitor: ') + chalk.white(flow.name) + '\n');
+
+  // Get previous run's extracted data for diff
+  const previousRuns = db.listRuns(flow.id, 2);
+  let prevData: Record<string, string> = {};
+  if (previousRuns.length > 0) {
+    db.getRunData(previousRuns[0].id).forEach(d => { prevData[d.variableName] = d.variableValue; });
+  }
+
+  // Run the flow
+  const result = await executeFlow(flow.id, globalVars, { jsonOutput: false, quiet: false });
+  const extractedData = result.extractedData;
+
+  if (Object.keys(extractedData).length === 0) {
+    console.log();
+    warn('No data extracted. Add extract: actions to your flow to capture data.');
+    console.log(chalk.gray('  Flow JSON example:'));
+    console.log(chalk.gray('  { "action": "extract", "variable": "price", "selector": ".price" }'));
+    console.log();
+    return;
+  }
+
+  divider();
+  console.log(chalk.bold('\n  Extracted Data\n'));
+
+  let hasChanges = false;
+  for (const [key, value] of Object.entries(extractedData)) {
+    const prev = prevData[key];
+    if (prev !== undefined && prev !== value) {
+      console.log(`  ${chalk.yellow('~')} ${chalk.white(key.padEnd(20))} ${chalk.gray(prev.slice(0, 40))} ${chalk.yellow('→')} ${chalk.yellow(value.slice(0, 40))}`);
+      hasChanges = true;
+    } else {
+      console.log(`  ${chalk.green('=')} ${chalk.white(key.padEnd(20))} ${chalk.cyan(value.slice(0, 60))}`);
+    }
+  }
+
+  console.log();
+  if (Object.keys(prevData).length > 0) {
+    if (hasChanges) {
+      console.log(chalk.yellow.bold('  ⚠ Changes detected since last run'));
+    } else {
+      console.log(chalk.green('  ✓ No changes since last run'));
+    }
+  } else {
+    console.log(chalk.gray('  (no previous run to compare — run again to see changes)'));
+  }
+
+  if (jsonOutput) {
+    console.log('\n' + JSON.stringify({ flowId: flow.id, flowName: flow.name, runId: result.runId, extractedData, hasChanges }, null, 2));
+  }
+  console.log();
+}
+
+// ============================================
+// COMMANDS — chat (local Q&A bot)
+// ============================================
+
+async function runChat() {
+  printLogo(); divider();
+
+  const ollamaModel = await isOllamaRunning();
+  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+
+  if (!ollamaModel && !hasAnthropic) {
+    errorMsg('No AI provider available for chat.');
+    console.log(chalk.gray('\n  Option A (free + local): brew install ollama && ollama pull gemma3:4b && ollama serve'));
+    console.log(chalk.gray('  Option B (cloud):        export ANTHROPIC_API_KEY=sk-ant-...\n'));
+    process.exit(1);
+  }
+
+  const providerLabel = ollamaModel ? chalk.green(`Ollama (${ollamaModel})`) : chalk.cyan('Anthropic');
+
+  console.log(chalk.bold('\n  👻 GhostRun Chat\n'));
+  console.log('  ' + chalk.gray('Powered by ') + providerLabel + chalk.gray('  ·  type ') + chalk.cyan('exit') + chalk.gray(' to quit'));
+  console.log('  ' + chalk.gray('Ask about flows, failures, commands, or say "run <flow-name>"'));
+  console.log();
+  divider();
+
+  // Build fresh system prompt each turn (live DB data)
+  function buildSystemPrompt(): string {
+    const flows = db.listFlows();
+    const recentRuns = db.listRuns(undefined, 10);
+
+    const flowsList = flows.length > 0
+      ? flows.map(f => {
+          const stats = db.getFlowStats(f.id);
+          return `- "${f.name}" (id:${f.id.slice(0, 8)}, url:${f.appUrl || 'N/A'}, ${stats.totalRuns} runs, ${Math.round(stats.passRate * 100)}% pass rate, by:${f.createdBy})`;
+        }).join('\n')
+      : '(no flows yet)';
+
+    const runsList = recentRuns.length > 0
+      ? recentRuns.map(r => {
+          const fl = db.getFlow(r.flowId);
+          const dur = r.duration ? `${(r.duration / 1000).toFixed(1)}s` : '?';
+          const when = timeAgo(r.startedAt);
+          const note = r.summary ? ` — ${r.summary.split('\n')[0].slice(0, 60)}` : '';
+          return `- ${r.status === 'passed' ? '✓' : '✗'} "${fl?.name || 'Unknown'}" ${when} (${dur})${note}`;
+        }).join('\n')
+      : '(no runs yet)';
+
+    return `You are GhostRun Assistant — an embedded AI helper for GhostRun, a memory-driven web automation CLI.
+
+GhostRun lets developers record browser flows and replay them headlessly for testing, monitoring, and data extraction. Uses Playwright + SQLite. AI (Ollama/Anthropic) powers failure analysis, flow generation, and this chat.
+
+## Core Commands
+- ghostrun learn <url>          — Record a flow (real browser)
+- ghostrun run <id|name>        — Run headlessly
+- ghostrun run <name> --visible — Run with visible browser (for debugging)
+- ghostrun run <name> --output json — JSON output with extracted data
+- ghostrun flow:list            — List flows with pass rates
+- ghostrun run:list             — Recent runs
+- ghostrun run:show <id>        — Per-step details + screenshots
+- ghostrun run:analyze <id>     — AI failure analysis
+- ghostrun monitor <flow>       — Run + show extracted data changes
+- ghostrun explore <url>        — BFS crawl + auto-generate flows with AI
+- ghostrun create               — Generate flow from plain English
+- ghostrun store list/install   — Browse + install 10 template flows
+- ghostrun suite:create/run     — Group flows into test suites
+- ghostrun chat                 — This chat interface
+- ghostrun init                 — Setup wizard
+- ghostrun status               — Stats + AI provider info
+- ghostrun serve                — Scheduler daemon (runs cron schedules)
+
+## Flow Actions Supported
+navigate, click, fill, select, check, wait, press, hover,
+assert:text, assert:url, assert:element, assert:title,
+extract (capture page data to variable),
+scroll:bottom, scroll:up, scroll:load (infinite scroll),
+next:page (pagination)
+
+## Variables
+Use {{VAR_NAME}} in flows. Pass with --var KEY=value or .ghostrun.env file in CWD.
+
+## Creator Types
+👤 human = recorded live · 🤖 agent = AI-generated (via create/explore/store)
+
+## YOUR FLOWS RIGHT NOW
+${flowsList}
+
+## RECENT RUN HISTORY
+${runsList}
+
+## Response Rules
+1. Be concise and practical — developers prefer direct answers
+2. If asked to RUN an existing flow, write exactly: [RUN: <flow-name>]
+3. Only reference flows that actually exist in the list above
+4. If asked about a failed run, check the run history summary above
+5. To create NEW flows: ghostrun create (AI) or ghostrun learn <url> (browser recording)
+6. If you don't know something, say so — don't invent flow names or IDs`;
+  }
+
+  const conversationHistory: Array<{ role: string; content: string }> = [];
+
+  async function* streamResponse(userMessage: string): AsyncGenerator<string> {
+    conversationHistory.push({ role: 'user', content: userMessage });
+
+    if (ollamaModel) {
+      const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || 'http://localhost:11434';
+      let fullResponse = '';
+      try {
+        const res = await fetch(`${baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: ollamaModel,
+            messages: [
+              { role: 'system', content: buildSystemPrompt() },
+              ...conversationHistory,
+            ],
+            stream: true,
+          }),
+          signal: AbortSignal.timeout(90000),
+        });
+        if (!res.ok || !res.body) { yield '(Ollama unavailable — is it running?)'; return; }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const data = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+              const chunk = data.message?.content || '';
+              if (chunk) { yield chunk; fullResponse += chunk; }
+              if (data.done) {
+                conversationHistory.push({ role: 'assistant', content: fullResponse });
+                return;
+              }
+            } catch {}
+          }
+        }
+        if (fullResponse) conversationHistory.push({ role: 'assistant', content: fullResponse });
+      } catch (err) {
+        yield `\n(Error: ${err instanceof Error ? err.message : err})`;
+      }
+    } else {
+      // Anthropic fallback — not streaming, but still works
+      const Anthropic = (await import('@anthropic-ai/sdk')).default;
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      try {
+        const msg = await client.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1024,
+          system: buildSystemPrompt(),
+          messages: conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        });
+        const text = msg.content[0]?.type === 'text' ? msg.content[0].text : '(no response)';
+        conversationHistory.push({ role: 'assistant', content: text });
+        yield text;
+      } catch (err) {
+        yield `(Anthropic error: ${err instanceof Error ? err.message : err})`;
+      }
+    }
+  }
+
+  // Chat loop
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const askUser = (): Promise<string> => new Promise(resolve => {
+    process.stdout.write(chalk.cyan('\n  You  › '));
+    rl.once('line', resolve);
+  });
+
+  while (true) {
+    let input: string;
+    try { input = (await askUser()).trim(); } catch { break; }
+
+    if (!input || ['exit', 'quit', 'q', ':q', 'bye'].includes(input.toLowerCase())) {
+      console.log(chalk.gray('\n  Goodbye! 👻\n'));
+      rl.close();
+      break;
+    }
+
+    process.stdout.write(chalk.magenta('  Ghost › '));
+    let fullResponse = '';
+
+    for await (const chunk of streamResponse(input)) {
+      process.stdout.write(chunk);
+      fullResponse += chunk;
+    }
+    process.stdout.write('\n');
+
+    // Detect run intent: [RUN: flow-name]
+    const runMatch = fullResponse.match(/\[RUN:\s*([^\]]+)\]/i);
+    if (runMatch) {
+      const flowQuery = runMatch[1].trim();
+      const targetFlow = db.findFlowByPartialId(flowQuery) || db.findFlowByName(flowQuery);
+      if (targetFlow) {
+        process.stdout.write(chalk.cyan(`\n  Run "${targetFlow.name}"? (y/N) `));
+        const confirm = await new Promise<string>(resolve => rl.once('line', resolve));
+        if (confirm.trim().toLowerCase() === 'y') {
+          console.log();
+          const result = await executeFlow(targetFlow.id, globalVars);
+          console.log();
+          // Feed result back into conversation so bot can comment on it
+          const resultSummary = result.passed
+            ? `Flow "${targetFlow.name}" passed in ${result.duration}ms.`
+            : `Flow "${targetFlow.name}" failed in ${result.duration}ms.`;
+          conversationHistory.push({ role: 'user', content: `[SYSTEM: ${resultSummary}]` });
+        }
+      } else {
+        warn(`Flow not found: "${flowQuery}"`);
+      }
+    }
+  }
+}
+
+// ============================================
 // INTERACTIVE MODE
 // ============================================
 
@@ -2718,6 +3159,7 @@ async function runInteractive() {
         { value: 'explore',  label: '🔍 Explore a URL',            hint: 'auto-discover flows with AI' },
         { value: 'schedule', label: '🕐 Manage schedules',         hint: 'cron-based automation' },
         { value: 'status',   label: '📊 System status',            hint: 'stats + AI provider' },
+        { value: 'chat',     label: '💬 Ask GhostRun Bot',           hint: 'Q&A + run flows by name' },
         { value: 'app',      label: '🖥  Open desktop app',          hint: 'Electron UI' },
         { value: 'exit',     label: '✕  Exit' },
       ],
@@ -2878,6 +3320,12 @@ async function runInteractive() {
       }
     }
 
+    // ── CHAT ────────────────────────────────────────────────
+    else if (action === 'chat') {
+      console.log();
+      await runChat();
+    }
+
     // ── APP ─────────────────────────────────────────────────
     else if (action === 'app') {
       await runDesktopApp();
@@ -2925,6 +3373,8 @@ async function main() {
     H('Record & Run');
     console.log(`  ${C('learn <url> [name]')}${G('Record a new flow (opens real browser)')}`);
     console.log(`  ${C('run <id|name> [--var k=v]')}${G('Execute a flow headlessly')}`);
+    console.log(`  ${C('run <id> --visible')}${G('Run with visible browser window')}`);
+    console.log(`  ${C('run <id> --output json')}${G('JSON output with extracted data')}`);
     console.log(`  ${C('create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
     console.log(`  ${C('code:scan <directory>')}${G('Scan codebase, create draft flows    🤖 AI')}`);
     console.log();
@@ -2970,6 +3420,17 @@ async function main() {
     console.log(`  ${C('store install <name>')}${G('Install a template (sets {{variables}})')}`);
     console.log();
 
+    H('Data Extraction & Monitoring');
+    console.log(`  ${C('monitor <id|name>')}${G('Run flow + show extracted data changes')}`);
+    console.log(`  ${C('monitor <id> --output json')}${G('Monitor with JSON output')}`);
+    console.log(chalk.gray(`  ${'  Flow actions: extract, scroll:bottom, scroll:load, next:page'.padEnd(52)}`));
+    console.log();
+
+    H('Chat & Setup');
+    console.log(`  ${C('chat')}${G('Ask GhostRun Bot — Q&A + run flows      🤖 AI')}`);
+    console.log(`  ${C('init')}${G('Setup wizard (Chromium + AI provider)')}`);
+    console.log();
+
     H('Exploration & System');
     console.log(`  ${C('explore <url>')}${G('Auto-discover flows via BFS crawl       🤖 AI')}`);
     console.log(`  ${C('explore:confirm <report-id>')}${G('Save confirmed flows from explore')}`);
@@ -2978,13 +3439,17 @@ async function main() {
     console.log();
     console.log(chalk.gray('  🤖 AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)'));
     console.log(chalk.gray('  👤     = human-recorded   🤖 = agent/AI-generated'));
-    console.log(chalk.gray('  Variables: --var key=value  or  .ghostrun.env file in CWD'));
+    console.log(chalk.gray('  Flags:     --visible (show browser)  --output json  --var key=value'));
     console.log();
     process.exit(0);
   }
 
   switch (cmd) {
-    case 'init':            console.log(chalk.green('  ✓ Initialized at ' + DATA_PATH)); break;
+    case 'init':            await runInit(); break;
+    case 'chat':            await runChat(); break;
+    case 'monitor':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runMonitor(args[1]); break;
     case 'learn':
       if (!args[1]) { errorMsg('URL required'); process.exit(1); }
       await runLearn(args[1]); break;
@@ -3057,6 +3522,12 @@ async function main() {
       if (!args[1]) { errorMsg('Directory required'); process.exit(1); }
       await runCodeScan(args[1]); break;
     case 'store':
+      if (args[1] === 'list' || !args[1]) { await runStoreList(); }
+      else if (args[1] === 'install') {
+        if (!args[2]) { errorMsg('Template name required. Run: ghostrun store list'); process.exit(1); }
+        await runStoreInstall(args[2]);
+      } else { errorMsg('Unknown store command. Use: store list / store install <name>'); process.exit(1); }
+      break;
     case 'store:list':       await runStoreList(); break;
     case 'store:install':
       if (!args[1]) { errorMsg('Template name required. Run store:list to see options.'); process.exit(1); }
