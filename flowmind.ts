@@ -2,7 +2,7 @@
 
 /**
  * Flowmind CLI — Memory-driven Web Automation
- * v0.5.0
+ * v0.6.0
  */
 
 import { chromium } from 'playwright';
@@ -27,6 +27,7 @@ class DatabaseManager {
   constructor() {
     fs.mkdirSync(path.join(DATA_PATH, 'data'), { recursive: true });
     fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
+    fs.mkdirSync(path.join(DATA_PATH, 'sessions'), { recursive: true });
     this.db = new Database(DB_PATH);
     this.initialize();
     this.runMigrations();
@@ -90,17 +91,28 @@ class DatabaseManager {
         confirmed INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (report_id) REFERENCES explore_reports(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS run_data (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        variable_name TEXT NOT NULL,
+        variable_value TEXT NOT NULL,
+        step_number INTEGER NOT NULL,
+        UNIQUE(run_id, variable_name),
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
     `);
   }
 
   // ---- Flows ----
-  createFlow(data: { name: string; description?: string; appUrl?: string; graph?: object }) {
+  createFlow(data: { name: string; description?: string; appUrl?: string; graph?: object; createdBy?: string }) {
     const id = uuidv4();
     const now = new Date().toISOString();
-    this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now);
+    const createdBy = data.createdBy || 'human';
+    this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now, createdBy);
     return this.getFlow(id)!;
   }
+  verifyFlow(id: string) { this.db.prepare('UPDATE flows SET verified = 1 WHERE id = ?').run(id); }
   getFlow(id: string) {
     const r = this.db.prepare('SELECT * FROM flows WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return r ? this.mapFlow(r) : null;
@@ -130,7 +142,9 @@ class DatabaseManager {
   private mapFlow(r: Record<string, unknown>) {
     return { id: r.id as string, name: r.name as string, description: r.description as string | null,
       appUrl: r.app_url as string | null, graph: r.graph as string,
-      createdAt: new Date(r.created_at as string), updatedAt: new Date(r.updated_at as string) };
+      createdAt: new Date(r.created_at as string), updatedAt: new Date(r.updated_at as string),
+      createdBy: r.created_by as string || 'human',
+      verified: Boolean(r.verified) };
   }
 
   // ---- Runs ----
@@ -234,6 +248,9 @@ class DatabaseManager {
   // ---- DB migrations ----
   private runMigrations() {
     try { this.db.exec('ALTER TABLE steps ADD COLUMN diff_percent REAL'); } catch {}
+    try { this.db.exec("ALTER TABLE flows ADD COLUMN created_by TEXT NOT NULL DEFAULT 'human'"); } catch {}
+    try { this.db.exec('ALTER TABLE flows ADD COLUMN verified INTEGER NOT NULL DEFAULT 0'); } catch {}
+    try { this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))"); } catch {}
   }
 
   // ---- Suites ----
@@ -325,6 +342,29 @@ class DatabaseManager {
   }
 
   close() { this.db.close(); }
+
+  // ---- Run Data (extracted variables) ----
+  saveRunData(runId: string, stepNumber: number, variableName: string, value: string) {
+    const id = uuidv4();
+    this.db.prepare('INSERT OR REPLACE INTO run_data (id, run_id, step_number, variable_name, variable_value) VALUES (?,?,?,?,?)')
+      .run(id, runId, stepNumber, variableName, value);
+  }
+  getRunData(runId: string): Array<{variableName: string; variableValue: string; stepNumber: number}> {
+    return (this.db.prepare('SELECT * FROM run_data WHERE run_id = ? ORDER BY step_number').all(runId) as any[])
+      .map(r => ({ variableName: r.variable_name, variableValue: r.variable_value, stepNumber: r.step_number }));
+  }
+
+  // ---- Flow Stats ----
+  getFlowStats(flowId: string): { totalRuns: number; passRate: number; lastRunStatus: string | null; lastRunAt: string | null } {
+    const r = this.db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) as passed, MAX(started_at) as last_run_at FROM runs WHERE flow_id = ?").get(flowId) as any;
+    const last = this.db.prepare('SELECT status FROM runs WHERE flow_id = ? ORDER BY started_at DESC LIMIT 1').get(flowId) as any;
+    return {
+      totalRuns: r?.total || 0,
+      passRate: r?.total > 0 ? (r.passed || 0) / r.total : 0,
+      lastRunStatus: last?.status || null,
+      lastRunAt: r?.last_run_at || null,
+    };
+  }
 }
 
 // ============================================
@@ -470,6 +510,40 @@ function errorMsg(msg: string) { console.log(chalk.red('  ✗ ') + msg); }
 function warn(msg: string) { console.log(chalk.yellow('  ⚠ ') + msg); }
 function divider() { console.log(chalk.cyan('─'.repeat(60))); }
 
+function timeAgo(dateStr: string | Date): string {
+  const date = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
+  const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  if (sec < 86400 * 7) return `${Math.floor(sec / 86400)}d ago`;
+  return date.toLocaleDateString();
+}
+
+function passRateDots(rate: number, total: number): string {
+  if (total === 0) return chalk.gray('no runs');
+  const filled = Math.round(rate * 6);
+  return chalk.green('●'.repeat(filled)) + chalk.gray('○'.repeat(6 - filled)) + chalk.gray(` ${Math.round(rate * 100)}%`);
+}
+
+function progressBar(current: number, total: number, width = 20): string {
+  const filled = Math.round((current / total) * width);
+  return chalk.cyan('█'.repeat(filled)) + chalk.gray('░'.repeat(width - filled));
+}
+
+function getEnvLabel(url: string): { label: string; color: (s: string) => string } {
+  if (!url) return { label: '', color: chalk.white };
+  if (url.includes('localhost') || url.includes('127.0.0.1')) return { label: 'local', color: chalk.blue };
+  if (url.includes('staging') || url.includes('stage') || url.includes('preprod')) return { label: 'staging', color: chalk.yellow };
+  return { label: 'production', color: chalk.red };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 function askQuestion(question: string): Promise<string> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -612,6 +686,25 @@ function resolveVars(text: string, vars: Record<string, string>): string {
 }
 
 // ============================================
+// SESSION HELPERS
+// ============================================
+
+async function loadSession(context: import('playwright').BrowserContext, name: string) {
+  const sessionPath = path.join(DATA_PATH, 'sessions', `${name}.json`);
+  if (!fs.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
+  const cookies = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
+  await context.addCookies(cookies);
+  return cookies.length;
+}
+
+async function saveSession(context: import('playwright').BrowserContext, name: string) {
+  const cookies = await context.cookies();
+  const sessionPath = path.join(DATA_PATH, 'sessions', `${name}.json`);
+  fs.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
+  return cookies.length;
+}
+
+// ============================================
 // COMMANDS — learn
 // ============================================
 
@@ -625,7 +718,7 @@ async function runLearn(url: string, nameOverride?: string) {
   info('Flow name:  ' + chalk.cyan(flowName));
   console.log();
 
-  const flow = db.createFlow({ name: flowName, appUrl: url });
+  const flow = db.createFlow({ name: flowName, appUrl: url, createdBy: 'human' });
   const capturedActions: RecordedAction[] = [];
   let browserClosed = false;
 
@@ -687,9 +780,10 @@ async function runLearn(url: string, nameOverride?: string) {
     });
   });
 
-  console.log(chalk.bold('  Browser is open — interact with it normally.\n'));
+  console.log(chalk.bgCyan.black.bold('  RECORDING  ') + chalk.bold(' 👤 human flow — browser is live\n'));
   console.log(chalk.gray('  Every click, fill, and navigation is captured automatically.'));
-  console.log(chalk.gray('  Type "a text: Welcome" to add assertion, Enter to stop\n'));
+  console.log(chalk.gray('  Assertions: type  ') + chalk.cyan('a text:<expected>') + chalk.gray('  |  ') + chalk.cyan('a url:<path>') + chalk.gray('  |  ') + chalk.cyan('a title:<text>'));
+  console.log(chalk.gray('  Done?       press ') + chalk.cyan('Enter') + chalk.gray(' or type ') + chalk.cyan('done') + chalk.gray('\n'));
   await page.goto(url);
 
   // Custom readline that supports assertion commands
@@ -750,11 +844,15 @@ async function runLearn(url: string, nameOverride?: string) {
   db.updateFlow(flow.id, { graph: { nodes, edges, appUrl: url } });
 
   divider();
-  success(`${capturedActions.length} actions recorded`);
+  console.log(chalk.bgGreen.black.bold('  SAVED  ') + chalk.bold(` ${capturedActions.length} actions recorded — 👤 human flow\n`));
   const counts = capturedActions.reduce((a, c) => { a[c.type] = (a[c.type] || 0) + 1; return a; }, {} as Record<string, number>);
-  Object.entries(counts).forEach(([t, n]) => info(`  ${t}: ${n}`));
+  const actionIcons: Record<string, string> = { navigate: '🌐', click: '🖱 ', fill: '⌨️ ', select: '📋', check: '☑️ ', assert: '✅' };
+  const countStrs = Object.entries(counts).map(([t, n]) => `${actionIcons[t] || '●'} ${n} ${t}`);
+  console.log('  ' + countStrs.join(chalk.gray('  ·  ')));
   console.log();
-  info('Run with: ' + chalk.green(`node flowmind.js run ${flow.id.slice(0, 8)}`));
+  info(`Flow ID: ${chalk.gray(flow.id.slice(0, 8))}`);
+  info(`Run:     ${chalk.green('node flowmind.js run ' + flow.id.slice(0, 8))}`);
+  info(`Fix:     ${chalk.cyan('node flowmind.js flow:fix ' + flow.id.slice(0, 8))}`);
   console.log();
 }
 
@@ -762,30 +860,57 @@ async function runLearn(url: string, nameOverride?: string) {
 // COMMANDS — run
 // ============================================
 
-async function executeFlow(flowId: string, vars?: Record<string, string>): Promise<{ passed: boolean; runId: string; duration: number }> {
+async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string> }> {
+  const log = (s: string) => { if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + '\n'); };
+
   let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
 
   let graph: { nodes: Record<string, unknown>[]; edges: object[]; appUrl?: string };
-  try { graph = JSON.parse(flow.graph); } catch { errorMsg('Invalid graph'); process.exit(1); return { passed: false, runId: '', duration: 0 }; }
+  try { graph = JSON.parse(flow.graph); } catch { errorMsg('Invalid graph'); process.exit(1); return { passed: false, runId: '', duration: 0, extractedData: {} }; }
 
-  if (!graph.nodes?.length) { warn('Empty flow.'); return { passed: false, runId: '', duration: 0 }; }
+  if (!graph.nodes?.length) { warn('Empty flow.'); return { passed: false, runId: '', duration: 0, extractedData: {} }; }
 
-  if (vars && Object.keys(vars).length > 0) {
+  if (!opts?.jsonOutput && vars && Object.keys(vars).length > 0) {
     console.log(chalk.gray('  Variables: ' + Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(', ')));
+  }
+
+  // Show run header with env + provenance
+  const startUrl = graph.appUrl || flow.appUrl;
+  const { label: envLabel, color: envColor } = getEnvLabel(startUrl || '');
+  const creatorIcon = flow.createdBy === 'agent' ? chalk.magenta(' 🤖') : chalk.blue(' 👤');
+  const verifiedBadge = flow.verified ? chalk.green(' ✓') : '';
+  const provenanceStr = creatorIcon + verifiedBadge;
+  if (!opts?.jsonOutput) {
+    if (envLabel === 'production') {
+      console.log(chalk.red('\n  ┌─────────────────────────────────────┐'));
+      console.log(chalk.red('  │ ⚠ PRODUCTION ENVIRONMENT            │'));
+      console.log(chalk.red('  └─────────────────────────────────────┘'));
+    }
+    console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + provenanceStr);
+    if (startUrl) console.log('  ' + chalk.gray('URL: ') + envColor(startUrl));
   }
 
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  const startUrl = graph.appUrl || flow.appUrl;
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  if (opts?.sessionLoad) {
+    try {
+      const count = await loadSession(context, opts.sessionLoad);
+      if (!opts?.quiet) info(`Session: ${chalk.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+    } catch (e) { warn(String(e)); }
+  }
+
   if (startUrl) await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
   const actionNodes = graph.nodes.filter(n => n.type === 'action') as Array<Record<string, unknown>>;
   let stepNum = 1, failed = false;
   let failedStepInfo: { name: string; action: string; selector?: string | null; errorMessage: string } | null = null;
   const runStart = Date.now();
+  const runVars: Record<string, string> = { ...(vars || {}) };
 
   // Load pixelmatch for baseline diffs (optional)
   let PNG: typeof import('pngjs').PNG | null = null;
@@ -798,17 +923,18 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
 
   for (const node of actionNodes) {
     const label = node.label as string, action = node.action as string;
-    console.log(chalk.cyan(`\n  [${stepNum}/${actionNodes.length}] ${label}`));
+    const barStr = progressBar(stepNum, actionNodes.length);
+    log(chalk.cyan(`\n  [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + chalk.white(label));
     const step = db.createStep({ runId: run.id, stepNumber: stepNum, name: label, action, selector: node.selector as string | undefined, value: node.value as string | undefined });
     const t = Date.now();
     try {
-      // Resolve vars in node fields
-      const resolvedNode = vars ? {
+      // Resolve vars in node fields using runVars (includes extracted vars)
+      const resolvedNode = {
         ...node,
-        url: node.url ? resolveVars(node.url as string, vars) : node.url,
-        value: node.value ? resolveVars(node.value as string, vars) : node.value,
-        selector: node.selector ? resolveVars(node.selector as string, vars) : node.selector,
-      } : node;
+        url: node.url ? resolveVars(node.url as string, runVars) : node.url,
+        value: node.value ? resolveVars(node.value as string, runVars) : node.value,
+        selector: node.selector ? resolveVars(node.selector as string, runVars) : node.selector,
+      };
       await executeAction(page, action, resolvedNode);
       // Auto wait-for-nav after clicks — resolves immediately if no navigation occurred
       if (action === 'click') {
@@ -832,7 +958,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
           const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
           diffPercent = parseFloat(((numDiff / (w * h)) * 100).toFixed(1));
           if (diffPercent > 5) {
-            console.log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
+            log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
           }
         } catch { /* skip diff on error */ }
       }
@@ -841,7 +967,15 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
       if (diffPercent !== undefined && diffPercent > 5) {
         db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
       }
-      console.log(chalk.green(`      ✓ passed (${duration}ms)`));
+      log(chalk.green(`      ✓ passed`) + chalk.gray(` (${duration}ms)`));
+
+      // Handle extract action — save extracted data
+      if (action === 'extract' && (resolvedNode as any).__extracted) {
+        const extracted = (resolvedNode as any).__extracted as { variable: string; value: string };
+        db.saveRunData(run.id, stepNum, extracted.variable, extracted.value);
+        runVars[extracted.variable] = extracted.value;
+        log(chalk.cyan(`      → extracted ${extracted.variable}: ${chalk.white(extracted.value.slice(0, 60))}`));
+      }
     } catch (err) {
       const duration = Date.now() - t;
       let errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
@@ -858,9 +992,9 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
             const screenshot = await page.screenshot();
             const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
             fs.writeFileSync(sp, screenshot);
-            console.log(chalk.yellow(`      ~ healed selector: ${healed}`));
+            log(chalk.yellow(`      ~ healed selector: ${healed}`));
             db.updateStep(step.id, { status: 'passed', duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
-            console.log(chalk.green(`      ✓ passed after heal (${healDuration}ms)`));
+            log(chalk.green(`      ✓ passed after heal (${healDuration}ms)`));
             stepNum++;
             continue;
           } catch { /* healing also failed, fall through */ }
@@ -873,29 +1007,54 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
         fs.writeFileSync(sp, screenshot);
         db.updateStep(step.id, { status: 'failed', duration, errorMessage, screenshotPath: sp });
       } catch { db.updateStep(step.id, { status: 'failed', duration, errorMessage }); }
-      console.log(chalk.red(`      ✗ failed (${duration}ms)`));
-      console.log(chalk.red(`        └─ ${errorMessage}`));
+      log(chalk.red(`      ✗ failed (${duration}ms)`));
+      log(chalk.red(`        └─ ${errorMessage}`));
       failedStepInfo = { name: label, action, selector: node.selector as string | null, errorMessage };
       failed = true;
       break;
     }
     stepNum++;
   }
+
+  if (opts?.sessionSave) {
+    try {
+      const count = await saveSession(context, opts.sessionSave);
+      if (!opts?.quiet) success(`Session saved: ${chalk.cyan(opts.sessionSave)} (${count} cookies)`);
+    } catch (e) { warn(`Could not save session: ${e}`); }
+  }
+
   await browser.close();
 
   const totalDuration = Date.now() - runStart;
   let summary: string | null = null;
   if (failed && failedStepInfo) {
-    process.stdout.write(chalk.gray('\n  Analyzing failure...\n'));
+    if (!opts?.jsonOutput) process.stdout.write(chalk.gray('\n  Analyzing failure...\n'));
     const steps = db.listSteps(run.id);
     const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo }));
     if (result) {
       summary = result.text;
-      process.stdout.write(chalk.gray(`  (via ${result.provider})\n`));
+      if (!opts?.jsonOutput) process.stdout.write(chalk.gray(`  (via ${result.provider})\n`));
     }
   }
 
   db.updateRun(run.id, { status: failed ? 'failed' : 'passed', completedAt: new Date(), duration: totalDuration, errorMessage: failedStepInfo?.errorMessage, summary: summary || undefined });
+
+  // Collect extracted data
+  const extractedData: Record<string, string> = {};
+  db.getRunData(run.id).forEach(d => { extractedData[d.variableName] = d.variableValue; });
+
+  if (opts?.jsonOutput) {
+    const steps = db.listSteps(run.id);
+    console.log(JSON.stringify({
+      passed: !failed, runId: run.id, flowId: flow.id, flowName: flow.name,
+      duration: totalDuration, steps: steps.map(s => ({
+        stepNumber: s.stepNumber, name: s.name, status: s.status, duration: s.duration,
+        screenshotPath: s.screenshotPath, errorMessage: s.errorMessage
+      })),
+      extractedData, summary
+    }));
+    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
+  }
 
   divider();
   if (failed) {
@@ -920,7 +1079,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>): Promi
   info('Run ID: ' + chalk.gray(run.id.slice(0, 8)));
   info('Screenshots: ' + chalk.cyan(screenshotsDir));
   console.log();
-  return { passed: !failed, runId: run.id, duration: totalDuration };
+  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
 }
 
 async function executeAction(page: import('playwright').Page, action: string, node: Record<string, unknown>) {
@@ -1264,14 +1423,35 @@ async function runDiff(runId1: string, runId2: string) {
 
 async function runListFlows() {
   const flows = db.listFlows();
-  console.log(chalk.bold('\n  Your Flows\n'));
+  const humanCount = flows.filter(f => f.createdBy === 'human').length;
+  const agentCount = flows.filter(f => f.createdBy === 'agent').length;
+
+  console.log(chalk.bold('\n  Flows'));
+  if (flows.length > 0) {
+    const parts: string[] = [];
+    if (humanCount > 0) parts.push(chalk.blue(`${humanCount} human`));
+    if (agentCount > 0) parts.push(chalk.magenta(`${agentCount} agent`));
+    console.log(chalk.gray('  ' + parts.join(chalk.gray(' · '))) + '\n');
+  } else {
+    console.log();
+  }
+
   if (flows.length === 0) { warn('No flows. Create one: ' + chalk.cyan('node flowmind.js learn <url>')); console.log(); return; }
-  console.log(chalk.gray('  ID        Name                          Steps  Updated'));
-  console.log(chalk.gray('  ' + '─'.repeat(62)));
+
+  console.log(chalk.gray('  ID        By  Name                       Env         Steps  Pass rate      Updated'));
+  console.log(chalk.gray('  ' + '─'.repeat(82)));
+
   for (const flow of flows) {
     let steps = 0;
     try { steps = (JSON.parse(flow.graph).nodes || []).filter((n: Record<string, unknown>) => n.type === 'action').length; } catch {}
-    console.log(`  ${chalk.gray(flow.id.slice(0, 8))} ${chalk.white(flow.name.padEnd(28).slice(0, 28))} ${chalk.gray(String(steps).padEnd(6))} ${chalk.gray(flow.updatedAt.toLocaleDateString())}`);
+    const runs = db.listRuns(flow.id, 20);
+    const passRate = runs.length > 0 ? runs.filter(r => r.status === 'passed').length / runs.length : -1;
+    const rateStr = passRate < 0 ? chalk.gray('no runs      ') : passRateDots(passRate, runs.length);
+    const creatorIcon = flow.createdBy === 'agent' ? chalk.magenta('🤖') : chalk.blue('👤');
+    const env = getEnvLabel(flow.appUrl || '');
+    const envBadge = env.label ? env.color(`[${env.label}]`) : '          ';
+    const namePad = flow.name.length > 24 ? flow.name.slice(0, 23) + '…' : flow.name.padEnd(24);
+    console.log(`  ${chalk.gray(flow.id.slice(0, 8))} ${creatorIcon}  ${chalk.white(namePad)}  ${envBadge.padEnd(env.label ? 11 : 10)}  ${chalk.gray(String(steps).padEnd(5))}  ${rateStr}  ${chalk.gray(timeAgo(flow.updatedAt))}`);
   }
   console.log();
 }
@@ -1313,12 +1493,15 @@ async function runListRuns() {
   const runs = db.listRuns(undefined, 20);
   console.log(chalk.bold('\n  Recent Runs\n'));
   if (runs.length === 0) { warn('No runs yet.'); console.log(); return; }
-  console.log(chalk.gray('  ID        Flow                           Status       Duration'));
-  console.log(chalk.gray('  ' + '─'.repeat(72)));
+  console.log(chalk.gray('  ID        Flow                         Status   Duration    When'));
+  console.log(chalk.gray('  ' + '─'.repeat(70)));
   for (const run of runs) {
     const flow = db.getFlow(run.flowId);
-    const statusColor = run.status === 'passed' ? chalk.green : run.status === 'failed' ? chalk.red : chalk.yellow;
-    console.log(`  ${chalk.gray(run.id.slice(0, 8))} ${chalk.white((flow?.name || 'Unknown').padEnd(28).slice(0, 28))} ${statusColor(run.status.padEnd(12))} ${chalk.gray(run.duration ? run.duration + 'ms' : '-')}`);
+    const icon = run.status === 'passed' ? chalk.green('✓') : run.status === 'failed' ? chalk.red('✗') : chalk.yellow('…');
+    const statusStr = run.status === 'passed' ? chalk.green('passed') : run.status === 'failed' ? chalk.red('failed') : chalk.yellow(run.status);
+    const durStr = run.duration ? (run.duration >= 1000 ? (run.duration / 1000).toFixed(1) + 's' : run.duration + 'ms') : '—';
+    const when = run.startedAt ? timeAgo(run.startedAt) : '';
+    console.log(`  ${chalk.gray(run.id.slice(0, 8))} ${icon} ${chalk.white((flow?.name || 'Unknown').padEnd(27).slice(0, 27))} ${statusStr.padEnd(12)} ${chalk.gray(durStr.padEnd(11))} ${chalk.gray(when)}`);
   }
   console.log();
 }
@@ -1505,15 +1688,31 @@ async function runStatus() {
   const runs = db.listRuns(undefined, 100);
   const passed = runs.filter(r => r.status === 'passed').length;
   const failed = runs.filter(r => r.status === 'failed').length;
+  const humanFlows = flows.filter(f => f.createdBy === 'human').length;
+  const agentFlows = flows.filter(f => f.createdBy === 'agent').length;
 
   console.log(chalk.bold('\n  Statistics\n'));
-  console.log('  ' + chalk.gray('Flows:        ') + chalk.white(String(flows.length)));
+
+  // Flows with creator breakdown
+  const creatorStr = flows.length > 0
+    ? chalk.gray(' (') + chalk.blue(`${humanFlows} 👤`) + chalk.gray(' · ') + chalk.magenta(`${agentFlows} 🤖`) + chalk.gray(')')
+    : '';
+  console.log('  ' + chalk.gray('Flows:        ') + chalk.white(String(flows.length)) + creatorStr);
   console.log('  ' + chalk.gray('Total Runs:   ') + chalk.white(String(runs.length)));
   console.log('  ' + chalk.gray('Passed:       ') + chalk.green(String(passed)));
   console.log('  ' + chalk.gray('Failed:       ') + chalk.red(String(failed)));
   if (runs.length > 0) {
     const rate = Math.round((passed / runs.length) * 100);
-    console.log('  ' + chalk.gray('Success Rate: ') + (rate >= 80 ? chalk.green : rate >= 50 ? chalk.yellow : chalk.red)(`${rate}%`));
+    const rateColor = rate >= 80 ? chalk.green : rate >= 50 ? chalk.yellow : chalk.red;
+    const bar = progressBar(passed, runs.length, 16);
+    console.log('  ' + chalk.gray('Success Rate: ') + rateColor(`${rate}%`) + chalk.gray('  ') + bar);
+  }
+
+  // Recent run sparkline (last 10)
+  if (runs.length > 0) {
+    const recent = runs.slice(0, 10).reverse();
+    const spark = recent.map(r => r.status === 'passed' ? chalk.green('▪') : chalk.red('▪')).join('');
+    console.log('  ' + chalk.gray('Last 10 runs: ') + spark);
   }
 
   console.log();
@@ -2000,7 +2199,7 @@ async function runExploreConfirm(reportId: string) {
   const selected = chosen as string[];
   for (const id of selected) {
     const c = candidates.find(x => x.id === id)!;
-    db.createFlow({ name: c.name, description: c.description, appUrl: c.route, graph: JSON.parse(c.graph) });
+    db.createFlow({ name: c.name, description: c.description, appUrl: c.route, graph: JSON.parse(c.graph), createdBy: 'agent' });
     db.confirmExploreCandidate(c.id);
   }
   db.updateExploreReport(report.id, { status: 'confirmed' });
@@ -2236,10 +2435,11 @@ Rules:
   nodes.push({ id: 'end', type: 'end', label: 'End' });
   edges.push({ id: `e${steps.length}`, source: prevId, target: 'end' });
 
-  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl } });
+  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl }, createdBy: 'agent' });
 
   divider();
   success(`Flow created: ${chalk.white(flowName)}`);
+  info(`Creator: ${chalk.magenta('🤖 agent')}`);
   info(`Steps: ${chalk.white(String(steps.length))}`);
   info(`Run with: ${chalk.green('node flowmind.js run ' + flow.id.slice(0, 8))}`);
   console.log();
@@ -2353,7 +2553,7 @@ async function runCodeScan(dir: string) {
       { id: 'e1', source: 'step-1', target: 'step-2' },
       { id: 'e2', source: 'step-2', target: 'end' },
     ];
-    db.createFlow({ name: flowName, appUrl: fullUrl, graph: { nodes, edges, appUrl: fullUrl } });
+    db.createFlow({ name: flowName, appUrl: fullUrl, graph: { nodes, edges, appUrl: fullUrl }, createdBy: 'agent' });
     created++;
     console.log(`  ${chalk.white(route.padEnd(30))} ${chalk.green('✓ ' + flowName)}`);
   }
@@ -2378,17 +2578,27 @@ async function runInteractive() {
   const flows = db.listFlows();
   const runs = db.listRuns(undefined, 100);
   const passed = runs.filter(r => r.status === 'passed').length;
+  const failed = runs.length - passed;
+  const humanFlows = flows.filter(f => f.createdBy === 'human').length;
+  const agentFlows = flows.filter(f => f.createdBy === 'agent').length;
   const ollamaModel = await isOllamaRunning();
   const aiProvider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? 'Anthropic' : 'none';
 
   intro(chalk.cyan(' FlowMind — Memory-driven Web Automation '));
 
+  const passRateBar = runs.length > 0 ? progressBar(passed, runs.length, 12) : '';
+  const passRatePct = runs.length > 0 ? `  ${Math.round(passed / runs.length * 100)}%` : '';
+  const flowsLine = flows.length > 0
+    ? `  Flows:    ${chalk.white(String(flows.length))}  (${chalk.blue(`${humanFlows} 👤`)}  ${chalk.magenta(`${agentFlows} 🤖`)})`
+    : `  Flows:    ${chalk.white('0')}`;
+
   note(
     [
-      `  Flows:    ${chalk.white(String(flows.length))}     Runs: ${chalk.white(String(runs.length))}`,
-      `  Passed:   ${chalk.green(String(passed))}     Failed: ${chalk.red(String(runs.length - passed))}`,
-      `  AI:       ${ollamaModel ? chalk.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? chalk.cyan(aiProvider) : chalk.gray(aiProvider)}`,
-    ].join('\n'),
+      flowsLine,
+      `  Runs:     ${chalk.white(String(runs.length))}  ${chalk.green(String(passed) + ' passed')}  ${failed > 0 ? chalk.red(String(failed) + ' failed') : chalk.gray('0 failed')}`,
+      runs.length > 0 ? `  Rate:     ${passRateBar}${chalk.gray(passRatePct)}` : '',
+      `  AI:       ${ollamaModel ? chalk.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? chalk.cyan(aiProvider) : chalk.gray('none — run Ollama or set ANTHROPIC_API_KEY')}`,
+    ].filter(Boolean).join('\n'),
     'Status'
   );
 
@@ -2603,40 +2813,62 @@ async function main() {
 
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     printLogo(); divider(); console.log();
-    console.log(chalk.bold('  Commands\n'));
-    const C = (s: string) => chalk.cyan(s);
+    const C = (s: string) => chalk.cyan(s.padEnd(34));
     const G = (s: string) => chalk.gray(s);
-    const pad = 36;
-    console.log(`  ${C('init').padEnd(pad)}${G('Initialize Flowmind')}`);
-    console.log(`  ${C('learn <url> [name]').padEnd(pad)}${G('Record a flow (real browser)')}`);
-    console.log(`  ${C('run <id|name> [--var k=v]').padEnd(pad)}${G('Execute a flow (supports variables)')}`);
-    console.log(`  ${C('create [description]').padEnd(pad)}${G('Create flow from natural language [AI]')}`);
-    console.log(`  ${C('flow:list').padEnd(pad)}${G('List all flows')}`);
-    console.log(`  ${C('flow:fix <id|name>').padEnd(pad)}${G('Repair broken selectors interactively')}`);
-    console.log(`  ${C('flow:delete <id|name>').padEnd(pad)}${G('Delete a flow')}`);
-    console.log(`  ${C('flow:export <id|name>').padEnd(pad)}${G('Export flow to JSON')}`);
-    console.log(`  ${C('flow:import <file>').padEnd(pad)}${G('Import flow from JSON')}`);
-    console.log(`  ${C('flow:schedule <id> "<cron>"').padEnd(pad)}${G('Schedule a flow (e.g. "0 9 * * *")')}`);
-    console.log(`  ${C('schedule:list').padEnd(pad)}${G('List all schedules')}`);
-    console.log(`  ${C('schedule:remove <id>').padEnd(pad)}${G('Remove a schedule')}`);
-    console.log(`  ${C('serve').padEnd(pad)}${G('Start scheduler daemon')}`);
-    console.log(`  ${C('suite:create <name>').padEnd(pad)}${G('Create a test suite')}`);
-    console.log(`  ${C('suite:add <suite> <flow>').padEnd(pad)}${G('Add a flow to a suite')}`);
-    console.log(`  ${C('suite:list').padEnd(pad)}${G('List all suites')}`);
-    console.log(`  ${C('suite:show <suite>').padEnd(pad)}${G('Show flows in a suite')}`);
-    console.log(`  ${C('suite:run <suite> [--var k=v]').padEnd(pad)}${G('Run all flows in a suite')}`);
-    console.log(`  ${C('baseline:set <flow-id>').padEnd(pad)}${G('Capture visual baseline screenshots')}`);
-    console.log(`  ${C('baseline:clear <flow-id>').padEnd(pad)}${G('Clear baselines for a flow')}`);
-    console.log(`  ${C('baseline:show <flow-id>').padEnd(pad)}${G('List baseline screenshots')}`);
-    console.log(`  ${C('run:list').padEnd(pad)}${G('List recent runs')}`);
-    console.log(`  ${C('run:show <id>').padEnd(pad)}${G('Show run details + screenshots')}`);
-    console.log(`  ${C('run:diff <id1> <id2>').padEnd(pad)}${G('Visual screenshot diff between two runs')}`);
-    console.log(`  ${C('run:analyze <id>').padEnd(pad)}${G('AI analysis of a failed run [AI]')}`);
-    console.log(`  ${C('code:scan <directory>').padEnd(pad)}${G('Scan codebase and create draft flows')}`);
-    console.log(`  ${C('status').padEnd(pad)}${G('Statistics and AI provider info')}`);
+    const H = (s: string) => { console.log(chalk.bold.white('  ' + s)); console.log(chalk.gray('  ' + '─'.repeat(55))); };
+
+    H('Record & Run');
+    console.log(`  ${C('learn <url> [name]')}${G('Record a new flow (opens real browser)')}`);
+    console.log(`  ${C('run <id|name> [--var k=v]')}${G('Execute a flow headlessly')}`);
+    console.log(`  ${C('create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
+    console.log(`  ${C('code:scan <directory>')}${G('Scan codebase, create draft flows    🤖 AI')}`);
     console.log();
-    console.log(`  ${G('[AI] = enhanced by AI if available (Ollama local or Anthropic cloud)')}`);
-    console.log(`  ${G('Variables: --var key=value  or  .flowmind.env file in CWD')}`);
+
+    H('Flow Management');
+    console.log(`  ${C('flow:list')}${G('List all flows with creator + pass rate')}`);
+    console.log(`  ${C('flow:fix <id|name>')}${G('Interactively repair broken selectors')}`);
+    console.log(`  ${C('flow:delete <id|name>')}${G('Delete a flow')}`);
+    console.log(`  ${C('flow:export <id|name>')}${G('Export flow to .flow.json')}`);
+    console.log(`  ${C('flow:import <file>')}${G('Import flow from .flow.json')}`);
+    console.log();
+
+    H('Scheduling');
+    console.log(`  ${C('flow:schedule <id> "<cron>"')}${G('Schedule a flow  e.g. "0 9 * * *"')}`);
+    console.log(`  ${C('schedule:list')}${G('List all schedules')}`);
+    console.log(`  ${C('schedule:remove <id>')}${G('Remove a schedule')}`);
+    console.log(`  ${C('serve')}${G('Start the scheduler daemon')}`);
+    console.log();
+
+    H('Test Suites');
+    console.log(`  ${C('suite:create <name>')}${G('Create a test suite')}`);
+    console.log(`  ${C('suite:add <suite> <flow>')}${G('Add a flow to a suite')}`);
+    console.log(`  ${C('suite:list')}${G('List all suites')}`);
+    console.log(`  ${C('suite:show <suite>')}${G('Show flows in a suite')}`);
+    console.log(`  ${C('suite:run <suite> [--var k=v]')}${G('Run all flows in a suite')}`);
+    console.log();
+
+    H('Visual Baselines');
+    console.log(`  ${C('baseline:set <flow-id>')}${G('Capture reference screenshots')}`);
+    console.log(`  ${C('baseline:clear <flow-id>')}${G('Clear baselines for a flow')}`);
+    console.log(`  ${C('baseline:show <flow-id>')}${G('List baseline screenshots')}`);
+    console.log();
+
+    H('Run History & Analysis');
+    console.log(`  ${C('run:list')}${G('List recent runs with status + timing')}`);
+    console.log(`  ${C('run:show <id>')}${G('Full step details + screenshots')}`);
+    console.log(`  ${C('run:diff <id1> <id2>')}${G('Pixel-diff screenshots between two runs')}`);
+    console.log(`  ${C('run:analyze <id>')}${G('Plain-English failure analysis          🤖 AI')}`);
+    console.log();
+
+    H('Exploration & System');
+    console.log(`  ${C('explore <url>')}${G('Auto-discover flows via BFS crawl       🤖 AI')}`);
+    console.log(`  ${C('explore:confirm <report-id>')}${G('Save confirmed flows from explore')}`);
+    console.log(`  ${C('status')}${G('Stats, creator breakdown, AI provider')}`);
+    console.log(`  ${C('app')}${G('Open Electron desktop viewer')}`);
+    console.log();
+    console.log(chalk.gray('  🤖 AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)'));
+    console.log(chalk.gray('  👤     = human-recorded   🤖 = agent/AI-generated'));
+    console.log(chalk.gray('  Variables: --var key=value  or  .flowmind.env file in CWD'));
     console.log();
     process.exit(0);
   }

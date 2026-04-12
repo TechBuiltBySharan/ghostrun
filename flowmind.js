@@ -3644,6 +3644,7 @@ var DatabaseManager = class {
   constructor() {
     fs.mkdirSync(path.join(DATA_PATH, "data"), { recursive: true });
     fs.mkdirSync(path.join(DATA_PATH, "screenshots"), { recursive: true });
+    fs.mkdirSync(path.join(DATA_PATH, "sessions"), { recursive: true });
     this.db = new import_better_sqlite3.default(DB_PATH);
     this.initialize();
     this.runMigrations();
@@ -3706,14 +3707,27 @@ var DatabaseManager = class {
         confirmed INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (report_id) REFERENCES explore_reports(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS run_data (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        variable_name TEXT NOT NULL,
+        variable_value TEXT NOT NULL,
+        step_number INTEGER NOT NULL,
+        UNIQUE(run_id, variable_name),
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
     `);
   }
   // ---- Flows ----
   createFlow(data) {
     const id = (0, import_uuid.v4)();
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now);
+    const createdBy = data.createdBy || "human";
+    this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now, createdBy);
     return this.getFlow(id);
+  }
+  verifyFlow(id) {
+    this.db.prepare("UPDATE flows SET verified = 1 WHERE id = ?").run(id);
   }
   getFlow(id) {
     const r = this.db.prepare("SELECT * FROM flows WHERE id = ?").get(id);
@@ -3765,7 +3779,9 @@ var DatabaseManager = class {
       appUrl: r.app_url,
       graph: r.graph,
       createdAt: new Date(r.created_at),
-      updatedAt: new Date(r.updated_at)
+      updatedAt: new Date(r.updated_at),
+      createdBy: r.created_by || "human",
+      verified: Boolean(r.verified)
     };
   }
   // ---- Runs ----
@@ -3924,6 +3940,18 @@ var DatabaseManager = class {
       this.db.exec("ALTER TABLE steps ADD COLUMN diff_percent REAL");
     } catch {
     }
+    try {
+      this.db.exec("ALTER TABLE flows ADD COLUMN created_by TEXT NOT NULL DEFAULT 'human'");
+    } catch {
+    }
+    try {
+      this.db.exec("ALTER TABLE flows ADD COLUMN verified INTEGER NOT NULL DEFAULT 0");
+    } catch {
+    }
+    try {
+      this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))");
+    } catch {
+    }
   }
   // ---- Suites ----
   createSuite(data) {
@@ -4021,6 +4049,25 @@ var DatabaseManager = class {
   }
   close() {
     this.db.close();
+  }
+  // ---- Run Data (extracted variables) ----
+  saveRunData(runId, stepNumber, variableName, value) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare("INSERT OR REPLACE INTO run_data (id, run_id, step_number, variable_name, variable_value) VALUES (?,?,?,?,?)").run(id, runId, stepNumber, variableName, value);
+  }
+  getRunData(runId) {
+    return this.db.prepare("SELECT * FROM run_data WHERE run_id = ? ORDER BY step_number").all(runId).map((r) => ({ variableName: r.variable_name, variableValue: r.variable_value, stepNumber: r.step_number }));
+  }
+  // ---- Flow Stats ----
+  getFlowStats(flowId) {
+    const r = this.db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) as passed, MAX(started_at) as last_run_at FROM runs WHERE flow_id = ?").get(flowId);
+    const last = this.db.prepare("SELECT status FROM runs WHERE flow_id = ? ORDER BY started_at DESC LIMIT 1").get(flowId);
+    return {
+      totalRuns: r?.total || 0,
+      passRate: r?.total > 0 ? (r.passed || 0) / r.total : 0,
+      lastRunStatus: last?.status || null,
+      lastRunAt: r?.last_run_at || null
+    };
   }
 };
 function sanitizePII(text) {
@@ -4149,6 +4196,30 @@ function warn(msg) {
 function divider() {
   console.log(import_chalk.default.cyan("\u2500".repeat(60)));
 }
+function timeAgo(dateStr) {
+  const date = typeof dateStr === "string" ? new Date(dateStr) : dateStr;
+  const sec = Math.floor((Date.now() - date.getTime()) / 1e3);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  if (sec < 86400 * 7) return `${Math.floor(sec / 86400)}d ago`;
+  return date.toLocaleDateString();
+}
+function passRateDots(rate, total) {
+  if (total === 0) return import_chalk.default.gray("no runs");
+  const filled = Math.round(rate * 6);
+  return import_chalk.default.green("\u25CF".repeat(filled)) + import_chalk.default.gray("\u25CB".repeat(6 - filled)) + import_chalk.default.gray(` ${Math.round(rate * 100)}%`);
+}
+function progressBar(current, total, width = 20) {
+  const filled = Math.round(current / total * width);
+  return import_chalk.default.cyan("\u2588".repeat(filled)) + import_chalk.default.gray("\u2591".repeat(width - filled));
+}
+function getEnvLabel(url) {
+  if (!url) return { label: "", color: import_chalk.default.white };
+  if (url.includes("localhost") || url.includes("127.0.0.1")) return { label: "local", color: import_chalk.default.blue };
+  if (url.includes("staging") || url.includes("stage") || url.includes("preprod")) return { label: "staging", color: import_chalk.default.yellow };
+  return { label: "production", color: import_chalk.default.red };
+}
 function askQuestion(question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -4264,6 +4335,19 @@ function parseVars(argv) {
 function resolveVars(text, vars) {
   return text.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] !== void 0 ? vars[k] : `{{${k}}}`);
 }
+async function loadSession(context, name) {
+  const sessionPath = path.join(DATA_PATH, "sessions", `${name}.json`);
+  if (!fs.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
+  const cookies = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
+  await context.addCookies(cookies);
+  return cookies.length;
+}
+async function saveSession(context, name) {
+  const cookies = await context.cookies();
+  const sessionPath = path.join(DATA_PATH, "sessions", `${name}.json`);
+  fs.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
+  return cookies.length;
+}
 async function runLearn(url, nameOverride) {
   printLogo();
   divider();
@@ -4279,7 +4363,7 @@ async function runLearn(url, nameOverride) {
   info("Target URL: " + import_chalk.default.cyan(url));
   info("Flow name:  " + import_chalk.default.cyan(flowName));
   console.log();
-  const flow = db.createFlow({ name: flowName, appUrl: url });
+  const flow = db.createFlow({ name: flowName, appUrl: url, createdBy: "human" });
   const capturedActions = [];
   let browserClosed = false;
   const browser = await import_playwright.chromium.launch({ headless: false });
@@ -4339,9 +4423,10 @@ async function runLearn(url, nameOverride) {
 `);
     });
   });
-  console.log(import_chalk.default.bold("  Browser is open \u2014 interact with it normally.\n"));
+  console.log(import_chalk.default.bgCyan.black.bold("  RECORDING  ") + import_chalk.default.bold(" \u{1F464} human flow \u2014 browser is live\n"));
   console.log(import_chalk.default.gray("  Every click, fill, and navigation is captured automatically."));
-  console.log(import_chalk.default.gray('  Type "a text: Welcome" to add assertion, Enter to stop\n'));
+  console.log(import_chalk.default.gray("  Assertions: type  ") + import_chalk.default.cyan("a text:<expected>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a url:<path>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a title:<text>"));
+  console.log(import_chalk.default.gray("  Done?       press ") + import_chalk.default.cyan("Enter") + import_chalk.default.gray(" or type ") + import_chalk.default.cyan("done") + import_chalk.default.gray("\n"));
   await page.goto(url);
   if (!browserClosed) {
     await new Promise((resolve) => {
@@ -4399,17 +4484,25 @@ async function runLearn(url, nameOverride) {
   edges.push({ id: `e${capturedActions.length}`, source: prevId, target: "end" });
   db.updateFlow(flow.id, { graph: { nodes, edges, appUrl: url } });
   divider();
-  success(`${capturedActions.length} actions recorded`);
+  console.log(import_chalk.default.bgGreen.black.bold("  SAVED  ") + import_chalk.default.bold(` ${capturedActions.length} actions recorded \u2014 \u{1F464} human flow
+`));
   const counts = capturedActions.reduce((a, c) => {
     a[c.type] = (a[c.type] || 0) + 1;
     return a;
   }, {});
-  Object.entries(counts).forEach(([t, n]) => info(`  ${t}: ${n}`));
+  const actionIcons = { navigate: "\u{1F310}", click: "\u{1F5B1} ", fill: "\u2328\uFE0F ", select: "\u{1F4CB}", check: "\u2611\uFE0F ", assert: "\u2705" };
+  const countStrs = Object.entries(counts).map(([t, n]) => `${actionIcons[t] || "\u25CF"} ${n} ${t}`);
+  console.log("  " + countStrs.join(import_chalk.default.gray("  \xB7  ")));
   console.log();
-  info("Run with: " + import_chalk.default.green(`node flowmind.js run ${flow.id.slice(0, 8)}`));
+  info(`Flow ID: ${import_chalk.default.gray(flow.id.slice(0, 8))}`);
+  info(`Run:     ${import_chalk.default.green("node flowmind.js run " + flow.id.slice(0, 8))}`);
+  info(`Fix:     ${import_chalk.default.cyan("node flowmind.js flow:fix " + flow.id.slice(0, 8))}`);
   console.log();
 }
-async function executeFlow(flowId, vars) {
+async function executeFlow(flowId, vars, opts) {
+  const log = (s) => {
+    if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + "\n");
+  };
   let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) {
     errorMsg("Flow not found: " + flowId);
@@ -4421,25 +4514,48 @@ async function executeFlow(flowId, vars) {
   } catch {
     errorMsg("Invalid graph");
     process.exit(1);
-    return { passed: false, runId: "", duration: 0 };
+    return { passed: false, runId: "", duration: 0, extractedData: {} };
   }
   if (!graph.nodes?.length) {
     warn("Empty flow.");
-    return { passed: false, runId: "", duration: 0 };
+    return { passed: false, runId: "", duration: 0, extractedData: {} };
   }
-  if (vars && Object.keys(vars).length > 0) {
+  if (!opts?.jsonOutput && vars && Object.keys(vars).length > 0) {
     console.log(import_chalk.default.gray("  Variables: " + Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(", ")));
+  }
+  const startUrl = graph.appUrl || flow.appUrl;
+  const { label: envLabel, color: envColor } = getEnvLabel(startUrl || "");
+  const creatorIcon = flow.createdBy === "agent" ? import_chalk.default.magenta(" \u{1F916}") : import_chalk.default.blue(" \u{1F464}");
+  const verifiedBadge = flow.verified ? import_chalk.default.green(" \u2713") : "";
+  const provenanceStr = creatorIcon + verifiedBadge;
+  if (!opts?.jsonOutput) {
+    if (envLabel === "production") {
+      console.log(import_chalk.default.red("\n  \u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510"));
+      console.log(import_chalk.default.red("  \u2502 \u26A0 PRODUCTION ENVIRONMENT            \u2502"));
+      console.log(import_chalk.default.red("  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518"));
+    }
+    console.log(import_chalk.default.bold("\n  Running: ") + import_chalk.default.white(flow.name) + provenanceStr);
+    if (startUrl) console.log("  " + import_chalk.default.gray("URL: ") + envColor(startUrl));
   }
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
   const browser = await import_playwright.chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  const startUrl = graph.appUrl || flow.appUrl;
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  if (opts?.sessionLoad) {
+    try {
+      const count = await loadSession(context, opts.sessionLoad);
+      if (!opts?.quiet) info(`Session: ${import_chalk.default.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+    } catch (e) {
+      warn(String(e));
+    }
+  }
   if (startUrl) await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15e3 });
   const actionNodes = graph.nodes.filter((n) => n.type === "action");
   let stepNum = 1, failed = false;
   let failedStepInfo = null;
   const runStart = Date.now();
+  const runVars = { ...vars || {} };
   let PNG = null;
   let pixelmatch2 = null;
   try {
@@ -4450,17 +4566,18 @@ async function executeFlow(flowId, vars) {
   }
   for (const node of actionNodes) {
     const label = node.label, action = node.action;
-    console.log(import_chalk.default.cyan(`
-  [${stepNum}/${actionNodes.length}] ${label}`));
+    const barStr = progressBar(stepNum, actionNodes.length);
+    log(import_chalk.default.cyan(`
+  [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + import_chalk.default.white(label));
     const step = db.createStep({ runId: run.id, stepNumber: stepNum, name: label, action, selector: node.selector, value: node.value });
     const t = Date.now();
     try {
-      const resolvedNode = vars ? {
+      const resolvedNode = {
         ...node,
-        url: node.url ? resolveVars(node.url, vars) : node.url,
-        value: node.value ? resolveVars(node.value, vars) : node.value,
-        selector: node.selector ? resolveVars(node.selector, vars) : node.selector
-      } : node;
+        url: node.url ? resolveVars(node.url, runVars) : node.url,
+        value: node.value ? resolveVars(node.value, runVars) : node.value,
+        selector: node.selector ? resolveVars(node.selector, runVars) : node.selector
+      };
       await executeAction(page, action, resolvedNode);
       if (action === "click") {
         await page.waitForLoadState("domcontentloaded", { timeout: 3e3 }).catch(() => {
@@ -4482,7 +4599,7 @@ async function executeFlow(flowId, vars) {
           const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
           diffPercent = parseFloat((numDiff / (w * h) * 100).toFixed(1));
           if (diffPercent > 5) {
-            console.log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}%`));
+            log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}%`));
           }
         } catch {
         }
@@ -4491,7 +4608,13 @@ async function executeFlow(flowId, vars) {
       if (diffPercent !== void 0 && diffPercent > 5) {
         db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
       }
-      console.log(import_chalk.default.green(`      \u2713 passed (${duration}ms)`));
+      log(import_chalk.default.green(`      \u2713 passed`) + import_chalk.default.gray(` (${duration}ms)`));
+      if (action === "extract" && resolvedNode.__extracted) {
+        const extracted = resolvedNode.__extracted;
+        db.saveRunData(run.id, stepNum, extracted.variable, extracted.value);
+        runVars[extracted.variable] = extracted.value;
+        log(import_chalk.default.cyan(`      \u2192 extracted ${extracted.variable}: ${import_chalk.default.white(extracted.value.slice(0, 60))}`));
+      }
     } catch (err) {
       const duration = Date.now() - t;
       let errorMessage = err instanceof Error ? err.message.split("\n")[0] : String(err);
@@ -4507,9 +4630,9 @@ async function executeFlow(flowId, vars) {
             const screenshot = await page.screenshot();
             const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
             fs.writeFileSync(sp, screenshot);
-            console.log(import_chalk.default.yellow(`      ~ healed selector: ${healed}`));
+            log(import_chalk.default.yellow(`      ~ healed selector: ${healed}`));
             db.updateStep(step.id, { status: "passed", duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
-            console.log(import_chalk.default.green(`      \u2713 passed after heal (${healDuration}ms)`));
+            log(import_chalk.default.green(`      \u2713 passed after heal (${healDuration}ms)`));
             stepNum++;
             continue;
           } catch {
@@ -4524,28 +4647,61 @@ async function executeFlow(flowId, vars) {
       } catch {
         db.updateStep(step.id, { status: "failed", duration, errorMessage });
       }
-      console.log(import_chalk.default.red(`      \u2717 failed (${duration}ms)`));
-      console.log(import_chalk.default.red(`        \u2514\u2500 ${errorMessage}`));
+      log(import_chalk.default.red(`      \u2717 failed (${duration}ms)`));
+      log(import_chalk.default.red(`        \u2514\u2500 ${errorMessage}`));
       failedStepInfo = { name: label, action, selector: node.selector, errorMessage };
       failed = true;
       break;
     }
     stepNum++;
   }
+  if (opts?.sessionSave) {
+    try {
+      const count = await saveSession(context, opts.sessionSave);
+      if (!opts?.quiet) success(`Session saved: ${import_chalk.default.cyan(opts.sessionSave)} (${count} cookies)`);
+    } catch (e) {
+      warn(`Could not save session: ${e}`);
+    }
+  }
   await browser.close();
   const totalDuration = Date.now() - runStart;
   let summary = null;
   if (failed && failedStepInfo) {
-    process.stdout.write(import_chalk.default.gray("\n  Analyzing failure...\n"));
+    if (!opts?.jsonOutput) process.stdout.write(import_chalk.default.gray("\n  Analyzing failure...\n"));
     const steps = db.listSteps(run.id);
     const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map((s) => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo }));
     if (result) {
       summary = result.text;
-      process.stdout.write(import_chalk.default.gray(`  (via ${result.provider})
+      if (!opts?.jsonOutput) process.stdout.write(import_chalk.default.gray(`  (via ${result.provider})
 `));
     }
   }
   db.updateRun(run.id, { status: failed ? "failed" : "passed", completedAt: /* @__PURE__ */ new Date(), duration: totalDuration, errorMessage: failedStepInfo?.errorMessage, summary: summary || void 0 });
+  const extractedData = {};
+  db.getRunData(run.id).forEach((d) => {
+    extractedData[d.variableName] = d.variableValue;
+  });
+  if (opts?.jsonOutput) {
+    const steps = db.listSteps(run.id);
+    console.log(JSON.stringify({
+      passed: !failed,
+      runId: run.id,
+      flowId: flow.id,
+      flowName: flow.name,
+      duration: totalDuration,
+      steps: steps.map((s) => ({
+        stepNumber: s.stepNumber,
+        name: s.name,
+        status: s.status,
+        duration: s.duration,
+        screenshotPath: s.screenshotPath,
+        errorMessage: s.errorMessage
+      })),
+      extractedData,
+      summary
+    }));
+    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
+  }
   divider();
   if (failed) {
     errorMsg("Flow failed");
@@ -4569,7 +4725,7 @@ async function executeFlow(flowId, vars) {
   info("Run ID: " + import_chalk.default.gray(run.id.slice(0, 8)));
   info("Screenshots: " + import_chalk.default.cyan(screenshotsDir));
   console.log();
-  return { passed: !failed, runId: run.id, duration: totalDuration };
+  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
 }
 async function executeAction(page, action, node) {
   switch (action) {
@@ -4891,21 +5047,38 @@ async function runDiff(runId1, runId2) {
 }
 async function runListFlows() {
   const flows = db.listFlows();
-  console.log(import_chalk.default.bold("\n  Your Flows\n"));
+  const humanCount = flows.filter((f) => f.createdBy === "human").length;
+  const agentCount = flows.filter((f) => f.createdBy === "agent").length;
+  console.log(import_chalk.default.bold("\n  Flows"));
+  if (flows.length > 0) {
+    const parts = [];
+    if (humanCount > 0) parts.push(import_chalk.default.blue(`${humanCount} human`));
+    if (agentCount > 0) parts.push(import_chalk.default.magenta(`${agentCount} agent`));
+    console.log(import_chalk.default.gray("  " + parts.join(import_chalk.default.gray(" \xB7 "))) + "\n");
+  } else {
+    console.log();
+  }
   if (flows.length === 0) {
     warn("No flows. Create one: " + import_chalk.default.cyan("node flowmind.js learn <url>"));
     console.log();
     return;
   }
-  console.log(import_chalk.default.gray("  ID        Name                          Steps  Updated"));
-  console.log(import_chalk.default.gray("  " + "\u2500".repeat(62)));
+  console.log(import_chalk.default.gray("  ID        By  Name                       Env         Steps  Pass rate      Updated"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(82)));
   for (const flow of flows) {
     let steps = 0;
     try {
       steps = (JSON.parse(flow.graph).nodes || []).filter((n) => n.type === "action").length;
     } catch {
     }
-    console.log(`  ${import_chalk.default.gray(flow.id.slice(0, 8))} ${import_chalk.default.white(flow.name.padEnd(28).slice(0, 28))} ${import_chalk.default.gray(String(steps).padEnd(6))} ${import_chalk.default.gray(flow.updatedAt.toLocaleDateString())}`);
+    const runs = db.listRuns(flow.id, 20);
+    const passRate = runs.length > 0 ? runs.filter((r) => r.status === "passed").length / runs.length : -1;
+    const rateStr = passRate < 0 ? import_chalk.default.gray("no runs      ") : passRateDots(passRate, runs.length);
+    const creatorIcon = flow.createdBy === "agent" ? import_chalk.default.magenta("\u{1F916}") : import_chalk.default.blue("\u{1F464}");
+    const env = getEnvLabel(flow.appUrl || "");
+    const envBadge = env.label ? env.color(`[${env.label}]`) : "          ";
+    const namePad = flow.name.length > 24 ? flow.name.slice(0, 23) + "\u2026" : flow.name.padEnd(24);
+    console.log(`  ${import_chalk.default.gray(flow.id.slice(0, 8))} ${creatorIcon}  ${import_chalk.default.white(namePad)}  ${envBadge.padEnd(env.label ? 11 : 10)}  ${import_chalk.default.gray(String(steps).padEnd(5))}  ${rateStr}  ${import_chalk.default.gray(timeAgo(flow.updatedAt))}`);
   }
   console.log();
 }
@@ -4961,12 +5134,15 @@ async function runListRuns() {
     console.log();
     return;
   }
-  console.log(import_chalk.default.gray("  ID        Flow                           Status       Duration"));
-  console.log(import_chalk.default.gray("  " + "\u2500".repeat(72)));
+  console.log(import_chalk.default.gray("  ID        Flow                         Status   Duration    When"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(70)));
   for (const run of runs) {
     const flow = db.getFlow(run.flowId);
-    const statusColor = run.status === "passed" ? import_chalk.default.green : run.status === "failed" ? import_chalk.default.red : import_chalk.default.yellow;
-    console.log(`  ${import_chalk.default.gray(run.id.slice(0, 8))} ${import_chalk.default.white((flow?.name || "Unknown").padEnd(28).slice(0, 28))} ${statusColor(run.status.padEnd(12))} ${import_chalk.default.gray(run.duration ? run.duration + "ms" : "-")}`);
+    const icon = run.status === "passed" ? import_chalk.default.green("\u2713") : run.status === "failed" ? import_chalk.default.red("\u2717") : import_chalk.default.yellow("\u2026");
+    const statusStr = run.status === "passed" ? import_chalk.default.green("passed") : run.status === "failed" ? import_chalk.default.red("failed") : import_chalk.default.yellow(run.status);
+    const durStr = run.duration ? run.duration >= 1e3 ? (run.duration / 1e3).toFixed(1) + "s" : run.duration + "ms" : "\u2014";
+    const when = run.startedAt ? timeAgo(run.startedAt) : "";
+    console.log(`  ${import_chalk.default.gray(run.id.slice(0, 8))} ${icon} ${import_chalk.default.white((flow?.name || "Unknown").padEnd(27).slice(0, 27))} ${statusStr.padEnd(12)} ${import_chalk.default.gray(durStr.padEnd(11))} ${import_chalk.default.gray(when)}`);
   }
   console.log();
 }
@@ -5173,14 +5349,24 @@ async function runStatus() {
   const runs = db.listRuns(void 0, 100);
   const passed = runs.filter((r) => r.status === "passed").length;
   const failed = runs.filter((r) => r.status === "failed").length;
+  const humanFlows = flows.filter((f) => f.createdBy === "human").length;
+  const agentFlows = flows.filter((f) => f.createdBy === "agent").length;
   console.log(import_chalk.default.bold("\n  Statistics\n"));
-  console.log("  " + import_chalk.default.gray("Flows:        ") + import_chalk.default.white(String(flows.length)));
+  const creatorStr = flows.length > 0 ? import_chalk.default.gray(" (") + import_chalk.default.blue(`${humanFlows} \u{1F464}`) + import_chalk.default.gray(" \xB7 ") + import_chalk.default.magenta(`${agentFlows} \u{1F916}`) + import_chalk.default.gray(")") : "";
+  console.log("  " + import_chalk.default.gray("Flows:        ") + import_chalk.default.white(String(flows.length)) + creatorStr);
   console.log("  " + import_chalk.default.gray("Total Runs:   ") + import_chalk.default.white(String(runs.length)));
   console.log("  " + import_chalk.default.gray("Passed:       ") + import_chalk.default.green(String(passed)));
   console.log("  " + import_chalk.default.gray("Failed:       ") + import_chalk.default.red(String(failed)));
   if (runs.length > 0) {
     const rate = Math.round(passed / runs.length * 100);
-    console.log("  " + import_chalk.default.gray("Success Rate: ") + (rate >= 80 ? import_chalk.default.green : rate >= 50 ? import_chalk.default.yellow : import_chalk.default.red)(`${rate}%`));
+    const rateColor = rate >= 80 ? import_chalk.default.green : rate >= 50 ? import_chalk.default.yellow : import_chalk.default.red;
+    const bar = progressBar(passed, runs.length, 16);
+    console.log("  " + import_chalk.default.gray("Success Rate: ") + rateColor(`${rate}%`) + import_chalk.default.gray("  ") + bar);
+  }
+  if (runs.length > 0) {
+    const recent = runs.slice(0, 10).reverse();
+    const spark = recent.map((r) => r.status === "passed" ? import_chalk.default.green("\u25AA") : import_chalk.default.red("\u25AA")).join("");
+    console.log("  " + import_chalk.default.gray("Last 10 runs: ") + spark);
   }
   console.log();
   console.log("  " + import_chalk.default.gray("Data Path:    ") + import_chalk.default.white(DATA_PATH));
@@ -5596,7 +5782,7 @@ async function runExploreConfirm(reportId) {
   const selected = chosen;
   for (const id of selected) {
     const c = candidates.find((x) => x.id === id);
-    db.createFlow({ name: c.name, description: c.description, appUrl: c.route, graph: JSON.parse(c.graph) });
+    db.createFlow({ name: c.name, description: c.description, appUrl: c.route, graph: JSON.parse(c.graph), createdBy: "agent" });
     db.confirmExploreCandidate(c.id);
   }
   db.updateExploreReport(report.id, { status: "confirmed" });
@@ -5847,9 +6033,10 @@ Rules:
   });
   nodes.push({ id: "end", type: "end", label: "End" });
   edges.push({ id: `e${steps.length}`, source: prevId, target: "end" });
-  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl } });
+  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl }, createdBy: "agent" });
   divider();
   success(`Flow created: ${import_chalk.default.white(flowName)}`);
+  info(`Creator: ${import_chalk.default.magenta("\u{1F916} agent")}`);
   info(`Steps: ${import_chalk.default.white(String(steps.length))}`);
   info(`Run with: ${import_chalk.default.green("node flowmind.js run " + flow.id.slice(0, 8))}`);
   console.log();
@@ -5965,7 +6152,7 @@ async function runCodeScan(dir) {
       { id: "e1", source: "step-1", target: "step-2" },
       { id: "e2", source: "step-2", target: "end" }
     ];
-    db.createFlow({ name: flowName, appUrl: fullUrl, graph: { nodes, edges, appUrl: fullUrl } });
+    db.createFlow({ name: flowName, appUrl: fullUrl, graph: { nodes, edges, appUrl: fullUrl }, createdBy: "agent" });
     created++;
     console.log(`  ${import_chalk.default.white(route.padEnd(30))} ${import_chalk.default.green("\u2713 " + flowName)}`);
   }
@@ -5982,15 +6169,22 @@ async function runInteractive() {
   const flows = db.listFlows();
   const runs = db.listRuns(void 0, 100);
   const passed = runs.filter((r) => r.status === "passed").length;
+  const failed = runs.length - passed;
+  const humanFlows = flows.filter((f) => f.createdBy === "human").length;
+  const agentFlows = flows.filter((f) => f.createdBy === "agent").length;
   const ollamaModel = await isOllamaRunning();
   const aiProvider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? "Anthropic" : "none";
   intro(import_chalk.default.cyan(" FlowMind \u2014 Memory-driven Web Automation "));
+  const passRateBar = runs.length > 0 ? progressBar(passed, runs.length, 12) : "";
+  const passRatePct = runs.length > 0 ? `  ${Math.round(passed / runs.length * 100)}%` : "";
+  const flowsLine = flows.length > 0 ? `  Flows:    ${import_chalk.default.white(String(flows.length))}  (${import_chalk.default.blue(`${humanFlows} \u{1F464}`)}  ${import_chalk.default.magenta(`${agentFlows} \u{1F916}`)})` : `  Flows:    ${import_chalk.default.white("0")}`;
   note(
     [
-      `  Flows:    ${import_chalk.default.white(String(flows.length))}     Runs: ${import_chalk.default.white(String(runs.length))}`,
-      `  Passed:   ${import_chalk.default.green(String(passed))}     Failed: ${import_chalk.default.red(String(runs.length - passed))}`,
-      `  AI:       ${ollamaModel ? import_chalk.default.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? import_chalk.default.cyan(aiProvider) : import_chalk.default.gray(aiProvider)}`
-    ].join("\n"),
+      flowsLine,
+      `  Runs:     ${import_chalk.default.white(String(runs.length))}  ${import_chalk.default.green(String(passed) + " passed")}  ${failed > 0 ? import_chalk.default.red(String(failed) + " failed") : import_chalk.default.gray("0 failed")}`,
+      runs.length > 0 ? `  Rate:     ${passRateBar}${import_chalk.default.gray(passRatePct)}` : "",
+      `  AI:       ${ollamaModel ? import_chalk.default.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? import_chalk.default.cyan(aiProvider) : import_chalk.default.gray("none \u2014 run Ollama or set ANTHROPIC_API_KEY")}`
+    ].filter(Boolean).join("\n"),
     "Status"
   );
   while (true) {
@@ -6177,40 +6371,58 @@ async function main() {
     printLogo();
     divider();
     console.log();
-    console.log(import_chalk.default.bold("  Commands\n"));
-    const C = (s) => import_chalk.default.cyan(s);
+    const C = (s) => import_chalk.default.cyan(s.padEnd(34));
     const G = (s) => import_chalk.default.gray(s);
-    const pad = 36;
-    console.log(`  ${C("init").padEnd(pad)}${G("Initialize Flowmind")}`);
-    console.log(`  ${C("learn <url> [name]").padEnd(pad)}${G("Record a flow (real browser)")}`);
-    console.log(`  ${C("run <id|name> [--var k=v]").padEnd(pad)}${G("Execute a flow (supports variables)")}`);
-    console.log(`  ${C("create [description]").padEnd(pad)}${G("Create flow from natural language [AI]")}`);
-    console.log(`  ${C("flow:list").padEnd(pad)}${G("List all flows")}`);
-    console.log(`  ${C("flow:fix <id|name>").padEnd(pad)}${G("Repair broken selectors interactively")}`);
-    console.log(`  ${C("flow:delete <id|name>").padEnd(pad)}${G("Delete a flow")}`);
-    console.log(`  ${C("flow:export <id|name>").padEnd(pad)}${G("Export flow to JSON")}`);
-    console.log(`  ${C("flow:import <file>").padEnd(pad)}${G("Import flow from JSON")}`);
-    console.log(`  ${C('flow:schedule <id> "<cron>"').padEnd(pad)}${G('Schedule a flow (e.g. "0 9 * * *")')}`);
-    console.log(`  ${C("schedule:list").padEnd(pad)}${G("List all schedules")}`);
-    console.log(`  ${C("schedule:remove <id>").padEnd(pad)}${G("Remove a schedule")}`);
-    console.log(`  ${C("serve").padEnd(pad)}${G("Start scheduler daemon")}`);
-    console.log(`  ${C("suite:create <name>").padEnd(pad)}${G("Create a test suite")}`);
-    console.log(`  ${C("suite:add <suite> <flow>").padEnd(pad)}${G("Add a flow to a suite")}`);
-    console.log(`  ${C("suite:list").padEnd(pad)}${G("List all suites")}`);
-    console.log(`  ${C("suite:show <suite>").padEnd(pad)}${G("Show flows in a suite")}`);
-    console.log(`  ${C("suite:run <suite> [--var k=v]").padEnd(pad)}${G("Run all flows in a suite")}`);
-    console.log(`  ${C("baseline:set <flow-id>").padEnd(pad)}${G("Capture visual baseline screenshots")}`);
-    console.log(`  ${C("baseline:clear <flow-id>").padEnd(pad)}${G("Clear baselines for a flow")}`);
-    console.log(`  ${C("baseline:show <flow-id>").padEnd(pad)}${G("List baseline screenshots")}`);
-    console.log(`  ${C("run:list").padEnd(pad)}${G("List recent runs")}`);
-    console.log(`  ${C("run:show <id>").padEnd(pad)}${G("Show run details + screenshots")}`);
-    console.log(`  ${C("run:diff <id1> <id2>").padEnd(pad)}${G("Visual screenshot diff between two runs")}`);
-    console.log(`  ${C("run:analyze <id>").padEnd(pad)}${G("AI analysis of a failed run [AI]")}`);
-    console.log(`  ${C("code:scan <directory>").padEnd(pad)}${G("Scan codebase and create draft flows")}`);
-    console.log(`  ${C("status").padEnd(pad)}${G("Statistics and AI provider info")}`);
+    const H = (s) => {
+      console.log(import_chalk.default.bold.white("  " + s));
+      console.log(import_chalk.default.gray("  " + "\u2500".repeat(55)));
+    };
+    H("Record & Run");
+    console.log(`  ${C("learn <url> [name]")}${G("Record a new flow (opens real browser)")}`);
+    console.log(`  ${C("run <id|name> [--var k=v]")}${G("Execute a flow headlessly")}`);
+    console.log(`  ${C("create [description]")}${G("Generate flow from natural language  \u{1F916} AI")}`);
+    console.log(`  ${C("code:scan <directory>")}${G("Scan codebase, create draft flows    \u{1F916} AI")}`);
     console.log();
-    console.log(`  ${G("[AI] = enhanced by AI if available (Ollama local or Anthropic cloud)")}`);
-    console.log(`  ${G("Variables: --var key=value  or  .flowmind.env file in CWD")}`);
+    H("Flow Management");
+    console.log(`  ${C("flow:list")}${G("List all flows with creator + pass rate")}`);
+    console.log(`  ${C("flow:fix <id|name>")}${G("Interactively repair broken selectors")}`);
+    console.log(`  ${C("flow:delete <id|name>")}${G("Delete a flow")}`);
+    console.log(`  ${C("flow:export <id|name>")}${G("Export flow to .flow.json")}`);
+    console.log(`  ${C("flow:import <file>")}${G("Import flow from .flow.json")}`);
+    console.log();
+    H("Scheduling");
+    console.log(`  ${C('flow:schedule <id> "<cron>"')}${G('Schedule a flow  e.g. "0 9 * * *"')}`);
+    console.log(`  ${C("schedule:list")}${G("List all schedules")}`);
+    console.log(`  ${C("schedule:remove <id>")}${G("Remove a schedule")}`);
+    console.log(`  ${C("serve")}${G("Start the scheduler daemon")}`);
+    console.log();
+    H("Test Suites");
+    console.log(`  ${C("suite:create <name>")}${G("Create a test suite")}`);
+    console.log(`  ${C("suite:add <suite> <flow>")}${G("Add a flow to a suite")}`);
+    console.log(`  ${C("suite:list")}${G("List all suites")}`);
+    console.log(`  ${C("suite:show <suite>")}${G("Show flows in a suite")}`);
+    console.log(`  ${C("suite:run <suite> [--var k=v]")}${G("Run all flows in a suite")}`);
+    console.log();
+    H("Visual Baselines");
+    console.log(`  ${C("baseline:set <flow-id>")}${G("Capture reference screenshots")}`);
+    console.log(`  ${C("baseline:clear <flow-id>")}${G("Clear baselines for a flow")}`);
+    console.log(`  ${C("baseline:show <flow-id>")}${G("List baseline screenshots")}`);
+    console.log();
+    H("Run History & Analysis");
+    console.log(`  ${C("run:list")}${G("List recent runs with status + timing")}`);
+    console.log(`  ${C("run:show <id>")}${G("Full step details + screenshots")}`);
+    console.log(`  ${C("run:diff <id1> <id2>")}${G("Pixel-diff screenshots between two runs")}`);
+    console.log(`  ${C("run:analyze <id>")}${G("Plain-English failure analysis          \u{1F916} AI")}`);
+    console.log();
+    H("Exploration & System");
+    console.log(`  ${C("explore <url>")}${G("Auto-discover flows via BFS crawl       \u{1F916} AI")}`);
+    console.log(`  ${C("explore:confirm <report-id>")}${G("Save confirmed flows from explore")}`);
+    console.log(`  ${C("status")}${G("Stats, creator breakdown, AI provider")}`);
+    console.log(`  ${C("app")}${G("Open Electron desktop viewer")}`);
+    console.log();
+    console.log(import_chalk.default.gray("  \u{1F916} AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)"));
+    console.log(import_chalk.default.gray("  \u{1F464}     = human-recorded   \u{1F916} = agent/AI-generated"));
+    console.log(import_chalk.default.gray("  Variables: --var key=value  or  .flowmind.env file in CWD"));
     console.log();
     process.exit(0);
   }
