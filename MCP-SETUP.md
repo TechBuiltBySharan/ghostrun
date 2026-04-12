@@ -21,9 +21,9 @@ Add to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "flowmind": {
+    "ghostrun": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/flowmind/mcp-server.js"],
+      "args": ["/ABSOLUTE/PATH/TO/ghostrun/mcp-server.js"],
       "env": {
         "ANTHROPIC_API_KEY": "your_key_here"
       }

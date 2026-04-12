@@ -127,7 +127,7 @@ export const Terminal: React.FC<TerminalProps> = ({
             fontSize: 11,
           }}
         >
-          flowmind — zsh
+          ghostrun — zsh
         </span>
       </div>
 
@@ -162,7 +162,7 @@ export const StaticTerminal: React.FC<{
   children: React.ReactNode;
   style?: React.CSSProperties;
   title?: string;
-}> = ({ children, style, title = "flowmind — zsh" }) => {
+}> = ({ children, style, title = "ghostrun — zsh" }) => {
   return (
     <div
       style={{

@@ -139,7 +139,7 @@ export const RunScene: React.FC = () => {
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ffbd2e" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#28ca41" }} />
             <span style={{ marginLeft: 8, color: "#6e7681", fontSize: 11, fontFamily: "Menlo, monospace" }}>
-              flowmind — zsh
+              ghostrun — zsh
             </span>
           </div>
 
@@ -154,7 +154,7 @@ export const RunScene: React.FC = () => {
           >
             {/* Command line */}
             <div style={{ color: "#e6edf3", opacity: headerOpacity }}>
-              $ node flowmind.js run login-flow
+              $ node ghostrun.js run login-flow
             </div>
             <div style={{ minHeight: "1.75em" }} />
 

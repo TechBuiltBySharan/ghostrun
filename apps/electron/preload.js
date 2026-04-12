@@ -2,7 +2,7 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('flowmind', {
+contextBridge.exposeInMainWorld('ghostrun', {
   getStatus:     ()          => ipcRenderer.invoke('app:status'),
   listFlows:     ()          => ipcRenderer.invoke('flows:list'),
   deleteFlow:    (id)        => ipcRenderer.invoke('flows:delete', id),

@@ -112,7 +112,7 @@ export const CTA: React.FC = () => {
         <span style={{ color: "#6e7681", userSelect: "none" }}>$</span>
         <span>
           npm install{" "}
-          <span style={{ color: "#00d4ff", fontWeight: 600 }}>-g flowmind</span>
+          <span style={{ color: "#00d4ff", fontWeight: 600 }}>-g ghostrun</span>
         </span>
         <span
           style={{
@@ -139,7 +139,7 @@ export const CTA: React.FC = () => {
           marginBottom: 40,
         }}
       >
-        flowmind.builtbysharan.com
+        ghostrun.builtbysharan.com
       </div>
 
       {/* Logo + wordmark */}

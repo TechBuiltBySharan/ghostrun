@@ -1,12 +1,12 @@
 {
-  "name": "flowmind-demo",
+  "name": "ghostrun-demo",
   "version": "1.0.0",
-  "description": "FlowMind product launch video",
+  "description": "GhostRun product launch video",
   "main": "src/index.ts",
   "scripts": {
     "start": "npx remotion studio",
-    "build": "npx remotion render src/Root.tsx FlowMindDemo out/demo.mp4",
-    "render": "npx remotion render src/Root.tsx FlowMindDemo out/demo.mp4"
+    "build": "npx remotion render src/Root.tsx GhostRunDemo out/demo.mp4",
+    "render": "npx remotion render src/Root.tsx GhostRunDemo out/demo.mp4"
   },
   "keywords": [],
   "author": "",

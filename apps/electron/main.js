@@ -7,8 +7,8 @@ const os = require('os');
 const { execFile, spawn } = require('child_process');
 
 const HOME_DIR = process.env.HOME || os.homedir();
-const DATA_PATH = path.join(HOME_DIR, '.flowmind');
-const DB_PATH = path.join(DATA_PATH, 'data', 'flowmind.db');
+const DATA_PATH = path.join(HOME_DIR, '.ghostrun');
+const DB_PATH = path.join(DATA_PATH, 'data', 'ghostrun.db');
 
 // ── Database ───────────────────────────────────────────────────────────────
 let Database;
@@ -152,9 +152,9 @@ ipcMain.handle('runs:get-screenshot', (_, filePath) => {
 });
 
 ipcMain.handle('flow:run', (event, flowId) => {
-  const flowmindJs = path.join(__dirname, '..', '..', 'flowmind.js');
+  const ghostrunJs = path.join(__dirname, '..', '..', 'ghostrun.js');
   return new Promise((resolve) => {
-    const child = spawn('node', [flowmindJs, 'run', flowId], {
+    const child = spawn('node', [ghostrunJs, 'run', flowId], {
       cwd: path.join(__dirname, '..', '..'),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

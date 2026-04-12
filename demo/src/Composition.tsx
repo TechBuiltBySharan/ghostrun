@@ -47,7 +47,7 @@ const MainVideo: React.FC = () => {
 export const Composition: React.FC = () => {
   return (
     <RemotionComposition
-      id="FlowMindDemo"
+      id="GhostRunDemo"
       component={MainVideo}
       durationInFrames={TOTAL_FRAMES}
       fps={FPS}

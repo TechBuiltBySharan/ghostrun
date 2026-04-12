@@ -133,7 +133,7 @@ export const Intro: React.FC = () => {
           <line x1="36" y1="52" x2="50" y2="48" stroke="#00d4ff" strokeWidth="1" opacity="0.5" />
         </svg>
 
-        {/* FlowMind text */}
+        {/* GhostRun text */}
         <div
           style={{
             fontSize: 56,

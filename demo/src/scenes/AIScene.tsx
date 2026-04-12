@@ -16,7 +16,7 @@ interface AILine {
 }
 
 const AI_LINES: AILine[] = [
-  { text: "$ node flowmind.js run checkout", color: "#e6edf3", startFrame: 0 },
+  { text: "$ node ghostrun.js run checkout", color: "#e6edf3", startFrame: 0 },
   { text: "", color: "#e6edf3", startFrame: 16 },
   { text: "  Running: Checkout Flow  👤", color: "#e6edf3", startFrame: 18, bold: true },
   { text: "", color: "#e6edf3", startFrame: 30 },
@@ -35,7 +35,7 @@ const AI_LINES: AILine[] = [
   { text: "    the selector changed to .header-cart", color: "#e6edf3", startFrame: 110 },
   { text: "", color: "#e6edf3", startFrame: 124 },
   { text: "  HOW TO FIX IT", color: "#d29922", startFrame: 126, bold: true },
-  { text: "    Run: node flowmind.js flow:fix checkout", color: "#00d4ff", startFrame: 132 },
+  { text: "    Run: node ghostrun.js flow:fix checkout", color: "#00d4ff", startFrame: 132 },
 ];
 
 const CPF = 3.5;
@@ -185,7 +185,7 @@ export const AIScene: React.FC = () => {
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ffbd2e" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#28ca41" }} />
             <span style={{ marginLeft: 8, color: "#6e7681", fontSize: 11, fontFamily: "Menlo, monospace" }}>
-              flowmind — zsh
+              ghostrun — zsh
             </span>
           </div>
 

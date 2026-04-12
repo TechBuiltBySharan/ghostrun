@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
-<title>FlowMind</title>
+<title>GhostRun</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -155,7 +155,7 @@
 <body>
 <div id="app">
   <div id="titlebar">
-    <span id="titlebar-logo">⚡ FlowMind</span>
+    <span id="titlebar-logo">👻 GhostRun</span>
     <span id="titlebar-status">Loading...</span>
   </div>
   <div id="body">
@@ -237,7 +237,7 @@ async function init() {
 }
 
 async function loadStatus() {
-  const s = await window.flowmind.getStatus();
+  const s = await window.ghostrun.getStatus();
   document.getElementById('titlebar-status').textContent =
     `${s.flows} flows · ${s.runs} runs · ${s.passed} passed · ${s.failed} failed`;
   document.getElementById('s-flows').textContent = s.flows;
@@ -269,19 +269,19 @@ async function loadStatus() {
 }
 
 async function loadFlows() {
-  state.flows = await window.flowmind.listFlows();
+  state.flows = await window.ghostrun.listFlows();
   renderFlows();
   renderRecentRuns();
 }
 
 async function loadRuns() {
-  state.runs = await window.flowmind.listRuns();
+  state.runs = await window.ghostrun.listRuns();
   renderRunsList();
   renderRecentRuns();
 }
 
 async function refreshFlows() {
-  state.flows = await window.flowmind.listFlows();
+  state.flows = await window.ghostrun.listFlows();
   renderFlows();
   document.getElementById('flows-badge').textContent = state.flows.length;
 }
@@ -312,7 +312,7 @@ function renderFlows() {
     wrap.innerHTML = `<div class="empty-state">
       <div class="empty-icon">⚡</div>
       <div class="empty-msg">No flows yet</div>
-      <div class="empty-sub">Record one with <span class="cmd">node flowmind.js learn &lt;url&gt;</span></div>
+      <div class="empty-sub">Record one with <span class="cmd">ghostrun learn &lt;url&gt;</span></div>
     </div>`;
     return;
   }
@@ -322,7 +322,7 @@ function renderFlows() {
       <tr>
         <td><div class="flow-name">${esc(f.name)}</div>${f.description ? `<div class="flow-url">${esc(f.description)}</div>` : ''}</td>
         <td><span title="${f.createdBy === 'agent' ? 'AI-generated' : 'Human-recorded'}" style="font-size:16px">${f.createdBy === 'agent' ? '🤖' : '👤'}</span></td>
-        <td><div class="flow-url">${f.appUrl ? `<a href="#" onclick="window.flowmind.openFile('${esc(f.appUrl)}')" style="color:var(--accent)">${esc(f.appUrl)}</a>` : '—'}</div></td>
+        <td><div class="flow-url">${f.appUrl ? `<a href="#" onclick="window.ghostrun.openFile('${esc(f.appUrl)}')" style="color:var(--accent)">${esc(f.appUrl)}</a>` : '—'}</div></td>
         <td><div class="flow-date">${fmtDate(f.updatedAt)}</div></td>
         <td><div class="actions">
           <button class="btn btn-primary" onclick="runFlowById('${f.id}', '${esc(f.name)}')">▶ Run</button>
@@ -335,7 +335,7 @@ function renderFlows() {
 
 async function deleteFlow(id, name) {
   if (!confirm(`Delete flow "${name}"? This will also delete all its run history.`)) return;
-  const r = await window.flowmind.deleteFlow(id);
+  const r = await window.ghostrun.deleteFlow(id);
   if (r.ok) {
     state.flows = state.flows.filter(f => f.id !== id);
     state.runs = state.runs.filter(r => r.flowId !== id);
@@ -399,7 +399,7 @@ async function selectRun(runId) {
   renderRunsList();
 
   const run = state.runs.find(r => r.id === runId);
-  const steps = await window.flowmind.getSteps(runId);
+  const steps = await window.ghostrun.getSteps(runId);
   const detail = document.getElementById('runs-detail-pane');
 
   const parseFailureReport = (summary) => {
@@ -461,7 +461,7 @@ async function viewStepScreenshot(ssPath, rowEl) {
   rowEl.classList.add('selected-step');
   const pane = document.getElementById('screenshot-pane');
   pane.innerHTML = `<div class="screenshot-empty">Loading...</div>`;
-  const data = await window.flowmind.getScreenshot(ssPath);
+  const data = await window.ghostrun.getScreenshot(ssPath);
   if (data) {
     pane.innerHTML = `<img src="${data}" alt="step screenshot">`;
   } else {
@@ -484,7 +484,7 @@ function runFlowById(flowId, flowName) {
   overlay.style.display = 'flex';
 
   if (runCleanup) runCleanup();
-  runCleanup = window.flowmind.onRunProgress(data => {
+  runCleanup = window.ghostrun.onRunProgress(data => {
     if (data.type === 'stdout' || data.type === 'stderr') {
       body.textContent += data.text;
       body.scrollTop = body.scrollHeight;
@@ -496,7 +496,7 @@ function runFlowById(flowId, flowName) {
     }
   });
 
-  window.flowmind.runFlow(flowId);
+  window.ghostrun.runFlow(flowId);
 }
 
 async function closeRunOverlay() {

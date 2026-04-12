@@ -15,7 +15,7 @@ const RECORD_LINES: {
   startFrame: number;
   bold?: boolean;
 }[] = [
-  { text: "$ node flowmind.js learn https://app.example.com", color: "#e6edf3", startFrame: 0 },
+  { text: "$ node ghostrun.js learn https://app.example.com", color: "#e6edf3", startFrame: 0 },
   { text: "", color: "#e6edf3", startFrame: 18 },
   { text: "  RECORDING  👤 human flow — browser is live", color: "#00d4ff", startFrame: 20, bold: true },
   { text: "", color: "#e6edf3", startFrame: 30 },
@@ -163,7 +163,7 @@ export const RecordScene: React.FC = () => {
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#ffbd2e" }} />
             <div style={{ width: 12, height: 12, borderRadius: "50%", backgroundColor: "#28ca41" }} />
             <span style={{ marginLeft: 8, color: "#6e7681", fontSize: 11, fontFamily: "Menlo, monospace" }}>
-              flowmind — zsh
+              ghostrun — zsh
             </span>
           </div>
 

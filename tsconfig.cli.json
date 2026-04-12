@@ -16,6 +16,6 @@
     "noImplicitAny": false,
     "strictNullChecks": false
   },
-  "include": ["flowmind.ts"],
+  "include": ["ghostrun.ts"],
   "exclude": ["node_modules", "dist", "mock-app", "apps", "packages"]
 }

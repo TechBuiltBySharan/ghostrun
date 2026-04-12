@@ -32,8 +32,8 @@ var import_uuid = require("uuid");
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
 var HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
-var DATA_PATH = path.join(HOME_DIR, ".flowmind");
-var DB_PATH = path.join(DATA_PATH, "data", "flowmind.db");
+var DATA_PATH = path.join(HOME_DIR, ".ghostrun");
+var DB_PATH = path.join(DATA_PATH, "data", "ghostrun.db");
 function openDb() {
   fs.mkdirSync(path.join(DATA_PATH, "data"), { recursive: true });
   fs.mkdirSync(path.join(DATA_PATH, "screenshots"), { recursive: true });
@@ -170,7 +170,7 @@ async function executeFlow(flowId, timeout = 6e4) {
   return { runId, status: finalStatus, duration: totalDuration, steps: stepResults, errorMessage: runError, screenshotsDir };
 }
 var server = new import_server.Server(
-  { name: "flowmind", version: "1.0.0" },
+  { name: "ghostrun", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 server.setRequestHandler(import_types.ListToolsRequestSchema, async () => ({
@@ -251,7 +251,7 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
         const flows = db.prepare("SELECT * FROM flows ORDER BY updated_at DESC").all().map(mapFlow);
         db.close();
         if (flows.length === 0) {
-          return text("No flows saved yet. Use `node flowmind.ts learn <url>` to record your first flow.");
+          return text("No flows saved yet. Use `node ghostrun.ts learn <url>` to record your first flow.");
         }
         const rows = flows.map((f) => {
           let stepCount = 0;
@@ -304,7 +304,7 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
           steps: result.steps,
           errorMessage: result.errorMessage,
           screenshotsDir: result.screenshotsDir,
-          hint: result.status === "failed" ? `Use get_run_result with runId "${result.runId.slice(0, 8)}" for full details. Set ANTHROPIC_API_KEY and run \`node flowmind.ts run:analyze ${result.runId.slice(0, 8)}\` for AI analysis.` : "All steps passed."
+          hint: result.status === "failed" ? `Use get_run_result with runId "${result.runId.slice(0, 8)}" for full details. Set ANTHROPIC_API_KEY and run \`node ghostrun.ts run:analyze ${result.runId.slice(0, 8)}\` for AI analysis.` : "All steps passed."
         }, null, 2));
       }
       case "get_run_result": {

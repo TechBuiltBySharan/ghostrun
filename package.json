@@ -1,17 +1,17 @@
 {
-  "name": "flowmind",
-  "version": "0.4.0",
-  "description": "Memory-driven web automation that learns, replays, and tests flows",
-  "main": "flowmind.js",
+  "name": "ghostrun",
+  "version": "1.0.0",
+  "description": "Record real browser flows. Replay headlessly. AI explains every failure.",
+  "main": "ghostrun.js",
   "bin": {
-    "flowmind": "flowmind.js",
-    "flowmind-mcp": "mcp-server.js"
+    "ghostrun": "ghostrun.js",
+    "ghostrun-mcp": "mcp-server.js"
   },
   "scripts": {
-    "start": "node flowmind.js",
-    "cli": "node flowmind.js",
+    "start": "node ghostrun.js",
+    "cli": "node ghostrun.js",
     "mcp": "npx tsx mcp-server.ts",
-    "build": "npx esbuild flowmind.ts --platform=node --format=cjs --outfile=flowmind.js --bundle --external:playwright --external:better-sqlite3 --external:chalk --external:uuid --external:@anthropic-ai/sdk --external:@clack/prompts && npx esbuild mcp-server.ts --platform=node --format=cjs --outfile=mcp-server.js --bundle --external:playwright --external:better-sqlite3 --external:uuid --external:@anthropic-ai/sdk --external:@modelcontextprotocol/sdk",
+    "build": "npx esbuild ghostrun.ts --platform=node --format=cjs --outfile=ghostrun.js --bundle --external:playwright --external:better-sqlite3 --external:chalk --external:uuid --external:@anthropic-ai/sdk --external:@clack/prompts && npx esbuild mcp-server.ts --platform=node --format=cjs --outfile=mcp-server.js --bundle --external:playwright --external:better-sqlite3 --external:uuid --external:@anthropic-ai/sdk --external:@modelcontextprotocol/sdk",
     "test": "./TEST-DEMO.sh",
     "demo": "./TEST-DEMO.sh"
   },

@@ -12,9 +12,9 @@
  * Add to Claude Desktop (claude_desktop_config.json):
  *   {
  *     "mcpServers": {
- *       "flowmind": {
+ *       "ghostrun": {
  *         "command": "npx",
- *         "args": ["tsx", "/path/to/flowmind/mcp-server.ts"]
+ *         "args": ["tsx", "/path/to/ghostrun/mcp-server.ts"]
  *       }
  *     }
  *   }
@@ -30,11 +30,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '.';
-const DATA_PATH = path.join(HOME_DIR, '.flowmind');
-const DB_PATH = path.join(DATA_PATH, 'data', 'flowmind.db');
+const DATA_PATH = path.join(HOME_DIR, '.ghostrun');
+const DB_PATH = path.join(DATA_PATH, 'data', 'ghostrun.db');
 
 // ============================================
-// DATABASE (shared logic with flowmind.ts)
+// DATABASE (shared logic with ghostrun.ts)
 // ============================================
 
 function openDb() {
@@ -194,7 +194,7 @@ async function executeFlow(flowId: string, timeout = 60000): Promise<{
 // ============================================
 
 const server = new Server(
-  { name: 'flowmind', version: '1.0.0' },
+  { name: 'ghostrun', version: '1.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -279,7 +279,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         db.close();
 
         if (flows.length === 0) {
-          return text('No flows saved yet. Use `node flowmind.ts learn <url>` to record your first flow.');
+          return text('No flows saved yet. Use `node ghostrun.ts learn <url>` to record your first flow.');
         }
 
         const rows = flows.map(f => {
@@ -333,7 +333,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           errorMessage: result.errorMessage,
           screenshotsDir: result.screenshotsDir,
           hint: result.status === 'failed'
-            ? `Use get_run_result with runId "${result.runId.slice(0, 8)}" for full details. Set ANTHROPIC_API_KEY and run \`node flowmind.ts run:analyze ${result.runId.slice(0, 8)}\` for AI analysis.`
+            ? `Use get_run_result with runId "${result.runId.slice(0, 8)}" for full details. Set ANTHROPIC_API_KEY and run \`node ghostrun.ts run:analyze ${result.runId.slice(0, 8)}\` for AI analysis.`
             : 'All steps passed.',
         }, null, 2));
       }

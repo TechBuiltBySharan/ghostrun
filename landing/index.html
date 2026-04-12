@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FlowMind — Memory-driven Web Automation</title>
+<title>GhostRun — Memory-driven Web Automation</title>
 <meta name="description" content="Record real browser flows. Replay headlessly. Get AI failure analysis. Runs entirely local — no account, no cloud, no nonsense.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -440,7 +440,7 @@ footer a:hover { color: var(--text); }
 <nav>
   <div class="nav-logo">
     <div class="nav-logo-dot"></div>
-    FlowMind
+    GhostRun
   </div>
   <div class="nav-links">
     <a href="#how">How it works</a>
@@ -448,7 +448,7 @@ footer a:hover { color: var(--text); }
     <a href="#agents">For agents</a>
     <a href="#install">Install</a>
   </div>
-  <a class="nav-cta" href="#install">npm install -g flowmind</a>
+  <a class="nav-cta" href="#install">npm install -g ghostrun</a>
 </nav>
 
 <!-- Hero -->
@@ -460,13 +460,13 @@ footer a:hover { color: var(--text); }
       <em>Replay forever.</em>
     </h1>
     <p class="hero-sub">
-      Open your browser, click through your flow — FlowMind captures every action. Then it replays everything headlessly, screenshots every step, and explains failures in plain English. Entirely local.
+      Open your browser, click through your flow — GhostRun captures every action. Then it replays everything headlessly, screenshots every step, and explains failures in plain English. Entirely local.
     </p>
     <div class="hero-actions">
       <a class="btn-primary" href="#install">
         <span>↓</span> Get Started Free
       </a>
-      <a class="btn-secondary" href="https://github.com/builtbysharan/flowmind" target="_blank">
+      <a class="btn-secondary" href="https://github.com/builtbysharan/ghostrun" target="_blank">
         ★ GitHub
       </a>
     </div>
@@ -492,7 +492,7 @@ footer a:hover { color: var(--text); }
         <div class="t-dot t-red"></div>
         <div class="t-dot t-yellow"></div>
         <div class="t-dot t-green"></div>
-        <span class="t-title">flowmind — bash</span>
+        <span class="t-title">ghostrun — bash</span>
       </div>
       <div class="terminal-body" id="terminal-body">
         <span class="t-cursor" id="cursor"></span>
@@ -515,7 +515,7 @@ footer a:hover { color: var(--text); }
       <span class="step-icon">⏺</span>
       <div class="step-title">Record in your real browser</div>
       <p class="step-body">
-        <code>flowmind learn &lt;url&gt;</code> opens Chrome. You click, fill, navigate naturally. Every action is captured as a replayable graph. No annotations needed.
+        <code>ghostrun learn &lt;url&gt;</code> opens Chrome. You click, fill, navigate naturally. Every action is captured as a replayable graph. No annotations needed.
       </p>
     </div>
     <div class="step-card">
@@ -523,7 +523,7 @@ footer a:hover { color: var(--text); }
       <span class="step-icon">▶</span>
       <div class="step-title">Replay headlessly — anytime</div>
       <p class="step-body">
-        <code>flowmind run &lt;flow-name&gt;</code> replays your flow with Playwright — no browser visible. Screenshots every step, heals broken selectors automatically, tracks pass / fail over time.
+        <code>ghostrun run &lt;flow-name&gt;</code> replays your flow with Playwright — no browser visible. Screenshots every step, heals broken selectors automatically, tracks pass / fail over time.
       </p>
     </div>
     <div class="step-card">
@@ -594,7 +594,7 @@ footer a:hover { color: var(--text); }
         <span class="tag auth">auth</span>
         <span class="tag smoke">starter</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> login-basic</div>
+      <div class="template-install"><span>ghostrun store install</span> login-basic</div>
     </div>
     <div class="template-card">
       <div class="template-name">signup-verify</div>
@@ -603,7 +603,7 @@ footer a:hover { color: var(--text); }
         <span class="tag auth">auth</span>
         <span class="tag auth">signup</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> signup-verify</div>
+      <div class="template-install"><span>ghostrun store install</span> signup-verify</div>
     </div>
     <div class="template-card">
       <div class="template-name">nav-smoke</div>
@@ -612,7 +612,7 @@ footer a:hover { color: var(--text); }
         <span class="tag smoke">smoke</span>
         <span class="tag ci">ci</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> nav-smoke</div>
+      <div class="template-install"><span>ghostrun store install</span> nav-smoke</div>
     </div>
     <div class="template-card">
       <div class="template-name">contact-form</div>
@@ -621,7 +621,7 @@ footer a:hover { color: var(--text); }
         <span class="tag">forms</span>
         <span class="tag">marketing</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> contact-form</div>
+      <div class="template-install"><span>ghostrun store install</span> contact-form</div>
     </div>
     <div class="template-card">
       <div class="template-name">checkout-guest</div>
@@ -630,7 +630,7 @@ footer a:hover { color: var(--text); }
         <span class="tag ecommerce">ecommerce</span>
         <span class="tag ecommerce">checkout</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> checkout-guest</div>
+      <div class="template-install"><span>ghostrun store install</span> checkout-guest</div>
     </div>
     <div class="template-card">
       <div class="template-name">api-health</div>
@@ -639,7 +639,7 @@ footer a:hover { color: var(--text); }
         <span class="tag api">api</span>
         <span class="tag ci">monitoring</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> api-health</div>
+      <div class="template-install"><span>ghostrun store install</span> api-health</div>
     </div>
     <div class="template-card">
       <div class="template-name">search-results</div>
@@ -648,7 +648,7 @@ footer a:hover { color: var(--text); }
         <span class="tag smoke">search</span>
         <span class="tag ci">smoke</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> search-results</div>
+      <div class="template-install"><span>ghostrun store install</span> search-results</div>
     </div>
     <div class="template-card">
       <div class="template-name">password-reset</div>
@@ -657,7 +657,7 @@ footer a:hover { color: var(--text); }
         <span class="tag auth">auth</span>
         <span class="tag">email</span>
       </div>
-      <div class="template-install"><span>flowmind store install</span> password-reset</div>
+      <div class="template-install"><span>ghostrun store install</span> password-reset</div>
     </div>
   </div>
 </section>
@@ -670,7 +670,7 @@ footer a:hover { color: var(--text); }
     <div class="section-label reveal">For AI Agents</div>
     <h2 class="section-headline reveal">Flows know<br>who created them.</h2>
     <p class="section-sub reveal" style="margin-bottom:24px">
-      FlowMind tracks whether a flow was recorded by a human or generated by an AI agent. Agents can create, run, and reuse flows autonomously via MCP — while humans can verify and promote them to trusted status.
+      GhostRun tracks whether a flow was recorded by a human or generated by an AI agent. Agents can create, run, and reuse flows autonomously via MCP — while humans can verify and promote them to trusted status.
     </p>
     <p style="font-size:15px;color:var(--text-dim);line-height:1.7" class="reveal">
       An agent books a hotel once, records the flow, and replays it every week without human intervention. A human records the login flow once — every agent on the team can reuse it with their own credentials via <code style="font-family:var(--mono);font-size:13px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--cyan)">--var</code> flags.
@@ -713,26 +713,26 @@ footer a:hover { color: var(--text); }
     <em>Nothing to trust.</em>
   </h2>
   <p class="install-sub reveal">
-    Your flows, screenshots, and run history live in <code style="font-family:var(--mono);font-size:14px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--cyan)">~/.flowmind</code> — on your machine, forever.
+    Your flows, screenshots, and run history live in <code style="font-family:var(--mono);font-size:14px;background:var(--bg3);padding:2px 6px;border-radius:4px;color:var(--cyan)">~/.ghostrun</code> — on your machine, forever.
   </p>
 
   <div class="install-block reveal">
-    <span class="install-cmd"><span class="dim">$</span> npm install -g flowmind</span>
+    <span class="install-cmd"><span class="dim">$</span> npm install -g ghostrun</span>
     <button class="copy-btn" onclick="copyInstall(this)">copy</button>
   </div>
 
   <div class="install-steps reveal">
-    <div class="install-step"><span>npm install -g flowmind</span></div>
+    <div class="install-step"><span>npm install -g ghostrun</span></div>
     <div class="install-step-arrow">→</div>
-    <div class="install-step"><span>flowmind learn https://yourapp.com</span></div>
+    <div class="install-step"><span>ghostrun learn https://yourapp.com</span></div>
     <div class="install-step-arrow">→</div>
-    <div class="install-step"><span>flowmind run &lt;flow-name&gt;</span></div>
+    <div class="install-step"><span>ghostrun run &lt;flow-name&gt;</span></div>
   </div>
 
   <div class="reveal">
     <div class="oss-pill">
       <span>Open source — MIT license ·</span>
-      <a href="https://github.com/builtbysharan/flowmind" target="_blank">github.com/builtbysharan/flowmind</a>
+      <a href="https://github.com/builtbysharan/ghostrun" target="_blank">github.com/builtbysharan/ghostrun</a>
       <span>· Built by</span>
       <a href="https://builtbysharan.com" target="_blank">Sharan</a>
     </div>
@@ -741,11 +741,11 @@ footer a:hover { color: var(--text); }
 
 <!-- Footer -->
 <footer>
-  <div class="footer-logo">⚡ FlowMind</div>
+  <div class="footer-logo">👻 GhostRun</div>
   <div>
     <a href="https://builtbysharan.com">builtbysharan.com</a>
     &nbsp;·&nbsp;
-    <a href="https://github.com/builtbysharan/flowmind">GitHub</a>
+    <a href="https://github.com/builtbysharan/ghostrun">GitHub</a>
     &nbsp;·&nbsp;
     <a href="mailto:sharan@builtbysharan.com">Contact</a>
   </div>
@@ -755,7 +755,7 @@ footer a:hover { color: var(--text); }
 <script>
 // ── Terminal animation ─────────────────────────────────────────────────────
 const LINES = [
-  { text: '$ flowmind learn https://myapp.com', cls: 'cmd', delay: 0 },
+  { text: '$ ghostrun learn https://myapp.com', cls: 'cmd', delay: 0 },
   { text: '', delay: 300 },
   { text: 'RECORDING  👤 human flow — browser is live', cls: 'cyan', delay: 400 },
   { text: '', delay: 600 },
@@ -769,7 +769,7 @@ const LINES = [
   { text: '──────────────────────────────────────────', cls: 'dim', delay: 3000 },
   { text: '✓ SAVED  5 actions recorded — 👤 human flow', cls: 'green', delay: 3100 },
   { text: '', delay: 3400 },
-  { text: '$ flowmind run "Login Flow"', cls: 'cmd', delay: 3800 },
+  { text: '$ ghostrun run "Login Flow"', cls: 'cmd', delay: 3800 },
   { text: '', delay: 4200 },
   { text: 'Running: Login Flow  👤', cls: 'cyan', delay: 4400 },
   { text: '', delay: 4600 },
@@ -809,7 +809,7 @@ buildTerminal();
 
 // ── Copy install cmd ────────────────────────────────────────────────────────
 function copyInstall(btn) {
-  navigator.clipboard.writeText('npm install -g flowmind').then(() => {
+  navigator.clipboard.writeText('npm install -g ghostrun').then(() => {
     btn.textContent = 'copied!';
     setTimeout(() => btn.textContent = 'copy', 2000);
   });

@@ -1,4 +1,4 @@
-# Flowmind
+# Ghostrun
 
 Memory-driven web automation. Record real browser flows, replay them headlessly, detect failures, and get AI explanations — all locally.
 
@@ -10,9 +10,9 @@ Memory-driven web automation. Record real browser flows, replay them headlessly,
 npm install
 npx playwright install chromium
 
-node flowmind.js init
-node flowmind.js learn https://yourapp.com
-node flowmind.js run <flow-id>
+node ghostrun.js init
+node ghostrun.js learn https://yourapp.com
+node ghostrun.js run <flow-id>
 ```
 
 ---
@@ -42,7 +42,7 @@ Every core feature works with zero AI. AI is an optional enhancement.
 
 ### Option 1 — Local (Default, Recommended)
 
-Flowmind uses **Ollama** by default. No API key, no internet, runs on your machine.
+Ghostrun uses **Ollama** by default. No API key, no internet, runs on your machine.
 
 ```bash
 # Install Ollama
@@ -55,7 +55,7 @@ ollama serve &
 ollama pull gemma3:4b
 
 # That's it — AI features auto-activate
-node flowmind.js status   # shows: AI Provider: Ollama (gemma3:4b)
+node ghostrun.js status   # shows: AI Provider: Ollama (gemma3:4b)
 ```
 
 **Model options by hardware:**
@@ -70,7 +70,7 @@ Override model: `export FLOWMIND_OLLAMA_MODEL=llama3.2:3b`
 
 ### Option 2 — Anthropic Cloud (Fallback)
 
-If Ollama isn't running, Flowmind falls back to Anthropic:
+If Ollama isn't running, Ghostrun falls back to Anthropic:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -104,35 +104,35 @@ export FLOWMIND_AI_PROVIDER=anthropic   # Anthropic only
 
 ```bash
 # Setup
-node flowmind.js init
+node ghostrun.js init
 
 # Recording
-node flowmind.js learn <url> [name]          # Real browser capture
+node ghostrun.js learn <url> [name]          # Real browser capture
 
 # Running
-node flowmind.js run <id|name>               # Headless execution
+node ghostrun.js run <id|name>               # Headless execution
 
 # Flow management
-node flowmind.js flow:list
-node flowmind.js flow:fix <id|name>          # Fix broken selectors interactively
-node flowmind.js flow:delete <id|name>
-node flowmind.js flow:export <id|name>       # Export to .flow.json
-node flowmind.js flow:import <file>
+node ghostrun.js flow:list
+node ghostrun.js flow:fix <id|name>          # Fix broken selectors interactively
+node ghostrun.js flow:delete <id|name>
+node ghostrun.js flow:export <id|name>       # Export to .flow.json
+node ghostrun.js flow:import <file>
 
 # Scheduling
-node flowmind.js flow:schedule <id> "<cron>" # e.g. "0 9 * * *" = daily 9am
-node flowmind.js schedule:list
-node flowmind.js schedule:remove <id>
-node flowmind.js serve                       # Start scheduler daemon
+node ghostrun.js flow:schedule <id> "<cron>" # e.g. "0 9 * * *" = daily 9am
+node ghostrun.js schedule:list
+node ghostrun.js schedule:remove <id>
+node ghostrun.js serve                       # Start scheduler daemon
 
 # Run history
-node flowmind.js run:list
-node flowmind.js run:show <id>               # Step details + screenshots
-node flowmind.js run:diff <id1> <id2>        # Visual screenshot diff (no AI)
-node flowmind.js run:analyze <id>            # AI failure analysis (optional AI)
+node ghostrun.js run:list
+node ghostrun.js run:show <id>               # Step details + screenshots
+node ghostrun.js run:diff <id1> <id2>        # Visual screenshot diff (no AI)
+node ghostrun.js run:analyze <id>            # AI failure analysis (optional AI)
 
 # System
-node flowmind.js status                      # Stats + AI provider info
+node ghostrun.js status                      # Stats + AI provider info
 ```
 
 ---
@@ -142,7 +142,7 @@ node flowmind.js status                      # Stats + AI provider info
 When a flow fails because a selector broke (page changed, element moved):
 
 ```bash
-node flowmind.js flow:fix <id|name>
+node ghostrun.js flow:fix <id|name>
 ```
 
 Browser opens, replays all passing steps automatically, **pauses on broken ones**, and asks you to click the correct element. Selector is updated and saved. No manual editing.
@@ -154,7 +154,7 @@ Browser opens, replays all passing steps automatically, **pauses on broken ones*
 Compare any two runs pixel-by-pixel — no AI needed:
 
 ```bash
-node flowmind.js run:diff <run1-id> <run2-id>
+node ghostrun.js run:diff <run1-id> <run2-id>
 
   Step  Status    Diff %  Screenshot
   ──────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ node flowmind.js run:diff <run1-id> <run2-id>
      4  same        0.0%  Submit form
 
   3 same  1 changed
-  Diff images: ~/.flowmind/diffs/abc123_vs_def456/
+  Diff images: ~/.ghostrun/diffs/abc123_vs_def456/
 ```
 
 ---
@@ -172,9 +172,9 @@ node flowmind.js run:diff <run1-id> <run2-id>
 ## Scheduling
 
 ```bash
-node flowmind.js flow:schedule login "0 9 * * *"   # daily at 9am
-node flowmind.js flow:schedule checkout "0 * * * *" # every hour
-node flowmind.js serve                              # keep running
+node ghostrun.js flow:schedule login "0 9 * * *"   # daily at 9am
+node ghostrun.js flow:schedule checkout "0 * * * *" # every hour
+node ghostrun.js serve                              # keep running
 ```
 
 ---
@@ -193,11 +193,11 @@ Tools: `list_flows`, `get_flow`, `run_flow`, `get_run_result`, `list_runs`, `del
 
 ## Data Storage
 
-Everything local in `~/.flowmind/`:
+Everything local in `~/.ghostrun/`:
 
 ```
-~/.flowmind/
-├── data/flowmind.db       # SQLite: flows, runs, steps, schedules
+~/.ghostrun/
+├── data/ghostrun.db       # SQLite: flows, runs, steps, schedules
 ├── screenshots/           # PNG per step per run
 └── diffs/                 # Screenshot diff images
 ```
