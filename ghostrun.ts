@@ -254,6 +254,408 @@ function executeExtractJson(node: Record<string, unknown>, ctx: ExecutionContext
 }
 
 // ============================================
+// LOAD TESTING ENGINE
+// ============================================
+
+interface PerfSample {
+  label: string;
+  duration: number;
+  success: boolean;
+  vuId: number;
+}
+
+interface PerfStats {
+  total: number;
+  success: number;
+  failed: number;
+  errorRate: number;
+  avgRps: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  min: number;
+  max: number;
+}
+
+interface PerfConfig {
+  vus: number;
+  duration: number;  // ms
+  rampUp: number;    // ms
+  timeout: number;   // ms per request
+}
+
+function calcPercentile(sortedMs: number[], pct: number): number {
+  if (!sortedMs.length) return 0;
+  const idx = Math.ceil((pct / 100) * sortedMs.length) - 1;
+  return sortedMs[Math.max(0, Math.min(idx, sortedMs.length - 1))];
+}
+
+function calcStats(samples: PerfSample[], durationMs: number): PerfStats {
+  const total = samples.length;
+  const success = samples.filter(s => s.success).length;
+  const failed = total - success;
+  const durations = samples.map(s => s.duration).sort((a, b) => a - b);
+  return {
+    total, success, failed,
+    errorRate: total > 0 ? parseFloat(((failed / total) * 100).toFixed(1)) : 0,
+    avgRps: parseFloat((total / (durationMs / 1000)).toFixed(1)),
+    p50: calcPercentile(durations, 50),
+    p95: calcPercentile(durations, 95),
+    p99: calcPercentile(durations, 99),
+    min: durations[0] ?? 0,
+    max: durations[durations.length - 1] ?? 0,
+  };
+}
+
+// DB-free API step execution used for load testing (no audit log per sample)
+async function runApiStepDirect(
+  node: Record<string, unknown>,
+  action: string,
+  ctx: ExecutionContext,
+  timeoutMs: number
+): Promise<void> {
+  const API_ONLY_ACTIONS = new Set(['http:request','assert:response','assert:status','assert:body',
+    'assert:header','assert:time','set:variable','extract:json','env:switch']);
+  if (!API_ONLY_ACTIONS.has(action)) return; // skip browser actions silently
+
+  if (action === 'http:request') {
+    const method = ((node.method as string) || 'GET').toUpperCase();
+    const url = resolveVarsDeep(node.url as string, ctx) as string;
+    const rawHeaders = (node.headers as Record<string, string>) || {};
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawHeaders)) headers[k] = resolveVarsDeep(v, ctx) as string;
+    const auth = node.auth as Record<string, string> | undefined;
+    if (auth?.type === 'bearer' && auth.token) {
+      headers['Authorization'] = `Bearer ${resolveVarsDeep(auth.token, ctx)}`;
+    } else if (auth?.type === 'basic' && auth.username) {
+      const creds = Buffer.from(`${resolveVarsDeep(auth.username, ctx)}:${resolveVarsDeep(auth.password || '', ctx)}`).toString('base64');
+      headers['Authorization'] = `Basic ${creds}`;
+    } else if (auth?.type === 'apikey' && auth.key) {
+      headers[auth.header || 'X-API-Key'] = resolveVarsDeep(auth.key, ctx) as string;
+    }
+    let body: string | undefined;
+    if (node.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+      const resolved = resolveVarsDeep(node.body, ctx);
+      body = typeof resolved === 'string' ? resolved : JSON.stringify(resolved);
+      if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const t = Date.now();
+    let response: Response;
+    try {
+      response = await fetch(url, { method, headers, body, signal: controller.signal });
+    } finally { clearTimeout(timer); }
+    const responseTimeMs = Date.now() - t;
+    let bodyText = '';
+    let bodyJson: unknown = null;
+    try { bodyText = await response.text(); } catch {}
+    try { bodyJson = JSON.parse(bodyText); } catch {}
+    ctx.lastResponse = {
+      status: response.status, headers: {} as Record<string, string>,
+      body: bodyJson ?? bodyText, bodyText, responseTimeMs, url, method,
+    };
+    // inline extract
+    const extract = node.extract as Record<string, string> | undefined;
+    if (extract && bodyJson) {
+      for (const [varName, jp] of Object.entries(extract)) {
+        const val = getJsonPath(bodyJson, jp);
+        if (val !== undefined) ctx.variables[varName] = String(val);
+      }
+    }
+  } else if (action.startsWith('assert:')) {
+    await executeApiAssert(node, ctx);
+  } else if (action === 'set:variable') {
+    const varName = node.variable as string;
+    if (varName) ctx.variables[varName] = String(resolveVarsDeep(node.value, ctx) ?? '');
+  } else if (action === 'extract:json') {
+    const varName = node.variable as string;
+    const jp = node.path as string;
+    if (varName && jp && ctx.lastResponse) {
+      const val = getJsonPath(ctx.lastResponse.body, jp);
+      if (val !== undefined) ctx.variables[varName] = String(val);
+    }
+  }
+}
+
+async function runVU(
+  vuId: number,
+  actionNodes: Record<string, unknown>[],
+  baseVars: Record<string, string>,
+  endTime: number,
+  samples: PerfSample[],
+  timeoutMs: number
+): Promise<void> {
+  while (Date.now() < endTime) {
+    const ctx: ExecutionContext = { variables: { ...baseVars } };
+    for (const node of actionNodes) {
+      if (Date.now() >= endTime) return;
+      const action = node.action as string;
+      const label = node.label as string || action;
+      const t = Date.now();
+      try {
+        const resolvedNode = {
+          ...node,
+          url: node.url ? resolveVarsDeep(node.url as string, ctx) : node.url,
+          value: node.value ? resolveVarsDeep(node.value as string, ctx) : node.value,
+        };
+        await runApiStepDirect(resolvedNode, action, ctx, timeoutMs);
+        samples.push({ label, duration: Date.now() - t, success: true, vuId });
+      } catch {
+        samples.push({ label, duration: Date.now() - t, success: false, vuId });
+        break; // restart iteration on failure
+      }
+    }
+  }
+}
+
+async function runPerfTest(
+  flowId: string,
+  config: PerfConfig
+): Promise<{ stats: PerfStats; perStep: Record<string, PerfStats>; perfRunId: string }> {
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) throw new Error('Flow not found: ' + flowId);
+
+  const graph = JSON.parse(flow.graph) as { nodes?: Record<string, unknown>[] };
+  const API_ONLY = new Set(['http:request','assert:response','assert:status','assert:body',
+    'assert:header','assert:time','set:variable','extract:json','env:switch']);
+  const actionNodes = (graph.nodes || []).filter(n => n.type === 'action');
+  const apiNodes = actionNodes.filter(n => API_ONLY.has(n.action as string));
+  if (!apiNodes.length) throw new Error('No API steps found in this flow. perf:run only supports API flows.');
+
+  // Load active env vars
+  const baseVars: Record<string, string> = {};
+  const activeEnv = db.getActiveEnvironment();
+  if (activeEnv) Object.assign(baseVars, activeEnv.variables);
+
+  const perfRunId = db.createPerfRun({ flowId: flow.id, flowName: flow.name, config });
+  const samples: PerfSample[] = [];
+  const testStart = Date.now();
+  const endTime = testStart + config.duration;
+
+  // Stagger VU startup over rampUp window
+  const vuPromises: Promise<void>[] = [];
+  const rampDelay = config.vus > 1 ? config.rampUp / (config.vus - 1) : 0;
+  for (let i = 0; i < config.vus; i++) {
+    const delay = Math.round(i * rampDelay);
+    vuPromises.push(
+      new Promise(resolve => setTimeout(resolve, delay)).then(() =>
+        runVU(i, apiNodes, baseVars, endTime, samples, config.timeout)
+      )
+    );
+  }
+
+  await Promise.all(vuPromises);
+  const actualDuration = Date.now() - testStart;
+
+  const stats = calcStats(samples, actualDuration);
+
+  // Per-step breakdown
+  const perStep: Record<string, PerfStats> = {};
+  const stepLabels = [...new Set(samples.map(s => s.label))];
+  for (const label of stepLabels) {
+    const stepSamples = samples.filter(s => s.label === label);
+    perStep[label] = calcStats(stepSamples, actualDuration);
+  }
+
+  db.updatePerfRun(perfRunId, {
+    status: 'done',
+    totalRequests: stats.total, successRequests: stats.success, failedRequests: stats.failed,
+    avgRps: stats.avgRps, p50: stats.p50, p95: stats.p95, p99: stats.p99,
+    minMs: stats.min, maxMs: stats.max, perStepStats: perStep,
+  });
+
+  return { stats, perStep, perfRunId };
+}
+
+// ============================================
+// K6 SCRIPT GENERATOR
+// ============================================
+
+function generateK6Script(
+  flowName: string,
+  actionNodes: Record<string, unknown>[],
+  config: { vus: number; duration: number; p95threshold: number; errorThreshold: number }
+): string {
+  const lines: string[] = [];
+  const durationSec = Math.round(config.duration / 1000);
+
+  lines.push(`import http from 'k6/http';`);
+  lines.push(`import { check, sleep } from 'k6';`);
+  lines.push(`import { Trend } from 'k6/metrics';`);
+  lines.push(``);
+  lines.push(`// Generated by GhostRun from flow: "${flowName}"`);
+  lines.push(`// Run with: k6 run <this-file>`);
+  lines.push(``);
+  lines.push(`export const options = {`);
+  lines.push(`  stages: [`);
+  lines.push(`    { duration: '${Math.max(5, Math.round(durationSec * 0.2))}s', target: ${config.vus} },`);
+  lines.push(`    { duration: '${Math.max(10, Math.round(durationSec * 0.6))}s', target: ${config.vus} },`);
+  lines.push(`    { duration: '${Math.max(5, Math.round(durationSec * 0.2))}s', target: 0 },`);
+  lines.push(`  ],`);
+  lines.push(`  thresholds: {`);
+  lines.push(`    http_req_duration: ['p(95)<${config.p95threshold}'],`);
+  lines.push(`    http_req_failed: ['rate<${(config.errorThreshold / 100).toFixed(2)}'],`);
+  lines.push(`  },`);
+  lines.push(`};`);
+  lines.push(``);
+
+  // Collect custom metrics per HTTP step
+  const httpSteps = actionNodes.filter(n => n.action === 'http:request');
+  for (const node of httpSteps) {
+    const varName = k6VarName(node.label as string || 'request');
+    lines.push(`const ${varName}Duration = new Trend('${varName}_duration');`);
+  }
+  if (httpSteps.length) lines.push(``);
+
+  lines.push(`export default function () {`);
+  lines.push(`  let res;`);
+
+  // Track variable declarations to avoid re-declaring
+  const declaredVars = new Set<string>();
+  let lastHttpVarName = 'res';
+  let lastHttpNodeLabel = '';
+
+  for (const node of actionNodes) {
+    const action = node.action as string;
+
+    if (action === 'set:variable') {
+      const varName = node.variable as string;
+      const val = toK6Value(node.value);
+      if (!declaredVars.has(varName)) {
+        lines.push(`  let ${varName} = ${val};`);
+        declaredVars.add(varName);
+      } else {
+        lines.push(`  ${varName} = ${val};`);
+      }
+    } else if (action === 'http:request') {
+      const method = ((node.method as string) || 'GET').toUpperCase();
+      const url = toK6Value(node.url);
+      const metricVar = k6VarName(node.label as string || 'request') + 'Duration';
+      lastHttpNodeLabel = node.label as string || '';
+      lastHttpVarName = `r${httpSteps.indexOf(node) + 1}`;
+
+      // Build params (headers + auth)
+      const paramParts: string[] = [];
+      const headerEntries: string[] = [];
+      const rawHeaders = (node.headers as Record<string, string>) || {};
+      for (const [k, v] of Object.entries(rawHeaders)) {
+        headerEntries.push(`'${k}': ${toK6Value(v)}`);
+      }
+      const auth = node.auth as Record<string, string> | undefined;
+      if (auth?.type === 'bearer') {
+        headerEntries.push(`'Authorization': \`Bearer \${${toK6Var(auth.token || '')}}\``);
+      } else if (auth?.type === 'basic') {
+        headerEntries.push(`'Authorization': 'Basic ' + btoa(\`\${${toK6Var(auth.username || '')}}:\${${toK6Var(auth.password || '')}}\`)`);
+      } else if (auth?.type === 'apikey') {
+        headerEntries.push(`'${auth.header || 'X-API-Key'}': ${toK6Value(auth.key || '')}`);
+      }
+      if (headerEntries.length) {
+        paramParts.push(`headers: { ${headerEntries.join(', ')} }`);
+      }
+      const paramStr = paramParts.length ? `, { ${paramParts.join(', ')} }` : '';
+
+      if (['GET', 'DELETE', 'HEAD'].includes(method)) {
+        lines.push(`  const ${lastHttpVarName} = http.${method.toLowerCase()}(${url}${paramStr});`);
+      } else {
+        const bodyVal = node.body ? toK6Value(node.body) : 'null';
+        const hasContentType = headerEntries.some(h => h.includes('Content-Type'));
+        const ctHeader = hasContentType ? '' : `, headers: { 'Content-Type': 'application/json' }`;
+        const bodyStr = `JSON.stringify(${bodyVal})`;
+        const pStr = paramParts.length ? `, { ${paramParts.join(', ')}${ctHeader} }` : `, { headers: { 'Content-Type': 'application/json' } }`;
+        lines.push(`  const ${lastHttpVarName} = http.${method.toLowerCase()}(${url}, ${bodyStr}${pStr});`);
+      }
+      lines.push(`  ${metricVar}.add(${lastHttpVarName}.timings.duration);`);
+
+      // Inline extracts
+      const extract = node.extract as Record<string, string> | undefined;
+      if (extract) {
+        for (const [varName, jp] of Object.entries(extract)) {
+          const jsonKey = jp.replace(/^\$\.?/, '');
+          if (!declaredVars.has(varName)) {
+            lines.push(`  let ${varName} = ${lastHttpVarName}.json('${jsonKey}');`);
+            declaredVars.add(varName);
+          } else {
+            lines.push(`  ${varName} = ${lastHttpVarName}.json('${jsonKey}');`);
+          }
+        }
+      }
+    } else if (action === 'assert:response' || action.startsWith('assert:')) {
+      const assertType = (node.assert as string) || 'status';
+      const checkLabel = (node.label as string) || `assert ${assertType}`;
+      let checkFn = '';
+      switch (assertType) {
+        case 'status':
+          checkFn = `(r) => r.status === ${node.expected ?? 200}`;
+          break;
+        case 'body:contains':
+          checkFn = `(r) => r.body.includes(${JSON.stringify(node.expected ?? '')})`;
+          break;
+        case 'json:path': {
+          const jp = ((node.path as string) || '').replace(/^\$\.?/, '');
+          checkFn = `(r) => String(r.json('${jp}')) === ${JSON.stringify(String(node.expected ?? ''))}`;
+          break;
+        }
+        case 'json:exists': {
+          const jp = ((node.path as string) || '').replace(/^\$\.?/, '');
+          checkFn = `(r) => r.json('${jp}') !== null`;
+          break;
+        }
+        case 'header':
+          checkFn = `(r) => r.headers['${node.header ?? ''}'] !== undefined`;
+          break;
+        case 'time':
+          checkFn = `(r) => r.timings.duration < ${node.expected ?? 2000}`;
+          break;
+        default:
+          checkFn = `() => true /* ${assertType} */`;
+      }
+      lines.push(`  check(${lastHttpVarName}, { ${JSON.stringify(checkLabel)}: ${checkFn} });`);
+    } else if (action === 'extract:json') {
+      const varName = node.variable as string;
+      const jp = ((node.path as string) || '').replace(/^\$\.?/, '');
+      if (!declaredVars.has(varName)) {
+        lines.push(`  let ${varName} = ${lastHttpVarName}.json('${jp}');`);
+        declaredVars.add(varName);
+      } else {
+        lines.push(`  ${varName} = ${lastHttpVarName}.json('${jp}');`);
+      }
+    }
+  }
+
+  lines.push(`  sleep(0.1);`);
+  lines.push(`}`);
+  return lines.join('\n');
+}
+
+function k6VarName(label: string): string {
+  return label.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '').replace(/_+/g, '_').toLowerCase() || 'step';
+}
+
+function toK6Value(val: unknown): string {
+  if (typeof val === 'string') {
+    // Convert {{var}} to ${var} template literals
+    if (val.includes('{{')) {
+      const converted = val.replace(/\{\{(\w+)\}\}/g, (_, k) => `\${${k}}`);
+      return `\`${converted}\``;
+    }
+    return JSON.stringify(val);
+  }
+  if (typeof val === 'object' && val !== null) {
+    // Recursively convert object values
+    const entries = Object.entries(val as Record<string, unknown>)
+      .map(([k, v]) => `${JSON.stringify(k)}: ${toK6Value(v)}`).join(', ');
+    return `{ ${entries} }`;
+  }
+  return JSON.stringify(val);
+}
+
+function toK6Var(val: string): string {
+  if (val.match(/^\{\{(\w+)\}\}$/)) return val.replace(/^\{\{(\w+)\}\}$/, '$1');
+  return JSON.stringify(val);
+}
+
+// ============================================
 // AI — Ollama-first, Anthropic fallback
 // ============================================
 
@@ -4951,6 +5353,212 @@ async function runVarDump(runId: string) {
 }
 
 // ============================================
+// COMMANDS — Performance Testing
+// ============================================
+
+function parsePerfArgs(extraArgs: string[]): PerfConfig {
+  const get = (flag: string, def: number) => {
+    const idx = extraArgs.indexOf(flag);
+    if (idx === -1) return def;
+    const raw = extraArgs[idx + 1] || '';
+    return parseInt(raw.replace(/[^0-9]/g, '')) || def;
+  };
+  const getDurationMs = (flag: string, defSec: number): number => {
+    const idx = extraArgs.indexOf(flag);
+    if (idx === -1) return defSec * 1000;
+    const raw = extraArgs[idx + 1] || String(defSec);
+    const num = parseInt(raw.replace(/[^0-9]/g, '')) || defSec;
+    if (raw.endsWith('ms')) return num;
+    return num * 1000; // treat as seconds by default
+  };
+  return {
+    vus: get('--vus', 10),
+    duration: getDurationMs('--duration', 30),
+    rampUp: getDurationMs('--ramp-up', 5),
+    timeout: getDurationMs('--timeout', 10),
+  };
+}
+
+function renderPerfStats(stats: PerfStats, perStep: Record<string, PerfStats>, flowName: string, config: PerfConfig): void {
+  const errColor = stats.errorRate > 5 ? chalk.red : stats.errorRate > 1 ? chalk.yellow : chalk.green;
+  const p95Color = stats.p95 > 1000 ? chalk.red : stats.p95 > 500 ? chalk.yellow : chalk.green;
+
+  divider();
+  console.log(chalk.bold.white('\n  PERFORMANCE RESULTS') + chalk.gray(` — ${flowName}`));
+  console.log(chalk.gray(`  VUs: ${config.vus}  Duration: ${config.duration / 1000}s  Ramp-up: ${config.rampUp / 1000}s\n`));
+
+  // Summary box
+  const w = 46;
+  const line = (label: string, val: string) =>
+    `  │  ${label.padEnd(22)}${val.padStart(w - 26)}  │`;
+
+  console.log(`  ┌${'─'.repeat(w)}┐`);
+  console.log(`  │  ${'Summary'.padEnd(w - 2)}│`);
+  console.log(`  ├${'─'.repeat(w)}┤`);
+  console.log(line('Total Requests', chalk.white(stats.total.toLocaleString())));
+  console.log(line('Throughput', chalk.cyan(stats.avgRps + ' req/s')));
+  console.log(line('Success Rate', chalk.green(`${(100 - stats.errorRate).toFixed(1)}%  (${stats.success.toLocaleString()})`)));
+  console.log(line('Error Rate', errColor(`${stats.errorRate}%  (${stats.failed.toLocaleString()})`)));
+  console.log(`  ├${'─'.repeat(w)}┤`);
+  console.log(`  │  ${'Latency'.padEnd(w - 2)}│`);
+  console.log(`  ├${'─'.repeat(w)}┤`);
+  console.log(line('p50  (median)', chalk.green(stats.p50 + 'ms')));
+  console.log(line('p95', p95Color(stats.p95 + 'ms')));
+  console.log(line('p99', stats.p99 > 2000 ? chalk.red(stats.p99 + 'ms') : chalk.yellow(stats.p99 + 'ms')));
+  console.log(line('min / max', chalk.gray(`${stats.min}ms / ${stats.max}ms`)));
+  console.log(`  └${'─'.repeat(w)}┘`);
+
+  // Per-step table
+  const stepNames = Object.keys(perStep);
+  if (stepNames.length > 1) {
+    console.log(chalk.bold('\n  Per Step:\n'));
+    console.log(chalk.gray(`  ${'Step'.padEnd(38)} ${'Req'.padStart(6)} ${'p50'.padStart(7)} ${'p95'.padStart(7)} ${'Err%'.padStart(6)}`));
+    console.log(chalk.gray('  ' + '─'.repeat(68)));
+    for (const [label, s] of Object.entries(perStep)) {
+      const errPct = s.errorRate;
+      const errStr = errPct > 0 ? chalk.red(errPct.toFixed(1) + '%') : chalk.green('0%');
+      const p95Str = s.p95 > 500 ? chalk.yellow(s.p95 + 'ms') : chalk.green(s.p95 + 'ms');
+      const truncLabel = label.length > 37 ? label.slice(0, 34) + '...' : label;
+      console.log(`  ${chalk.white(truncLabel.padEnd(38))} ${s.total.toString().padStart(6)} ${String(s.p50 + 'ms').padStart(7)} ${p95Str.padStart(7)} ${errStr.padStart(6)}`);
+    }
+  }
+  console.log();
+}
+
+async function runPerfRun(flowId: string, extraArgs: string[]): Promise<void> {
+  const config = parsePerfArgs(extraArgs);
+  printLogo(); divider();
+
+  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
+
+  console.log(chalk.bold(`\n  Load Test: ${chalk.white(flow.name)}`));
+  console.log(chalk.gray(`  VUs: ${config.vus}  Duration: ${config.duration / 1000}s  Ramp-up: ${config.rampUp / 1000}s  Timeout: ${config.timeout / 1000}s\n`));
+
+  // Live progress display
+  const startTime = Date.now();
+  const totalMs = config.duration;
+  const progressInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const pct = Math.min(100, Math.round((elapsed / totalMs) * 100));
+    const filled = Math.round(pct / 5);
+    const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+    process.stdout.write(`\r  [${bar}] ${pct}%  ${Math.round(elapsed / 1000)}s / ${config.duration / 1000}s  `);
+  }, 250);
+
+  let stats: PerfStats, perStep: Record<string, PerfStats>, perfRunId: string;
+  try {
+    ({ stats, perStep, perfRunId } = await runPerfTest(flowId, config));
+  } finally {
+    clearInterval(progressInterval);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
+  }
+
+  renderPerfStats(stats, perStep, flow.name, config);
+  info('Perf Run ID: ' + chalk.gray(perfRunId.slice(0, 8)));
+  info('View details: ' + chalk.cyan(`ghostrun perf:show ${perfRunId.slice(0, 8)}`));
+  console.log();
+}
+
+async function runPerfExport(flowId: string, extraArgs: string[]): Promise<void> {
+  const config = parsePerfArgs(extraArgs);
+  const p95 = parseInt((extraArgs[extraArgs.indexOf('--p95') + 1] || '').replace(/[^0-9]/g, '') || '500');
+  const errRate = parseFloat((extraArgs[extraArgs.indexOf('--max-errors') + 1] || '1'));
+  const outputFlag = extraArgs.indexOf('--output');
+  const outputFile = outputFlag !== -1 ? extraArgs[outputFlag + 1] : '';
+
+  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
+
+  const graph = JSON.parse(flow.graph) as { nodes?: Record<string, unknown>[] };
+  const API_ONLY = new Set(['http:request','assert:response','assert:status','assert:body',
+    'assert:header','assert:time','set:variable','extract:json','env:switch']);
+  const actionNodes = (graph.nodes || [])
+    .filter(n => n.type === 'action' && API_ONLY.has(n.action as string));
+
+  if (!actionNodes.length) {
+    errorMsg('No API steps found. perf:export only supports API flows.');
+    process.exit(1);
+  }
+
+  const script = generateK6Script(flow.name, actionNodes, {
+    vus: config.vus,
+    duration: config.duration,
+    p95threshold: p95,
+    errorThreshold: errRate,
+  });
+
+  const filename = outputFile || `${flow.name.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-k6.js`;
+  fs.writeFileSync(filename, script, 'utf8');
+
+  printLogo(); divider();
+  success(`k6 script exported: ${chalk.cyan(filename)}`);
+  console.log();
+  console.log(chalk.bold('  Thresholds:'));
+  info(`p95 response time < ${p95}ms`);
+  info(`error rate < ${errRate}%`);
+  console.log();
+  console.log(chalk.bold('  Run with k6:'));
+  console.log(chalk.gray(`    k6 run ${filename}`));
+  console.log(chalk.gray(`    k6 run --vus ${config.vus} --duration ${config.duration / 1000}s ${filename}`));
+  console.log(chalk.gray(`    k6 run --out json=results.json ${filename}`));
+  console.log();
+  console.log(chalk.gray('  Install k6: https://grafana.com/docs/k6/latest/get-started/installation/'));
+  console.log();
+
+  // Print first 30 lines of script as preview
+  console.log(chalk.bold('  Script preview:'));
+  console.log(chalk.gray('  ' + '─'.repeat(56)));
+  script.split('\n').slice(0, 30).forEach(l => console.log(chalk.gray('  ') + chalk.white(l)));
+  if (script.split('\n').length > 30) console.log(chalk.gray(`  ... (${script.split('\n').length - 30} more lines)`));
+  console.log();
+}
+
+async function runPerfList(): Promise<void> {
+  printLogo(); divider();
+  const runs = db.listPerfRuns();
+  if (!runs.length) { warn('No perf runs yet. Run: ghostrun perf:run <flow-name>'); return; }
+
+  console.log(chalk.bold('\n  Performance Runs\n'));
+  console.log(chalk.gray(`  ${'ID'.padEnd(10)} ${'Flow'.padEnd(26)} ${'VUs'.padStart(4)} ${'Duration'.padStart(9)} ${'RPS'.padStart(7)} ${'p95'.padStart(7)} ${'Err%'.padStart(6)}  When`));
+  console.log(chalk.gray('  ' + '─'.repeat(82)));
+
+  for (const r of runs) {
+    const cfg = r.config as PerfConfig;
+    const errColor = (r.failedRequests ?? 0) / Math.max(r.totalRequests ?? 1, 1) > 0.05 ? chalk.red : chalk.green;
+    const errPct = r.totalRequests ? (((r.failedRequests ?? 0) / r.totalRequests) * 100).toFixed(1) : '—';
+    const p95Str = r.p95 != null ? (r.p95 > 500 ? chalk.yellow(r.p95 + 'ms') : chalk.green(r.p95 + 'ms')) : '—';
+    console.log(
+      `  ${chalk.gray(r.id.slice(0, 8).padEnd(10))} ${chalk.white(r.flowName.slice(0, 25).padEnd(26))} ${String(cfg?.vus ?? '?').padStart(4)} ` +
+      `${String(((cfg?.duration ?? 0) / 1000) + 's').padStart(9)} ` +
+      `${chalk.cyan(String(r.avgRps ?? '—').padStart(7))} ${p95Str.padStart(7)} ` +
+      `${errColor(errPct + '%').padStart(6)}  ${timeAgo(r.startedAt.toISOString())}`
+    );
+  }
+  console.log();
+}
+
+async function runPerfShow(runId: string): Promise<void> {
+  const run = db.findPerfRunByPartialId(runId);
+  if (!run) { errorMsg('Perf run not found: ' + runId); process.exit(1); }
+  const cfg = run.config as PerfConfig;
+  if (run.p50 != null) {
+    const stats: PerfStats = {
+      total: run.totalRequests ?? 0, success: run.successRequests ?? 0, failed: run.failedRequests ?? 0,
+      errorRate: run.totalRequests ? parseFloat((((run.failedRequests ?? 0) / run.totalRequests) * 100).toFixed(1)) : 0,
+      avgRps: run.avgRps ?? 0, p50: run.p50 ?? 0, p95: run.p95 ?? 0, p99: run.p99 ?? 0,
+      min: run.minMs ?? 0, max: run.maxMs ?? 0,
+    };
+    renderPerfStats(stats, run.perStepStats || {}, run.flowName, cfg);
+  } else {
+    warn('Perf run has no stats (may have failed or is still running).');
+  }
+  info('Started: ' + chalk.gray(run.startedAt.toISOString()));
+  if (run.completedAt) info('Completed: ' + chalk.gray(run.completedAt.toISOString()));
+  console.log();
+}
+
+// ============================================
 // MAIN
 // ============================================
 
@@ -5037,6 +5645,14 @@ async function main() {
     console.log(`  ${C('env:use <name>')}${G('Activate environment for runs')}`);
     console.log(`  ${C('env:show <name>')}${G('Show environment variables')}`);
     console.log(`  ${C('var:dump <run-id>')}${G('Show extracted variables + API calls from run')}`);
+    console.log();
+
+    H('Load & Performance Testing');
+    console.log(`  ${C('perf:run <flow> [opts]')}${G('Run load test  --vus 20 --duration 30s')}`);
+    console.log(`  ${C('perf:export <flow> [opts]')}${G('Export k6 script  --p95 500 --max-errors 1')}`);
+    console.log(`  ${C('perf:list')}${G('List past performance runs')}`);
+    console.log(`  ${C('perf:show <run-id>')}${G('Show detailed stats for a perf run')}`);
+    console.log(chalk.gray(`  ${'  Options: --vus N  --duration Ns  --ramp-up Ns  --timeout Ns'.padEnd(52)}`));
     console.log();
 
     H('Chat & Setup');
@@ -5148,6 +5764,16 @@ async function main() {
       if (!args[1]) { errorMsg('Template name required. Run store:list to see options.'); process.exit(1); }
       await runStoreInstall(args[1]); break;
     case 'api:learn':         await runApiLearn(); break;
+    case 'perf:run':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runPerfRun(args[1], args.slice(2)); break;
+    case 'perf:export':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runPerfExport(args[1], args.slice(2)); break;
+    case 'perf:list':         await runPerfList(); break;
+    case 'perf:show':
+      if (!args[1]) { errorMsg('Perf run ID required'); process.exit(1); }
+      await runPerfShow(args[1]); break;
     case 'env:create':
       if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
       await runEnvCreate(args[1], args.slice(2)); break;

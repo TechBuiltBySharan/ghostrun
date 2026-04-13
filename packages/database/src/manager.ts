@@ -108,6 +108,26 @@ export class DatabaseManager {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS perf_runs (
+        id TEXT PRIMARY KEY,
+        flow_id TEXT NOT NULL,
+        flow_name TEXT NOT NULL,
+        config TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        total_requests INTEGER,
+        success_requests INTEGER,
+        failed_requests INTEGER,
+        avg_rps REAL,
+        p50_ms INTEGER,
+        p95_ms INTEGER,
+        p99_ms INTEGER,
+        min_ms INTEGER,
+        max_ms INTEGER,
+        per_step_stats TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT,
+        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+      );
     `);
   }
 
@@ -261,6 +281,7 @@ export class DatabaseManager {
     try { this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))"); } catch {}
     try { this.db.exec(`CREATE TABLE IF NOT EXISTS environments (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, base_url TEXT, variables TEXT NOT NULL DEFAULT '{}', is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')))`); } catch {}
     try { this.db.exec(`CREATE TABLE IF NOT EXISTS api_responses (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_number INTEGER NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL, status_code INTEGER, response_time_ms INTEGER, response_headers TEXT, response_body TEXT, error_message TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`); } catch {}
+    try { this.db.exec(`CREATE TABLE IF NOT EXISTS perf_runs (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_name TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', total_requests INTEGER, success_requests INTEGER, failed_requests INTEGER, avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER, min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT, started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT)`); } catch {}
   }
 
   // ---- Suites ----
@@ -444,5 +465,66 @@ export class DatabaseManager {
       responseBody: r.response_body as string | null,
       errorMessage: r.error_message as string | null
     }));
+  }
+
+  // ---- Perf Runs ----
+  createPerfRun(data: { flowId: string; flowName: string; config: object }) {
+    const id = uuidv4();
+    this.db.prepare(`INSERT INTO perf_runs (id, flow_id, flow_name, config, status) VALUES (?, ?, ?, ?, 'running')`)
+      .run(id, data.flowId, data.flowName, JSON.stringify(data.config));
+    return id;
+  }
+  updatePerfRun(id: string, data: {
+    status?: string; totalRequests?: number; successRequests?: number; failedRequests?: number;
+    avgRps?: number; p50?: number; p95?: number; p99?: number; minMs?: number; maxMs?: number;
+    perStepStats?: object;
+  }) {
+    const updates: string[] = []; const values: unknown[] = [];
+    if (data.status !== undefined) { updates.push('status = ?'); values.push(data.status); }
+    if (data.totalRequests !== undefined) { updates.push('total_requests = ?'); values.push(data.totalRequests); }
+    if (data.successRequests !== undefined) { updates.push('success_requests = ?'); values.push(data.successRequests); }
+    if (data.failedRequests !== undefined) { updates.push('failed_requests = ?'); values.push(data.failedRequests); }
+    if (data.avgRps !== undefined) { updates.push('avg_rps = ?'); values.push(data.avgRps); }
+    if (data.p50 !== undefined) { updates.push('p50_ms = ?'); values.push(data.p50); }
+    if (data.p95 !== undefined) { updates.push('p95_ms = ?'); values.push(data.p95); }
+    if (data.p99 !== undefined) { updates.push('p99_ms = ?'); values.push(data.p99); }
+    if (data.minMs !== undefined) { updates.push('min_ms = ?'); values.push(data.minMs); }
+    if (data.maxMs !== undefined) { updates.push('max_ms = ?'); values.push(data.maxMs); }
+    if (data.perStepStats !== undefined) { updates.push('per_step_stats = ?'); values.push(JSON.stringify(data.perStepStats)); }
+    if (data.status === 'done' || data.status === 'failed') {
+      updates.push("completed_at = datetime('now')");
+    }
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE perf_runs SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+  }
+  getPerfRun(id: string) {
+    const r = this.db.prepare('SELECT * FROM perf_runs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? this.mapPerfRun(r) : null;
+  }
+  findPerfRunByPartialId(q: string) {
+    const rows = this.db.prepare('SELECT * FROM perf_runs WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
+    return rows.length >= 1 ? this.mapPerfRun(rows[0]) : null;
+  }
+  listPerfRuns(limit = 20) {
+    return (this.db.prepare('SELECT * FROM perf_runs ORDER BY started_at DESC LIMIT ?').all(limit) as Record<string, unknown>[]).map(r => this.mapPerfRun(r));
+  }
+  private mapPerfRun(r: Record<string, unknown>) {
+    return {
+      id: r.id as string, flowId: r.flow_id as string, flowName: r.flow_name as string,
+      config: JSON.parse(r.config as string),
+      status: r.status as string,
+      totalRequests: r.total_requests as number | null,
+      successRequests: r.success_requests as number | null,
+      failedRequests: r.failed_requests as number | null,
+      avgRps: r.avg_rps as number | null,
+      p50: r.p50_ms as number | null,
+      p95: r.p95_ms as number | null,
+      p99: r.p99_ms as number | null,
+      minMs: r.min_ms as number | null,
+      maxMs: r.max_ms as number | null,
+      perStepStats: r.per_step_stats ? JSON.parse(r.per_step_stats as string) : null,
+      startedAt: new Date(r.started_at as string),
+      completedAt: r.completed_at ? new Date(r.completed_at as string) : null,
+    };
   }
 }
