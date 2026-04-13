@@ -314,6 +314,10 @@ class DatabaseManager {
     const r = this.db.prepare('SELECT * FROM explore_reports WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return r ? { id: r.id as string, url: r.url as string, environment: r.environment as string, status: r.status as string, reportPath: r.report_path as string | null } : null;
   }
+  listExploreReports() {
+    return (this.db.prepare('SELECT * FROM explore_reports ORDER BY rowid DESC LIMIT 20').all() as Record<string, unknown>[])
+      .map(r => ({ id: r.id as string, url: r.url as string, status: r.status as string, reportPath: r.report_path as string | null, createdAt: r.created_at as string | null }));
+  }
   findExploreReportByPartialId(q: string) {
     const rows = this.db.prepare('SELECT * FROM explore_reports WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
     if (rows.length !== 1) return null;
@@ -860,7 +864,7 @@ async function runLearn(url: string, nameOverride?: string) {
 // COMMANDS — run
 // ============================================
 
-async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean; visible?: boolean }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string> }> {
+async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean; visible?: boolean; onStep?: (idx: number, action: string, selector?: string) => void; onError?: (msg: string) => void }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string>; error?: string }> {
   const log = (s: string) => { if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + '\n'); };
 
   let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
@@ -925,6 +929,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
     const label = node.label as string, action = node.action as string;
     const barStr = progressBar(stepNum, actionNodes.length);
     log(chalk.cyan(`\n  [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + chalk.white(label));
+    opts?.onStep?.(stepNum - 1, action, node.selector as string | undefined);
     const step = db.createStep({ runId: run.id, stepNumber: stepNum, name: label, action, selector: node.selector as string | undefined, value: node.value as string | undefined });
     const t = Date.now();
     try {
@@ -1010,6 +1015,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
       log(chalk.red(`      ✗ failed (${duration}ms)`));
       log(chalk.red(`        └─ ${errorMessage}`));
       failedStepInfo = { name: label, action, selector: node.selector as string | null, errorMessage };
+      opts?.onError?.(errorMessage);
       failed = true;
       break;
     }
@@ -1053,7 +1059,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
       })),
       extractedData, summary
     }));
-    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
+    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
   }
 
   divider();
@@ -1079,7 +1085,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   info('Run ID: ' + chalk.gray(run.id.slice(0, 8)));
   info('Screenshots: ' + chalk.cyan(screenshotsDir));
   console.log();
-  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData };
+  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
 }
 
 async function executeAction(page: import('playwright').Page, action: string, node: Record<string, unknown>) {
@@ -1174,6 +1180,183 @@ async function executeAction(page: import('playwright').Page, action: string, no
     case 'screenshot':
       // No-op — screenshots are always taken after each step
       break;
+
+    // ── Additional interactions ────────────────────────────────────────
+    case 'dblclick':
+      await page.dblclick(node.selector as string, { timeout: 10000 });
+      break;
+
+    case 'type': {
+      // Slow character-by-character typing (for autocomplete, debounced inputs)
+      const delay = parseInt((node.delay as string) || '50', 10);
+      await page.type(node.selector as string, sanitizePII((node.value as string) || ''), { delay });
+      break;
+    }
+
+    case 'clear':
+      await page.fill(node.selector as string, '', { timeout: 10000 });
+      break;
+
+    case 'upload': {
+      // File upload — value = comma-separated file paths
+      const files = ((node.value as string) || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (files.length === 0) throw new Error('upload: no file paths specified in value');
+      await page.setInputFiles(node.selector as string, files, { timeout: 10000 });
+      break;
+    }
+
+    case 'focus':
+      await page.focus(node.selector as string, { timeout: 10000 });
+      break;
+
+    case 'drag': {
+      // drag: selector = source, value = "targetSelector"
+      const target = node.value as string;
+      if (!target) throw new Error('drag: value must be the target selector');
+      const source = await page.locator(node.selector as string).first().boundingBox();
+      const dest   = await page.locator(target).first().boundingBox();
+      if (!source || !dest) throw new Error('drag: source or target element not found');
+      await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(dest.x + dest.width / 2, dest.y + dest.height / 2, { steps: 10 });
+      await page.mouse.up();
+      break;
+    }
+
+    case 'keyboard': {
+      // Keyboard shortcut — e.g. value: "Control+A", "Meta+S", "Escape"
+      const key = (node.value as string) || 'Enter';
+      if (node.selector) {
+        await page.press(node.selector as string, key);
+      } else {
+        await page.keyboard.press(key);
+      }
+      break;
+    }
+
+    case 'reload':
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      break;
+
+    case 'back':
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      break;
+
+    case 'forward':
+      await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      break;
+
+    case 'wait:text': {
+      const waitVal = node.value as string;
+      await page.waitForFunction(
+        (text: string) => document.body.innerText.includes(text),
+        waitVal,
+        { timeout: 15000 }
+      );
+      break;
+    }
+
+    case 'wait:url': {
+      const urlPattern = node.value as string;
+      await page.waitForURL(url => url.toString().includes(urlPattern), { timeout: 15000 });
+      break;
+    }
+
+    case 'wait:ms': {
+      const ms = parseInt((node.value as string) || '1000', 10);
+      await new Promise(r => setTimeout(r, Math.min(ms, 30000)));
+      break;
+    }
+
+    case 'scroll:element': {
+      // Scroll within a scrollable container
+      await page.locator(node.selector as string).first().scrollIntoViewIfNeeded({ timeout: 10000 });
+      break;
+    }
+
+    case 'eval': {
+      // Execute arbitrary JavaScript on the page — value = JS expression
+      const script = node.value as string;
+      if (!script) throw new Error('eval: value must be a JavaScript expression');
+      await page.evaluate(new Function(script) as () => unknown);
+      break;
+    }
+
+    case 'iframe:enter': {
+      // Switch context into an iframe — selector = iframe selector
+      // We store the iframe handle in node.__iframe for exit
+      const frame = page.frameLocator(node.selector as string);
+      (page as any).__activeFrame = frame;
+      break;
+    }
+
+    case 'iframe:exit':
+      (page as any).__activeFrame = null;
+      break;
+
+    case 'assert:visible': {
+      const isVisible = await page.locator(node.selector as string).first().isVisible({ timeout: 10000 }).catch(() => false);
+      if (!isVisible) throw new Error(`assert:visible failed — "${node.selector}" is not visible`);
+      break;
+    }
+
+    case 'assert:hidden': {
+      const isHidden = await page.locator(node.selector as string).first().isHidden({ timeout: 5000 }).catch(() => true);
+      if (!isHidden) throw new Error(`assert:hidden failed — "${node.selector}" is visible but expected hidden`);
+      break;
+    }
+
+    case 'assert:value': {
+      const inputVal = await page.inputValue(node.selector as string, { timeout: 10000 });
+      if (!inputVal.includes(node.value as string)) throw new Error(`assert:value failed — input value "${inputVal}" does not contain "${node.value}"`);
+      break;
+    }
+
+    case 'assert:count': {
+      const expected = parseInt(node.value as string, 10);
+      const actual   = await page.locator(node.selector as string).count();
+      if (actual !== expected) throw new Error(`assert:count failed — found ${actual} elements, expected ${expected}`);
+      break;
+    }
+
+    case 'assert:attr': {
+      // selector = element, value = "attrName=expected"
+      const [attrName, ...rest] = ((node.value as string) || '').split('=');
+      const expected = rest.join('=');
+      const actual   = await page.locator(node.selector as string).first().getAttribute(attrName, { timeout: 10000 });
+      if (actual === null) throw new Error(`assert:attr failed — attribute "${attrName}" not found on "${node.selector}"`);
+      if (!actual.includes(expected)) throw new Error(`assert:attr failed — "${attrName}" is "${actual}", expected to contain "${expected}"`);
+      break;
+    }
+
+    case 'cookie:set': {
+      // value = "name=value;domain=example.com" or just "name=value"
+      const parts = ((node.value as string) || '').split(';');
+      const [cookieName, cookieVal] = parts[0].split('=');
+      const domain = parts.find(p => p.trim().startsWith('domain='))?.split('=')[1] || new URL(page.url()).hostname;
+      await page.context().addCookies([{ name: cookieName.trim(), value: cookieVal?.trim() || '', domain, path: '/' }]);
+      break;
+    }
+
+    case 'cookie:clear':
+      await page.context().clearCookies();
+      break;
+
+    case 'storage:set': {
+      // value = "key=value"
+      const eqIdx = ((node.value as string) || '').indexOf('=');
+      if (eqIdx === -1) throw new Error('storage:set: value must be "key=value"');
+      const key = (node.value as string).slice(0, eqIdx);
+      const val = (node.value as string).slice(eqIdx + 1);
+      await page.evaluate(([k, v]) => localStorage.setItem(k, v), [key, val] as [string, string]);
+      break;
+    }
+
+    case 'assert:not-text': {
+      const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+      if (bodyText.includes(node.value as string)) throw new Error(`assert:not-text failed — "${node.value}" IS present on page (expected absent)`);
+      break;
+    }
   }
 }
 
@@ -1693,7 +1876,16 @@ async function runScheduleRemove(id: string) {
   console.log();
 }
 
-async function runServe() {
+async function runServe(serveArgs: string[] = []) {
+  const withUI = serveArgs.includes('--ui');
+  const portIdx = serveArgs.indexOf('--port');
+  const port = portIdx !== -1 ? parseInt(serveArgs[portIdx + 1], 10) || 3000 : 3000;
+
+  if (withUI) {
+    await runServeDashboard(port);
+    return;
+  }
+
   printLogo(); divider();
   let nodeCron: typeof import('node-cron');
   try { nodeCron = await import('node-cron'); } catch { errorMsg('node-cron not installed. Run: npm install node-cron'); process.exit(1); return; }
@@ -1726,6 +1918,879 @@ async function runServe() {
 
   // Keep alive — close db only on exit
   process.on('SIGINT', () => { console.log('\n  Stopping...'); db.close(); process.exit(0); });
+  await new Promise(() => {}); // run forever
+}
+
+// ============================================
+// WEB DASHBOARD (ghostrun serve --ui)
+// ============================================
+
+async function runServeDashboard(port: number) {
+  const http = await import('http');
+  const { EventEmitter } = await import('events');
+
+  const logBus = new EventEmitter();
+  logBus.setMaxListeners(100);
+
+  // Active run SSE subscribers: flowId → Set<response>
+  const sseClients = new Set<any>();
+
+  function broadcast(event: string, data: unknown) {
+    const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const res of sseClients) {
+      try { res.write(msg); } catch {}
+    }
+  }
+
+  const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GhostRun Dashboard</title>
+<style>
+  :root {
+    --bg: #080c10;
+    --surface: #0d1117;
+    --border: #21262d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --dim: #6e7681;
+    --cyan: #39d0d8;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --font-mono: 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+    --font-ui: system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  /* NAV */
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 24px;
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .nav-logo { font-size: 20px; }
+  .nav-title {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: -0.5px;
+  }
+  .nav-title span { color: var(--text); }
+  .nav-badge {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--dim);
+    background: rgba(57,208,216,0.08);
+    border: 1px solid rgba(57,208,216,0.2);
+    border-radius: 4px;
+    padding: 2px 8px;
+  }
+  /* TABS */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    padding: 0 24px;
+    flex-shrink: 0;
+  }
+  .tab {
+    padding: 10px 18px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+  /* MAIN */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+    gap: 20px;
+    overflow-y: auto;
+  }
+  .panel-hidden { display: none !important; }
+  /* STATS ROW */
+  .stats-row {
+    display: flex;
+    gap: 12px;
+  }
+  .stat-card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+  }
+  .stat-label {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    line-height: 1;
+  }
+  .stat-value.cyan { color: var(--cyan); }
+  .stat-value.green { color: var(--green); }
+  .stat-value.red { color: var(--red); }
+  /* SECTION HEADER */
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  /* FLOW TABLE */
+  .flow-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .flow-table th {
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+  }
+  .flow-table td {
+    padding: 12px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(33,38,45,0.6);
+    vertical-align: middle;
+  }
+  .flow-table tr:last-child td { border-bottom: none; }
+  .flow-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .flow-name { font-family: var(--font-mono); color: var(--text); font-weight: 600; }
+  .flow-steps { color: var(--dim); font-size: 12px; }
+  .flow-actions { display: flex; gap: 8px; }
+  .btn {
+    padding: 5px 12px;
+    border-radius: 5px;
+    border: 1px solid;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+    background: transparent;
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-run { color: var(--green); border-color: rgba(63,185,80,0.3); }
+  .btn-run:hover:not(:disabled) { background: rgba(63,185,80,0.1); }
+  .btn-delete { color: var(--red); border-color: rgba(248,81,73,0.3); }
+  .btn-delete:hover:not(:disabled) { background: rgba(248,81,73,0.08); }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+  .badge-pass { background: rgba(63,185,80,0.12); color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+  .badge-fail { background: rgba(248,81,73,0.1); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
+  .badge-running { background: rgba(57,208,216,0.1); color: var(--cyan); border: 1px solid rgba(57,208,216,0.2); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.5 } }
+  /* RUNS TABLE */
+  .runs-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .runs-table th {
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+  }
+  .runs-table td {
+    padding: 10px 16px;
+    font-size: 12.5px;
+    font-family: var(--font-mono);
+    border-bottom: 1px solid rgba(33,38,45,0.6);
+    color: var(--muted);
+  }
+  .runs-table tr:last-child td { border-bottom: none; }
+  /* LIVE LOG */
+  .log-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    height: 360px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .log-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+  }
+  .log-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .log-dot.active { background: var(--green); box-shadow: 0 0 6px rgba(63,185,80,0.5); animation: pulse 1.2s ease-in-out infinite; }
+  .log-title { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .log-clear { margin-left: auto; font-size: 11px; color: var(--dim); cursor: pointer; }
+  .log-clear:hover { color: var(--muted); }
+  .log-body {
+    flex: 1;
+    padding: 12px 16px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+  .log-line { padding: 1px 0; }
+  .log-pass { color: var(--green); }
+  .log-fail { color: var(--red); }
+  .log-info { color: var(--cyan); }
+  .log-step { color: var(--text); }
+  /* CHAT */
+  .chat-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 170px);
+  }
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-bottom: 16px;
+  }
+  .chat-msg {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .chat-role {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--dim);
+    min-width: 52px;
+    padding-top: 10px;
+    flex-shrink: 0;
+  }
+  .chat-role.ghost { color: var(--cyan); }
+  .chat-bubble {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--text);
+    white-space: pre-wrap;
+    max-width: 720px;
+  }
+  .chat-bubble.ghost {
+    background: rgba(57,208,216,0.06);
+    border-color: rgba(57,208,216,0.2);
+  }
+  .chat-input-row {
+    display: flex;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .chat-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .chat-input:focus { border-color: rgba(57,208,216,0.5); }
+  .chat-send {
+    padding: 10px 18px;
+    background: rgba(57,208,216,0.1);
+    border: 1px solid rgba(57,208,216,0.3);
+    border-radius: 8px;
+    color: var(--cyan);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .chat-send:hover { background: rgba(57,208,216,0.18); }
+  .chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Scrollbars */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+  /* Empty state */
+  .empty {
+    padding: 40px;
+    text-align: center;
+    color: var(--dim);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">👻</span>
+  <span class="nav-title">Ghost<span>Run</span></span>
+  <span class="nav-badge" id="version-badge">v—</span>
+</nav>
+<div class="tabs">
+  <div class="tab active" data-tab="flows">Flows</div>
+  <div class="tab" data-tab="runs">Run History</div>
+  <div class="tab" data-tab="chat">Chat</div>
+</div>
+<div class="main">
+
+  <!-- FLOWS TAB -->
+  <div id="tab-flows">
+    <div id="stats-row" class="stats-row"></div>
+    <div>
+      <div class="section-header">
+        <span class="section-title">Flows</span>
+        <span style="font-size:12px;color:var(--dim);font-family:var(--font-mono);" id="flow-count"></span>
+      </div>
+      <table class="flow-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Steps</th>
+            <th>Last Run</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="flow-tbody"></tbody>
+      </table>
+    </div>
+    <div>
+      <div class="section-header">
+        <span class="section-title">Live Log</span>
+      </div>
+      <div class="log-container">
+        <div class="log-header">
+          <div class="log-dot" id="log-dot"></div>
+          <span class="log-title" id="log-status">Idle</span>
+          <span class="log-clear" onclick="clearLog()">clear</span>
+        </div>
+        <div class="log-body" id="log-body"><div class="log-line" style="color:var(--dim)">— waiting for a run —</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RUNS TAB -->
+  <div id="tab-runs" class="panel-hidden">
+    <div class="section-header"><span class="section-title">Recent Runs</span></div>
+    <table class="runs-table">
+      <thead>
+        <tr><th>Flow</th><th>Status</th><th>Duration</th><th>Steps</th><th>Date</th></tr>
+      </thead>
+      <tbody id="runs-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- CHAT TAB -->
+  <div id="tab-chat" class="panel-hidden">
+    <div class="chat-container">
+      <div class="chat-messages" id="chat-messages">
+        <div class="chat-msg">
+          <span class="chat-role ghost">Ghost ›</span>
+          <div class="chat-bubble ghost">👋 Hi! I'm your GhostRun assistant. Ask me about your flows, run history, or say "run &lt;flow name&gt;" to execute a flow.</div>
+        </div>
+      </div>
+      <div class="chat-input-row">
+        <input class="chat-input" id="chat-input" placeholder="Ask anything about your flows..." />
+        <button class="chat-send" id="chat-send" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Tab switching ───────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    const id = t.dataset.tab;
+    ['flows','runs','chat'].forEach(tab => {
+      const el = document.getElementById('tab-' + tab);
+      if (tab === id) el.classList.remove('panel-hidden');
+      else el.classList.add('panel-hidden');
+    });
+    if (id === 'runs') loadRuns();
+  });
+});
+
+// ─── Load flows ──────────────────────────────────────────────────
+async function loadFlows() {
+  const r = await fetch('/api/flows');
+  const data = await r.json();
+  renderStats(data.stats);
+  renderFlows(data.flows);
+  document.getElementById('version-badge').textContent = 'v' + data.version;
+}
+
+function renderStats(stats) {
+  const el = document.getElementById('stats-row');
+  el.innerHTML = \`
+    <div class="stat-card"><div class="stat-label">Total Flows</div><div class="stat-value cyan">\${stats.flows}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Runs</div><div class="stat-value">\${stats.runs}</div></div>
+    <div class="stat-card"><div class="stat-label">Passed</div><div class="stat-value green">\${stats.passed}</div></div>
+    <div class="stat-card"><div class="stat-label">Failed</div><div class="stat-value red">\${stats.failed}</div></div>
+  \`;
+}
+
+function renderFlows(flows) {
+  const tbody = document.getElementById('flow-tbody');
+  document.getElementById('flow-count').textContent = flows.length + ' total';
+  if (!flows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No flows yet. Use <code>ghostrun flow:record</code> to create one.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = flows.map(f => \`
+    <tr>
+      <td><span class="flow-name">\${f.name}</span></td>
+      <td><span class="flow-steps">\${f.steps} steps</span></td>
+      <td><span style="color:var(--dim);font-size:12px">\${f.lastRun ? timeAgo(f.lastRun) : '—'}</span></td>
+      <td id="status-\${f.id}">\${f.lastStatus ? badgeHtml(f.lastStatus) : '<span style="color:var(--dim)">—</span>'}</td>
+      <td>
+        <div class="flow-actions">
+          <button class="btn btn-run" id="run-btn-\${f.id}" onclick="runFlow('\${f.id}','\${f.name}')">▶ Run</button>
+          <button class="btn btn-delete" onclick="deleteFlow('\${f.id}','\${f.name}')">✕</button>
+        </div>
+      </td>
+    </tr>
+  \`).join('');
+}
+
+function badgeHtml(status) {
+  if (status === 'passed') return '<span class="badge badge-pass">✓ passed</span>';
+  if (status === 'failed') return '<span class="badge badge-fail">✗ failed</span>';
+  if (status === 'running') return '<span class="badge badge-running">⟳ running</span>';
+  return \`<span style="color:var(--dim)">\${status}</span>\`;
+}
+
+function timeAgo(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.floor(h/24) + 'd ago';
+}
+
+// ─── Run a flow ──────────────────────────────────────────────────
+let activeRun = null;
+async function runFlow(id, name) {
+  const btn = document.getElementById('run-btn-' + id);
+  const statusEl = document.getElementById('status-' + id);
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.innerHTML = badgeHtml('running');
+  clearLog();
+  appendLog('info', '▶ Starting: ' + name);
+  document.getElementById('log-dot').classList.add('active');
+  document.getElementById('log-status').textContent = 'Running: ' + name;
+
+  const es = new EventSource('/api/run?id=' + id);
+  activeRun = es;
+  es.addEventListener('log', e => {
+    const d = JSON.parse(e.data);
+    appendLog(d.type || 'step', d.message);
+  });
+  es.addEventListener('done', e => {
+    const d = JSON.parse(e.data);
+    appendLog(d.passed ? 'pass' : 'fail',
+      d.passed ? '✓ Flow passed (' + d.duration + 'ms)' : '✗ Flow failed: ' + (d.error || 'unknown'));
+    if (statusEl) statusEl.innerHTML = badgeHtml(d.passed ? 'passed' : 'failed');
+    if (btn) btn.disabled = false;
+    document.getElementById('log-dot').classList.remove('active');
+    document.getElementById('log-status').textContent = d.passed ? '✓ Passed' : '✗ Failed';
+    es.close();
+    activeRun = null;
+    loadFlows();
+  });
+  es.addEventListener('error', () => {
+    appendLog('fail', '✗ Connection lost');
+    if (btn) btn.disabled = false;
+    document.getElementById('log-dot').classList.remove('active');
+    document.getElementById('log-status').textContent = 'Error';
+    es.close();
+    activeRun = null;
+  });
+}
+
+// ─── Delete flow ─────────────────────────────────────────────────
+async function deleteFlow(id, name) {
+  if (!confirm('Delete flow "' + name + '"?')) return;
+  await fetch('/api/flows/' + id, { method: 'DELETE' });
+  loadFlows();
+}
+
+// ─── Load runs ───────────────────────────────────────────────────
+async function loadRuns() {
+  const r = await fetch('/api/runs');
+  const runs = await r.json();
+  const tbody = document.getElementById('runs-tbody');
+  if (!runs.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No runs yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = runs.map(r => \`
+    <tr>
+      <td>\${r.flowName || r.flowId}</td>
+      <td>\${badgeHtml(r.status)}</td>
+      <td>\${r.duration ? r.duration + 'ms' : '—'}</td>
+      <td>\${r.stepsTotal || '—'}</td>
+      <td>\${r.createdAt ? timeAgo(r.createdAt) : '—'}</td>
+    </tr>
+  \`).join('');
+}
+
+// ─── Log helpers ─────────────────────────────────────────────────
+function appendLog(type, msg) {
+  const body = document.getElementById('log-body');
+  const line = document.createElement('div');
+  line.className = 'log-line' + (type === 'pass' ? ' log-pass' : type === 'fail' ? ' log-fail' : type === 'info' ? ' log-info' : ' log-step');
+  line.textContent = msg;
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+}
+function clearLog() {
+  document.getElementById('log-body').innerHTML = '';
+  document.getElementById('log-dot').classList.remove('active');
+  document.getElementById('log-status').textContent = 'Idle';
+}
+
+// ─── Chat ────────────────────────────────────────────────────────
+document.getElementById('chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('chat-send');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  sendBtn.disabled = true;
+
+  addChatMsg('you', text);
+  const ghostEl = addChatMsg('ghost', '…');
+
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await r.json();
+    ghostEl.textContent = data.reply || '(no response)';
+    if (data.runResult) {
+      const line = document.createElement('div');
+      line.style.cssText = 'margin-top:8px;font-size:11px;font-family:var(--font-mono);color:' + (data.runResult.passed ? 'var(--green)' : 'var(--red)');
+      line.textContent = data.runResult.passed ? '✓ Flow passed (' + data.runResult.duration + 'ms)' : '✗ Flow failed';
+      ghostEl.appendChild(line);
+    }
+  } catch (err) {
+    ghostEl.textContent = 'Error: ' + err.message;
+  }
+  sendBtn.disabled = false;
+}
+
+function addChatMsg(role, text) {
+  const messages = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg';
+  div.innerHTML = '<span class="chat-role ' + (role === 'ghost' ? 'ghost' : '') + '">' + (role === 'ghost' ? 'Ghost ›' : 'You   ›') + '</span>' +
+    '<div class="chat-bubble ' + (role === 'ghost' ? 'ghost' : '') + '"></div>';
+  const bubble = div.querySelector('.chat-bubble');
+  bubble.textContent = text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+  return bubble;
+}
+
+// ─── Init ────────────────────────────────────────────────────────
+loadFlows();
+setInterval(loadFlows, 10000); // refresh every 10s
+</script>
+</body>
+</html>`;
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url!, `http://localhost:${port}`);
+    const path = url.pathname;
+
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // ── GET /  ─ dashboard HTML
+    if (req.method === 'GET' && path === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(DASHBOARD_HTML);
+      return;
+    }
+
+    // ── GET /api/flows
+    if (req.method === 'GET' && path === '/api/flows') {
+      const flows = db.listFlows();
+      const runs = db.listRuns(undefined, 500);
+      const lastRunMap: Record<string, any> = {};
+      for (const r of runs) {
+        if (!lastRunMap[r.flowId]) lastRunMap[r.flowId] = r;
+      }
+      const flowData = flows.map(f => {
+        const lastRun = lastRunMap[f.id];
+        const steps = (() => {
+          try { return (JSON.parse(f.nodes || '[]') as any[]).length; } catch { return 0; }
+        })();
+        return {
+          id: f.id,
+          name: f.name,
+          steps,
+          lastRun: lastRun?.createdAt,
+          lastStatus: lastRun?.status,
+        };
+      });
+      const passed = runs.filter(r => r.status === 'passed').length;
+      const failed = runs.filter(r => r.status === 'failed').length;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        flows: flowData,
+        stats: { flows: flows.length, runs: runs.length, passed, failed },
+        version: '1.0.0',
+      }));
+      return;
+    }
+
+    // ── DELETE /api/flows/:id
+    if (req.method === 'DELETE' && path.startsWith('/api/flows/')) {
+      const id = path.replace('/api/flows/', '');
+      try { db.deleteFlow(id); res.writeHead(200); res.end('{"ok":true}'); }
+      catch { res.writeHead(404); res.end('{"error":"not found"}'); }
+      return;
+    }
+
+    // ── GET /api/runs
+    if (req.method === 'GET' && path === '/api/runs') {
+      const flows = db.listFlows();
+      const flowMap: Record<string, string> = {};
+      flows.forEach(f => { flowMap[f.id] = f.name; });
+      const runs = db.listRuns(undefined, 100);
+      const runsWithName = runs.map(r => ({ ...r, flowName: flowMap[r.flowId] || r.flowId }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(runsWithName));
+      return;
+    }
+
+    // ── GET /api/run?id=<flowId> — SSE streaming run
+    if (req.method === 'GET' && path === '/api/run') {
+      const flowId = url.searchParams.get('id');
+      if (!flowId) { res.writeHead(400); res.end('Missing id'); return; }
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+
+      function sendEvent(event: string, data: unknown) {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+
+      const flow = db.getFlow(flowId);
+      if (!flow) {
+        sendEvent('done', { passed: false, error: 'Flow not found', duration: 0 });
+        res.end();
+        return;
+      }
+
+      const startTime = Date.now();
+      try {
+        const nodes: any[] = JSON.parse(flow.nodes || '[]');
+        sendEvent('log', { type: 'info', message: `Flow: ${flow.name} (${nodes.length} steps)` });
+
+        const result = await executeFlow(flowId, {
+          onStep: (stepIdx: number, action: string, selector?: string) => {
+            sendEvent('log', { type: 'step', message: `  [${stepIdx + 1}] ${action}${selector ? ' → ' + selector : ''}` });
+          },
+          onError: (msg: string) => {
+            sendEvent('log', { type: 'fail', message: '  ✗ ' + msg });
+          },
+        });
+        sendEvent('done', { passed: result.passed, duration: result.duration, error: result.error });
+      } catch (err: any) {
+        sendEvent('done', { passed: false, error: err.message, duration: Date.now() - startTime });
+      }
+      res.end();
+      return;
+    }
+
+    // ── POST /api/chat
+    if (req.method === 'POST' && path === '/api/chat') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const { message } = JSON.parse(body);
+          const flows = db.listFlows();
+          const runs = db.listRuns(undefined, 20);
+
+          // Check if user wants to run a flow
+          const runMatch = message.toLowerCase().match(/^run\s+(.+)$/);
+          if (runMatch) {
+            const query = runMatch[1].trim().toLowerCase();
+            const found = flows.find(f => f.name.toLowerCase().includes(query) || f.id === query);
+            if (found) {
+              try {
+                const result = await executeFlow(found.id);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                  reply: `Running "${found.name}"...`,
+                  runResult: { passed: result.passed, duration: result.duration, error: result.error },
+                }));
+              } catch (err: any) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ reply: `Error running flow: ${err.message}`, runResult: { passed: false } }));
+              }
+              return;
+            }
+          }
+
+          // Build context and query Ollama
+          const flowList = flows.map(f => `- ${f.name} (id: ${f.id})`).join('\n');
+          const recentRuns = runs.slice(0, 10).map(r => {
+            const f = flows.find(fl => fl.id === r.flowId);
+            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.createdAt}`;
+          }).join('\n');
+
+          const systemPrompt = `You are GhostRun's assistant. GhostRun is a browser automation CLI tool.
+Current flows:\n${flowList || '(none)'}
+Recent runs:\n${recentRuns || '(none)'}
+Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>".`;
+
+          let reply = '';
+          try {
+            const ollamaRes = await fetch('http://localhost:11434/api/chat', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                model: 'gemma3:4b',
+                stream: false,
+                messages: [
+                  { role: 'system', content: systemPrompt },
+                  { role: 'user', content: message },
+                ],
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
+            const d = await ollamaRes.json() as any;
+            reply = d.message?.content || '(no response)';
+          } catch {
+            // Fallback to Anthropic if available
+            const apiKey = process.env.ANTHROPIC_API_KEY;
+            if (apiKey) {
+              try {
+                const Anthropic = (await import('@anthropic-ai/sdk')).default;
+                const client = new Anthropic({ apiKey });
+                const msg = await client.messages.create({
+                  model: 'claude-haiku-4-5-20251001',
+                  max_tokens: 512,
+                  system: systemPrompt,
+                  messages: [{ role: 'user', content: message }],
+                });
+                reply = (msg.content[0] as any).text || '(no response)';
+              } catch { reply = 'AI is not available. Install Ollama: https://ollama.ai'; }
+            } else {
+              reply = 'AI is not available. Install Ollama (https://ollama.ai) or set ANTHROPIC_API_KEY.';
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ reply }));
+        } catch (err: any) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  server.listen(port, () => {
+    printLogo(); divider();
+    console.log(chalk.bold(`\n  Dashboard running at: `) + chalk.cyan(`http://localhost:${port}`));
+    console.log(chalk.gray('  Press Ctrl+C to stop.\n'));
+  });
+
+  process.on('SIGINT', () => { console.log('\n  Stopping...'); server.close(); db.close(); process.exit(0); });
   await new Promise(() => {}); // run forever
 }
 
@@ -1809,18 +2874,52 @@ async function runDesktopApp() {
 // EXPLORE
 // ============================================
 
+interface PageField {
+  type: string;          // "text" | "email" | "password" | "search" | "textarea" | "select" | "checkbox" | etc.
+  name: string;
+  placeholder: string;
+  label: string;         // associated <label> text if found
+  selector: string;      // best CSS selector to use in a flow
+  required: boolean;
+}
+
+interface PageForm {
+  selector: string;
+  method: string;
+  fields: PageField[];
+  submitSelector: string | null;
+  submitText: string;
+}
+
+interface PageInteractives {
+  forms: PageForm[];
+  searchInputs: PageField[];    // inputs that look like search
+  standaloneInputs: PageField[]; // inputs not inside a form
+  ctaButtons: { text: string; selector: string }[]; // prominent action buttons
+}
+
 interface PageData {
   url: string;
   title: string;
   headings: string[];
   links: string[];
   screenshotPath: string | null;
+  interactives: PageInteractives;
 }
 
 interface FlowCandidate {
   name: string;
   description: string;
   route: string;
+  steps?: FlowStep[];   // actual automation steps, not just a navigate stub
+}
+
+interface FlowStep {
+  action: string;
+  selector?: string;
+  value?: string;
+  url?: string;
+  label?: string;
 }
 
 async function bfsCrawl(
@@ -1829,14 +2928,32 @@ async function bfsCrawl(
   maxPages: number,
   onProgress: (visited: number, current: string) => void
 ): Promise<PageData[]> {
-  const origin = new URL(startUrl).origin;
-  const normalize = (u: string) => u.replace(/#.*$/, '').replace(/\/$/, '') || '/';
+  const normalize = (u: string) => {
+    try {
+      const parsed = new URL(u);
+      // strip hash, trailing slash, and query params that are just tracking noise
+      return parsed.origin + parsed.pathname.replace(/\/$/, '');
+    } catch { return u; }
+  };
+
   const visited = new Set<string>();
-  const queue = [normalize(startUrl)];
+  const queued = new Set<string>();
+  const queue: string[] = [normalize(startUrl)];
+  queued.add(normalize(startUrl));
   const pages: PageData[] = [];
 
+  // Allowed hosts — populated after first navigation (handles www redirects)
+  const allowedHosts = new Set<string>();
+  const inputHost = new URL(startUrl).hostname;
+  // Accept both www and non-www variants of the input host
+  allowedHosts.add(inputHost);
+  allowedHosts.add(inputHost.startsWith('www.') ? inputHost.slice(4) : 'www.' + inputHost);
+
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  });
+  const page = await context.newPage();
 
   while (queue.length > 0 && pages.length < maxPages) {
     const url = queue.shift()!;
@@ -1845,26 +2962,174 @@ async function bfsCrawl(
     visited.add(key);
 
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      onProgress(pages.length + 1, url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+      // After first navigation: capture actual host (handles redirects like builtbysharan.com → www.builtbysharan.com)
+      const actualHost = new URL(page.url()).hostname;
+      allowedHosts.add(actualHost);
+      allowedHosts.add(actualHost.startsWith('www.') ? actualHost.slice(4) : 'www.' + actualHost);
+
+      // Wait for JS-rendered content: try networkidle first (good for SPAs), fall back to timeout
+      await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(500).catch(() => {});
+
+      onProgress(pages.length + 1, page.url());
 
       const title = await page.title().catch(() => '');
-      const headings = await page.$$eval('h1,h2,h3', els => els.slice(0, 8).map(e => (e as HTMLElement).innerText.trim()).filter(Boolean)).catch(() => [] as string[]);
-      const links = await page.$$eval('a[href]', (els, orig) =>
-        els.map(e => (e as HTMLAnchorElement).href)
-           .filter(h => h && h.startsWith(orig) && !h.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2|ttf)(\?|$)/i)),
-        origin
+      const headings = await page.$$eval('h1,h2,h3', els =>
+        els.slice(0, 8).map(e => (e as HTMLElement).innerText.trim()).filter(Boolean)
       ).catch(() => [] as string[]);
+
+      // Collect all <a href> links — filter to same-site, skip assets
+      const links = await page.$$eval('a[href]', (els) =>
+        els.map(e => (e as HTMLAnchorElement).href).filter(Boolean)
+      ).catch(() => [] as string[]);
+
+      const sameHostLinks = links.filter(h => {
+        try {
+          const u = new URL(h);
+          const host = u.hostname;
+          const noAsset = !h.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2|ttf|mp4|webp)(\?|$)/i);
+          const isSameSite = [...allowedHosts].some(ah => host === ah);
+          return isSameSite && noAsset;
+        } catch { return false; }
+      });
+
+      // ── Extract interactive elements ─────────────────────────────
+      const interactives = await page.evaluate(() => {
+        function isDynamicId(id: string): boolean {
+          // UUID pattern or long hex strings — unstable, regenerated each load
+          return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+            || /^[0-9a-f]{16,}$/i.test(id)
+            || /^[a-z]+-[0-9a-f]{6,}$/i.test(id)  // react-id-abc123 style
+            || /^\d+$/.test(id);                    // purely numeric ids
+        }
+
+        function bestSelector(el: Element): string {
+          if (el.id && !isDynamicId(el.id)) return `#${el.id}`;
+          const name = (el as HTMLInputElement).name;
+          if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+          const placeholder = (el as HTMLInputElement).placeholder;
+          if (placeholder) return `${el.tagName.toLowerCase()}[placeholder="${placeholder}"]`;
+          const type = (el as HTMLInputElement).type;
+          if (type && type !== 'text') return `${el.tagName.toLowerCase()}[type="${type}"]`;
+          // fallback: nth-of-type
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            const idx = siblings.indexOf(el);
+            if (idx >= 0) return `${el.tagName.toLowerCase()}:nth-of-type(${idx + 1})`;
+          }
+          return el.tagName.toLowerCase();
+        }
+
+        function labelFor(input: Element): string {
+          const id = (input as HTMLElement).id;
+          if (id) {
+            const lbl = document.querySelector(`label[for="${id}"]`);
+            if (lbl) return (lbl as HTMLElement).innerText.trim();
+          }
+          const parent = input.closest('label');
+          if (parent) {
+            const clone = parent.cloneNode(true) as HTMLElement;
+            clone.querySelectorAll('input,textarea,select').forEach(e => e.remove());
+            return clone.innerText.trim();
+          }
+          // look for adjacent label
+          const prev = input.previousElementSibling;
+          if (prev && prev.tagName === 'LABEL') return (prev as HTMLElement).innerText.trim();
+          return '';
+        }
+
+        function toField(inp: Element): any {
+          const type = (inp as HTMLInputElement).type || inp.tagName.toLowerCase();
+          return {
+            type,
+            id: (inp as HTMLInputElement).id || '',
+            name: (inp as HTMLInputElement).name || '',
+            placeholder: (inp as HTMLInputElement).placeholder || '',
+            label: labelFor(inp),
+            selector: bestSelector(inp),
+            required: (inp as HTMLInputElement).required || false,
+          };
+        }
+
+        // Forms
+        const forms: any[] = [];
+        document.querySelectorAll('form').forEach((form, fi) => {
+          const fields: any[] = [];
+          form.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]), textarea, select').forEach(inp => {
+            fields.push(toField(inp));
+          });
+          if (fields.length === 0) return; // skip empty/hidden forms
+
+          // Skip newsletter/subscribe/search footer widgets — low-value noise
+          const formText = (form.textContent || '').toLowerCase();
+          const formAction = (form.action || '').toLowerCase();
+          const firstField = fields[0];
+          const isSubscribeWidget = fields.length === 1
+            && firstField.type === 'email'
+            && (
+              /subscribe|newsletter|notify/i.test(formText)
+              || /subscribe|newsletter/i.test(formAction)
+              || /subscribe|newsletter/i.test(form.id || '')
+              || /subscribe|newsletter/i.test(firstField.id || '')
+              || /subscribe|newsletter/i.test(firstField.name || '')
+              || /subscribe|newsletter/i.test(firstField.placeholder || '')
+              || /subscribe|newsletter/i.test((form.parentElement?.textContent || '').slice(0, 200).toLowerCase())
+            );
+          if (isSubscribeWidget) return;
+
+          const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+          const rawId = form.id && !isDynamicId(form.id) ? form.id : null;
+          const formSel = rawId ? `#${rawId}` : (form.className ? `form.${form.className.split(' ')[0]}` : `form:nth-of-type(${fi + 1})`);
+          forms.push({
+            selector: formSel,
+            method: form.method || 'get',
+            fields,
+            submitSelector: submitBtn ? bestSelector(submitBtn) : null,
+            submitText: submitBtn ? (submitBtn as HTMLElement).innerText.trim() : 'Submit',
+          });
+        });
+
+        // Search inputs (not inside forms, or inside forms with search intent)
+        const searchInputs: any[] = [];
+        document.querySelectorAll('input[type="search"], input[placeholder*="search" i], input[placeholder*="find" i], input[name*="search" i], input[name*="query" i], input[aria-label*="search" i]').forEach(inp => {
+          searchInputs.push(toField(inp));
+        });
+
+        // Standalone inputs (not in a form, not already captured as search)
+        const standaloneInputs: any[] = [];
+        document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="search"])').forEach(inp => {
+          if (!inp.closest('form')) standaloneInputs.push(toField(inp));
+        });
+
+        // CTA buttons (visible buttons not inside forms, or prominent submit buttons)
+        const ctaButtons: any[] = [];
+        document.querySelectorAll('button, a.btn, a[class*="button"], a[class*="cta"]').forEach(btn => {
+          const text = (btn as HTMLElement).innerText.trim();
+          if (!text || text.length > 60) return;
+          // skip nav/util buttons
+          if (/menu|close|open|toggle|collapse|expand/i.test(text)) return;
+          ctaButtons.push({ text, selector: bestSelector(btn) });
+        });
+
+        return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8) };
+      }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [] }));
+      // ── End interactive extraction ────────────────────────────────
 
       const ssPath = path.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
       await page.screenshot({ path: ssPath, type: 'jpeg', quality: 60 }).catch(() => {});
       const ssExists = fs.existsSync(ssPath);
 
-      pages.push({ url, title, headings, links, screenshotPath: ssExists ? ssPath : null });
+      pages.push({ url: page.url(), title, headings, links: sameHostLinks, screenshotPath: ssExists ? ssPath : null, interactives });
 
-      for (const link of links) {
+      for (const link of sameHostLinks) {
         const norm = normalize(link);
-        if (!visited.has(norm) && !queue.includes(norm)) queue.push(norm);
+        if (!visited.has(norm) && !queued.has(norm)) {
+          queue.push(norm);
+          queued.add(norm);
+        }
       }
     } catch {
       // skip unreachable pages silently
@@ -1875,39 +3140,186 @@ async function bfsCrawl(
   return pages;
 }
 
+function deduplicatePages(pages: PageData[]): PageData[] {
+  function urlPattern(url: string): string {
+    try {
+      const u = new URL(url);
+      const pattern = u.pathname
+        .replace(/\/[a-z0-9_-]+[_-]\d+\/?/g, '/*-N/') // slug_N or slug-N → *-N (fixes underscore slugs)
+        .replace(/\/\d+\/?/g, '/N/')                    // pure numeric segments
+        .replace(/\/page-\d+\/?/g, '/page-N/')          // pagination
+        .replace(/\/[0-9a-f]{8,}\/?/g, '/HASH/');       // hash-like IDs
+      return u.hostname + pattern;
+    } catch { return url; }
+  }
+
+  const seenPatterns = new Map<string, PageData>();
+  for (const p of pages) {
+    const pat = urlPattern(p.url);
+    const existing = seenPatterns.get(pat);
+    if (!existing) {
+      seenPatterns.set(pat, p);
+    } else {
+      // Keep the page with the richest interactives
+      const score = (d: PageData) =>
+        d.interactives.forms.length * 4 +
+        d.interactives.searchInputs.length * 3 +
+        d.interactives.standaloneInputs.length * 2 +
+        d.interactives.ctaButtons.length;
+      if (score(p) > score(existing)) seenPatterns.set(pat, p);
+    }
+  }
+  return Array.from(seenPatterns.values());
+}
+
+// Build flow steps deterministically from scraped interactives.
+// Selectors come from the browser — no AI needed, no hallucination possible.
+function buildStepsFromInteractives(p: PageData): FlowStep[][] {
+  const flows: FlowStep[][] = [];
+  const nav: FlowStep = { action: 'navigate', url: p.url, label: `Open ${p.title || new URL(p.url).pathname}` };
+
+  // ── Search flows ──────────────────────────────────────────────
+  if (p.interactives.searchInputs.length > 0) {
+    const inp = p.interactives.searchInputs[0];
+    flows.push([
+      nav,
+      { action: 'fill', selector: inp.selector, value: '{{searchQuery}}', label: 'Enter search query' },
+      { action: 'keyboard', selector: inp.selector, value: 'Enter', label: 'Submit search' },
+      { action: 'assert:visible', selector: 'body', label: 'Verify results loaded' },
+    ]);
+  }
+
+  // ── Form flows ────────────────────────────────────────────────
+  for (const form of p.interactives.forms.slice(0, 2)) {
+    if (form.fields.length === 0) continue;
+    const steps: FlowStep[] = [nav];
+    for (const f of form.fields) {
+      // Skip file inputs — they need `upload:` action and a real file path, not a text value
+      if (f.type === 'file') continue;
+      // Infer a clean semantic variable name from type hints first, then field metadata
+      const inferredVarName = (() => {
+        const t = f.type.toLowerCase();
+        const combined = `${f.name} ${f.placeholder} ${f.label}`.toLowerCase();
+        if (t === 'email' || /email|e-mail/.test(combined)) return 'email';
+        if (t === 'password' || /password|passwd/.test(combined)) return 'password';
+        if (t === 'tel' || /phone|mobile|tel/.test(combined)) return 'phone';
+        if (/search|query|keyword/.test(combined)) return 'searchQuery';
+        if (/subject|topic/.test(combined)) return 'subject';
+        if (/message|comment|feedback|body/.test(combined)) return 'message';
+        if (/first.?name/.test(combined)) return 'firstName';
+        if (/last.?name/.test(combined)) return 'lastName';
+        if (/^name|full.?name|your name/.test(combined)) return 'name';
+        if (/username|user_name/.test(combined)) return 'username';
+        if (/address/.test(combined)) return 'address';
+        if (/city/.test(combined)) return 'city';
+        if (/zip|postal/.test(combined)) return 'zipCode';
+        if (/country/.test(combined)) return 'country';
+        if (/title/.test(combined)) return 'title';
+        // Fall back to field name/label, cleaned up — strip @domain first, then non-alphanumeric
+        const raw = (f.name || f.label || f.placeholder || f.type).replace(/@.*$/, '');
+        return raw.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'value';
+      })();
+      const varName = inferredVarName;
+      const action = f.type === 'select' ? 'select' : (f.type === 'checkbox' || f.type === 'radio') ? 'check' : 'fill';
+      // Scope selector to the form to avoid cross-form collisions
+      const scopedSelector = form.selector && !form.selector.startsWith('form:nth')
+        ? f.selector  // form has a stable id/class — selector is specific enough
+        : `${form.selector} ${f.selector}`;
+      // Disambiguate duplicate selectors within the same form (e.g. two checkboxes with no id/name)
+      const usedSelectors = steps.map(s => s.selector);
+      const baseSelector = scopedSelector.trim();
+      const dupCount = usedSelectors.filter(s => s === baseSelector).length;
+      const finalSelector = dupCount > 0 ? `${baseSelector}:nth-of-type(${dupCount + 1})` : baseSelector;
+      steps.push({
+        action,
+        selector: finalSelector,
+        value: (action === 'check' || f.type === 'radio') ? 'true' : `{{${varName}}}`,
+        label: f.label || f.name || f.placeholder || f.type,
+      });
+    }
+    if (form.submitSelector) {
+      // Scope submit button to this form to avoid ambiguity (e.g. login vs signup on same page)
+      const scopedSubmit = form.selector && form.submitSelector
+        ? `${form.selector} ${form.submitSelector}`
+        : form.submitSelector || 'button[type="submit"]';
+      steps.push({ action: 'click', selector: scopedSubmit.trim(), label: form.submitText || 'Submit' });
+    }
+    steps.push({ action: 'assert:visible', selector: 'body', label: 'Verify submission' });
+    // Only keep the flow if at least one input field was actually filled/checked (skip file-only forms)
+    const hasInputStep = steps.some(s => ['fill', 'select', 'check'].includes(s.action));
+    if (hasInputStep) flows.push(steps);
+  }
+
+  // ── CTA flow — only if nothing else was found ─────────────────
+  if (flows.length === 0 && p.interactives.ctaButtons.length > 0) {
+    const cta = p.interactives.ctaButtons[0];
+    flows.push([
+      nav,
+      { action: 'click', selector: cta.selector, label: `Click "${cta.text}"` },
+      { action: 'assert:visible', selector: 'body', label: 'Verify action completed' },
+    ]);
+  }
+
+  return flows;
+}
+
 async function analyzePages(pages: PageData[]): Promise<FlowCandidate[]> {
   const candidates: FlowCandidate[] = [];
+  const deduplicated = deduplicatePages(pages);
   const BATCH = 5;
 
-  for (let i = 0; i < pages.length; i += BATCH) {
-    const batch = pages.slice(i, i + BATCH);
-    const batchResults = await Promise.all(batch.map(async page => {
-      const prompt = `You are analyzing a web page to suggest automation test flows.
+  for (let i = 0; i < deduplicated.length; i += BATCH) {
+    const batch = deduplicated.slice(i, i + BATCH);
 
-Page URL: ${page.url}
-Page title: ${page.title}
-Headings: ${page.headings.join(' | ') || 'none'}
-Links found: ${page.links.slice(0, 10).join(', ') || 'none'}
+    const batchResults = await Promise.all(batch.map(async p => {
+      const stepGroups = buildStepsFromInteractives(p);
 
-Suggest 1-3 automation flows a developer would want to test on this page.
-Respond ONLY with valid JSON array, no other text:
-[{"name":"Flow Name","description":"One sentence description of what to test","route":"${page.url}"}]`;
+      // No interactives → skip pure listing/nav pages (they just add noise)
+      if (stepGroups.length === 0) return [] as FlowCandidate[];
 
-      const result = await callAI(prompt);
-      if (!result) return [];
-      try {
-        const parsed = JSON.parse(result.text.replace(/```json\n?|\n?```/g, '').trim());
-        return Array.isArray(parsed) ? parsed as FlowCandidate[] : [];
-      } catch {
-        // Fallback: treat as single candidate
-        return [{ name: page.title || 'Page Check', description: 'Verify page loads correctly', route: page.url }];
+      // Ask AI only for name + description — a simple task even small models handle well
+      const results: FlowCandidate[] = [];
+      for (const steps of stepGroups) {
+        const stepSummary = steps
+          .map(s => `${s.action}${s.value ? '(' + s.value + ')' : s.selector ? '(' + s.selector + ')' : ''}`)
+          .join(' → ');
+
+        const interactiveHint = [
+          p.interactives.searchInputs.length > 0 ? 'has search bar' : '',
+          p.interactives.forms.length > 0 ? `has ${p.interactives.forms.length} form(s) with fields: ${p.interactives.forms[0].fields.map(f => f.label || f.name || f.type).join(', ')}` : '',
+          p.interactives.ctaButtons.length > 0 ? `CTAs: ${p.interactives.ctaButtons.slice(0, 3).map(b => b.text).join(', ')}` : '',
+        ].filter(Boolean).join('; ');
+
+        const prompt = `Page: ${p.url}
+Title: "${p.title}"
+Interactive elements: ${interactiveHint || 'none'}
+Automation steps: ${stepSummary}
+
+Give this automation flow a short name (3-6 words) and one sentence description.
+Reply with ONLY this JSON, nothing else: {"name": "...", "description": "..."}`;
+
+        let name = p.title || new URL(p.url).pathname;
+        let description = `Automated interaction on ${p.title || p.url}`;
+
+        const result = await callAI(prompt);
+        if (result) {
+          try {
+            const match = result.text.replace(/```json\n?|\n?```/g, '').match(/\{[^{}]+\}/);
+            if (match) {
+              const parsed = JSON.parse(match[0]);
+              if (typeof parsed.name === 'string' && parsed.name.length > 0) name = parsed.name;
+              if (typeof parsed.description === 'string' && parsed.description.length > 0) description = parsed.description;
+            }
+          } catch { /* keep defaults */ }
+        }
+
+        results.push({ name, description, route: p.url, steps });
       }
+      return results;
     }));
 
-    for (const results of batchResults) candidates.push(...results);
-
-    // Small delay between batches to avoid overwhelming Ollama
-    if (i + BATCH < pages.length) await new Promise(r => setTimeout(r, 300));
+    for (const r of batchResults) candidates.push(...r);
+    if (i + BATCH < deduplicated.length) await new Promise(r => setTimeout(r, 300));
   }
 
   return candidates;
@@ -1932,15 +3344,33 @@ function generateExploreHtml(report: { id: string; url: string; environment: str
     </div>`;
   }).join('');
 
-  const candidateCards = candidates.map((c, i) => `
+  const candidateCards = candidates.map((c, i) => {
+    const stepsHtml = c.steps && c.steps.length > 0
+      ? `<div class="flow-steps">
+          ${c.steps.map((s, si) => {
+            const hasVar = s.value && s.value.includes('{{');
+            return `<div class="flow-step">
+              <span class="step-num">${si + 1}</span>
+              <span class="step-action">${escapeHtml(s.action)}</span>
+              ${s.url ? `<span class="step-selector">${escapeHtml(s.url)}</span>` : ''}
+              ${s.selector ? `<span class="step-selector">${escapeHtml(s.selector)}</span>` : ''}
+              ${s.value ? `<span class="step-value ${hasVar ? 'is-var' : ''}">${escapeHtml(s.value)}</span>` : ''}
+            </div>`;
+          }).join('')}
+        </div>`
+      : '';
+
+    return `
     <div class="candidate-card" data-id="${i}">
       <label class="candidate-check">
         <input type="checkbox" class="confirm-cb" data-route="${escapeHtml(c.route)}" data-name="${escapeHtml(c.name)}" checked>
         <span class="candidate-name">${escapeHtml(c.name)}</span>
       </label>
-      <div class="candidate-desc">${escapeHtml(c.description)}</div>
+      <div class="candidate-desc">${escapeHtml(c.description || '')}</div>
       <div class="candidate-route">${escapeHtml(c.route)}</div>
-    </div>`).join('');
+      ${stepsHtml}
+    </div>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1986,7 +3416,14 @@ function generateExploreHtml(report: { id: string; url: string; environment: str
   .confirm-cb { width: 16px; height: 16px; margin-top: 2px; accent-color: #238636; flex-shrink: 0; cursor: pointer; }
   .candidate-name { font-size: 15px; font-weight: 600; color: #f0f6fc; }
   .candidate-desc { font-size: 13px; color: #8b949e; margin: 8px 0 8px 26px; }
-  .candidate-route { font-size: 12px; color: #58a6ff; margin-left: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .candidate-route { font-size: 12px; color: #58a6ff; margin-left: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 10px; }
+  .flow-steps { margin: 10px 0 0 0; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  .flow-step { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-family: monospace; flex-wrap: wrap; }
+  .step-num { color: #484f58; min-width: 16px; }
+  .step-action { color: #79c0ff; font-weight: 600; }
+  .step-selector { color: #8b949e; overflow: hidden; text-overflow: ellipsis; max-width: 200px; white-space: nowrap; }
+  .step-value { color: #7ee787; }
+  .step-value.is-var { color: #e3b341; font-style: italic; }
   .confirm-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #161b22; border-top: 1px solid #30363d; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; z-index: 100; }
   .confirm-bar-left { font-size: 14px; color: #8b949e; }
   .confirm-bar-left strong { color: #f0f6fc; }
@@ -2150,40 +3587,73 @@ async function runExplore(url: string) {
 
   if (hasAI) {
     const s2 = spinner();
-    s2.start('Analyzing pages with AI...');
+    const uniquePageCount = deduplicatePages(pages).length;
+    s2.start(`Analyzing ${uniquePageCount} unique page templates (deduped from ${pages.length})...`);
     candidates = await analyzePages(pages);
-    s2.stop(`${candidates.length} flow candidates identified`);
+    s2.stop(`${candidates.length} flow candidates identified from ${uniquePageCount} unique page templates`);
   } else {
-    // Fallback: one candidate per page
-    candidates = pages.map(p => ({
-      name: p.title || `Check ${new URL(p.url).pathname}`,
-      description: `Verify ${p.url} loads correctly`,
-      route: p.url,
-    }));
-    note('No AI available — generated basic candidates. Set up Ollama or ANTHROPIC_API_KEY for smarter suggestions.', 'Note');
+    // No AI — build flows deterministically from scraped interactives
+    for (const p of deduplicatePages(pages)) {
+      for (const steps of buildStepsFromInteractives(p)) {
+        const firstInteractive = steps.find(s => s.action !== 'navigate' && s.action !== 'assert:visible');
+        const name = p.title
+          ? `${p.title} — ${firstInteractive?.action || 'check'}`
+          : `Check ${new URL(p.url).pathname}`;
+        candidates.push({ name, description: `Automated flow on ${p.title || p.url}`, route: p.url, steps });
+      }
+    }
+    note('No AI available — generated flows from detected page elements. Set up Ollama or ANTHROPIC_API_KEY for better names.', 'Note');
   }
 
-  // Deduplicate by route
-  const seen = new Set<string>();
+  // Deduplicate by route (same URL = same candidate)
+  const seenRoutes = new Set<string>();
   candidates = candidates.filter(c => {
-    if (seen.has(c.route)) return false;
-    seen.add(c.route);
+    if (seenRoutes.has(c.route)) return false;
+    seenRoutes.add(c.route);
     return true;
   });
 
-  // Save candidates to DB
+  // Deduplicate by action fingerprint — catches same widget (e.g. subscribe footer) on multiple pages
+  const seenFingerprints = new Set<string>();
+  candidates = candidates.filter(c => {
+    const fingerprint = (c.steps || [])
+      .filter(s => s.action !== 'navigate' && s.action !== 'assert:visible')
+      .map(s => `${s.action}:${s.selector || ''}:${s.value || ''}`)
+      .sort()
+      .join('|');
+    if (!fingerprint) return true; // keep nav-only stubs
+    if (seenFingerprints.has(fingerprint)) return false;
+    seenFingerprints.add(fingerprint);
+    return true;
+  });
+
+  // Save candidates to DB — build real flow graphs from steps
   for (const c of candidates) {
     const pageForRoute = pages.find(p => p.url === c.route);
+
+    // Build graph nodes from steps (AI-generated) or a navigate stub
+    const steps = c.steps && c.steps.length > 0 ? c.steps : [
+      { action: 'navigate', url: c.route, label: `Open ${c.name}` },
+      { action: 'assert:visible', selector: 'body', label: 'Verify page loaded' },
+    ];
+
+    const nodes = steps.map((step, idx) => ({
+      id: `n${idx + 1}`,
+      type: 'action',
+      action: step.action,
+      ...(step.url ? { url: step.url } : {}),
+      ...(step.selector ? { selector: step.selector } : {}),
+      ...(step.value ? { value: step.value } : {}),
+      name: step.label || `${step.action}${step.selector ? ' ' + step.selector : ''}`,
+    }));
+
     db.createExploreCandidate({
       reportId: report.id,
       name: c.name,
       description: c.description,
       route: c.route,
       screenshotPath: pageForRoute?.screenshotPath || undefined,
-      graph: {
-        nodes: [{ id: 'n1', type: 'action', action: 'navigate', url: c.route, name: `Navigate to ${c.name}` }],
-        edges: [],
-      },
+      graph: { nodes, edges: [] },
     });
   }
 
@@ -2267,6 +3737,28 @@ async function runExploreConfirm(reportId: string) {
     'Next Step'
   );
   outro('');
+}
+
+async function runExploreList() {
+  const reports = db.listExploreReports();
+  if (reports.length === 0) {
+    info('No explore sessions found. Run: ghostrun explore <url>');
+    return;
+  }
+  console.log(chalk.bold('\n  Explore Sessions\n'));
+  const header = `  ${'ID'.padEnd(10)}${'URL'.padEnd(45)}${'Status'.padEnd(12)}${'Report'}`;
+  console.log(chalk.gray(header));
+  console.log(chalk.gray('  ' + '─'.repeat(90)));
+  for (const r of reports) {
+    const id = chalk.cyan(r.id.slice(0, 8));
+    const url = r.url.slice(0, 43).padEnd(45);
+    const status = (r.status === 'complete' ? chalk.green('complete') : chalk.yellow(r.status)).padEnd(20);
+    const report = r.reportPath ? chalk.gray('open ' + r.reportPath) : chalk.gray('—');
+    console.log(`  ${id}  ${url}  ${status}  ${report}`);
+  }
+  console.log();
+  console.log(chalk.gray(`  Confirm a session: ghostrun explore:confirm <id>`));
+  console.log();
 }
 
 // ============================================
@@ -2959,13 +4451,19 @@ GhostRun lets developers record browser flows and replay them headlessly for tes
 - ghostrun init                 — Setup wizard
 - ghostrun status               — Stats + AI provider info
 - ghostrun serve                — Scheduler daemon (runs cron schedules)
+- ghostrun serve --ui           — Web dashboard at http://localhost:3000
 
 ## Flow Actions Supported
-navigate, click, fill, select, check, wait, press, hover,
-assert:text, assert:url, assert:element, assert:title,
+navigate, reload, back, forward,
+click, dblclick, fill, type, clear, select, check, focus, hover,
+drag, keyboard, upload,
+wait, wait:text, wait:url, wait:ms,
+scroll, scroll:element, scroll:bottom, scroll:load,
+next:page,
+assert:visible, assert:hidden, assert:text, assert:not-text, assert:value, assert:count, assert:attr,
 extract (capture page data to variable),
-scroll:bottom, scroll:up, scroll:load (infinite scroll),
-next:page (pagination)
+screenshot, eval, iframe:enter, iframe:exit,
+cookie:set, cookie:clear, storage:set
 
 ## Variables
 Use {{VAR_NAME}} in flows. Pass with --var KEY=value or .ghostrun.env file in CWD.
@@ -3392,6 +4890,7 @@ async function main() {
     console.log(`  ${C('schedule:list')}${G('List all schedules')}`);
     console.log(`  ${C('schedule:remove <id>')}${G('Remove a schedule')}`);
     console.log(`  ${C('serve')}${G('Start the scheduler daemon')}`);
+    console.log(`  ${C('serve --ui [--port 3000]')}${G('Launch the web dashboard')}`);
     console.log();
 
     H('Test Suites');
@@ -3433,6 +4932,7 @@ async function main() {
 
     H('Exploration & System');
     console.log(`  ${C('explore <url>')}${G('Auto-discover flows via BFS crawl       🤖 AI')}`);
+    console.log(`  ${C('explore:list')}${G('List all explore sessions')}`);
     console.log(`  ${C('explore:confirm <report-id>')}${G('Save confirmed flows from explore')}`);
     console.log(`  ${C('status')}${G('Stats, creator breakdown, AI provider')}`);
     console.log(`  ${C('app')}${G('Open Electron desktop viewer')}`);
@@ -3476,7 +4976,7 @@ async function main() {
     case 'schedule:remove':
       if (!args[1]) { errorMsg('Schedule ID required'); process.exit(1); }
       await runScheduleRemove(args[1]); break;
-    case 'serve':           await runServe(); break;
+    case 'serve':           await runServe(args.slice(1)); break;
     case 'run:list':        await runListRuns(); break;
     case 'run:show':
       if (!args[1]) { errorMsg('Run ID required'); process.exit(1); }
@@ -3490,6 +4990,7 @@ async function main() {
     case 'explore':
       if (!args[1]) { errorMsg('URL required'); process.exit(1); }
       await runExplore(args[1]); break;
+    case 'explore:list':    await runExploreList(); break;
     case 'explore:confirm':
       if (!args[1]) { errorMsg('Report ID required'); process.exit(1); }
       await runExploreConfirm(args[1]); break;

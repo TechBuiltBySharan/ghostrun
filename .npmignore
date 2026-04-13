@@ -1,0 +1,37 @@
+# Development tools and source
+ghostrun.ts
+mcp-server.ts
+tsconfig.json
+*.patch
+
+# Scripts
+scripts/
+
+# Demo / video assets
+demo/
+
+# Desktop app
+apps/
+
+# Test / debug artifacts
+test-*.ts
+debug-*.ts
+create-*.ts
+*.test.ts
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local env files
+*.env
+.ghostrun.env
+.flowmind.env
+
+# Git
+.git/
+.github/
+
+# Build artifacts not needed by consumers
+esbuild.config.*
