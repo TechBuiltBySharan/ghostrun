@@ -2850,25 +2850,8 @@ async function runStatus() {
 // DESKTOP APP
 // ============================================
 
-async function runDesktopApp() {
-  const { execFile } = await import('child_process');
-  const electronBin = path.join(__dirname, 'node_modules', '.bin', 'electron');
-  const mainJs = path.join(__dirname, 'apps', 'electron', 'main.js');
-
-  if (!fs.existsSync(mainJs)) {
-    errorMsg('Desktop app not found at: ' + mainJs);
-    process.exit(1);
-  }
-
-  info('Launching GhostRun desktop...');
-  const child = (execFile as Function)(electronBin, [mainJs], {
-    detached: true,
-    stdio: 'ignore',
-    cwd: __dirname,
-  });
-  child.unref();
-  success('Desktop app launched.');
-}
+// Desktop app has been removed - use web dashboard instead
+// async function runDesktopApp() { ... }
 
 // ============================================
 // EXPLORE
@@ -4658,7 +4641,7 @@ async function runInteractive() {
         { value: 'schedule', label: '🕐 Manage schedules',         hint: 'cron-based automation' },
         { value: 'status',   label: '📊 System status',            hint: 'stats + AI provider' },
         { value: 'chat',     label: '💬 Ask GhostRun Bot',           hint: 'Q&A + run flows by name' },
-        { value: 'app',      label: '🖥  Open desktop app',          hint: 'Electron UI' },
+        { value: 'serve',    label: '🌐  Open web dashboard',       hint: 'Local web UI' },
         { value: 'exit',     label: '✕  Exit' },
       ],
     });
@@ -4935,7 +4918,7 @@ async function main() {
     console.log(`  ${C('explore:list')}${G('List all explore sessions')}`);
     console.log(`  ${C('explore:confirm <report-id>')}${G('Save confirmed flows from explore')}`);
     console.log(`  ${C('status')}${G('Stats, creator breakdown, AI provider')}`);
-    console.log(`  ${C('app')}${G('Open Electron desktop viewer')}`);
+    console.log(`  ${C('serve')}${G('Open web dashboard (ghostrun serve --ui)')}`);
     console.log();
     console.log(chalk.gray('  🤖 AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)'));
     console.log(chalk.gray('  👤     = human-recorded   🤖 = agent/AI-generated'));
@@ -4994,7 +4977,7 @@ async function main() {
     case 'explore:confirm':
       if (!args[1]) { errorMsg('Report ID required'); process.exit(1); }
       await runExploreConfirm(args[1]); break;
-    case 'app':             await runDesktopApp(); break;
+    // case 'app': removed - desktop app is deprecated, use web dashboard instead
     case 'status':          await runStatus(); break;
     case 'suite:create':
       if (!args[1]) { errorMsg('Suite name required'); process.exit(1); }

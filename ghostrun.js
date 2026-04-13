@@ -6453,23 +6453,6 @@ async function runStatus() {
   }
   console.log();
 }
-async function runDesktopApp() {
-  const { execFile } = await import("child_process");
-  const electronBin = path.join(__dirname, "node_modules", ".bin", "electron");
-  const mainJs = path.join(__dirname, "apps", "electron", "main.js");
-  if (!fs.existsSync(mainJs)) {
-    errorMsg("Desktop app not found at: " + mainJs);
-    process.exit(1);
-  }
-  info("Launching GhostRun desktop...");
-  const child = execFile(electronBin, [mainJs], {
-    detached: true,
-    stdio: "ignore",
-    cwd: __dirname
-  });
-  child.unref();
-  success("Desktop app launched.");
-}
 async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
   const normalize = (u) => {
     try {
@@ -8024,7 +8007,7 @@ async function runInteractive() {
         { value: "schedule", label: "\u{1F550} Manage schedules", hint: "cron-based automation" },
         { value: "status", label: "\u{1F4CA} System status", hint: "stats + AI provider" },
         { value: "chat", label: "\u{1F4AC} Ask GhostRun Bot", hint: "Q&A + run flows by name" },
-        { value: "app", label: "\u{1F5A5}  Open desktop app", hint: "Electron UI" },
+        { value: "serve", label: "\u{1F310}  Open web dashboard", hint: "Local web UI" },
         { value: "exit", label: "\u2715  Exit" }
       ]
     });
@@ -8264,7 +8247,7 @@ async function main() {
     console.log(`  ${C("explore:list")}${G("List all explore sessions")}`);
     console.log(`  ${C("explore:confirm <report-id>")}${G("Save confirmed flows from explore")}`);
     console.log(`  ${C("status")}${G("Stats, creator breakdown, AI provider")}`);
-    console.log(`  ${C("app")}${G("Open Electron desktop viewer")}`);
+    console.log(`  ${C("serve")}${G("Open web dashboard (ghostrun serve --ui)")}`);
     console.log();
     console.log(import_chalk.default.gray("  \u{1F916} AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)"));
     console.log(import_chalk.default.gray("  \u{1F464}     = human-recorded   \u{1F916} = agent/AI-generated"));
@@ -8392,9 +8375,7 @@ async function main() {
       }
       await runExploreConfirm(args[1]);
       break;
-    case "app":
-      await runDesktopApp();
-      break;
+    // case 'app': removed - desktop app is deprecated, use web dashboard instead
     case "status":
       await runStatus();
       break;
