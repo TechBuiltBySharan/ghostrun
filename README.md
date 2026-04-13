@@ -5,9 +5,58 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Downloads](https://img.shields.io/npm/dm/ghostrun-cli)](https://www.npmjs.com/package/ghostrun-cli)
 
-Record once. Replay as a ghost.
+**Record once. Replay as a ghost.**
 
-Browser automation + API testing + load testing in one CLI — record real browser flows, test REST APIs with assertions and variable extraction, run VU-based load tests, export to k6, detect failures with AI analysis, and chat with your test suite. Entirely local.
+GhostRun is a local-first CLI for browser automation, API testing, and load testing — all in one tool. Record a real browser flow, replay it headlessly, test REST APIs with assertions, and run VU-based load tests. No cloud. No account. Runs entirely on your machine.
+
+---
+
+## Table of Contents
+
+- [What is GhostRun?](#what-is-ghostrun)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [The Three Modes](#the-three-modes)
+  - [Browser Automation](#1-browser-automation)
+  - [API Testing](#2-api-testing)
+  - [Load Testing](#3-load-testing)
+- [Commands](#commands)
+  - [Setup](#setup)
+  - [Recording](#recording)
+  - [Running Flows](#running-flows)
+  - [Flow Management](#flow-management)
+  - [Environments](#environments)
+  - [Run History](#run-history)
+  - [Scheduling](#scheduling)
+  - [Test Suites](#test-suites)
+  - [Web Dashboard](#web-dashboard)
+  - [Chat Assistant](#chat-assistant)
+  - [MCP Server](#mcp-server)
+- [Reports](#reports)
+- [Selector Repair](#selector-repair)
+- [Screenshot Diff](#screenshot-diff)
+- [CI/CD Integration](#cicd-integration)
+- [AI Setup](#ai-setup)
+- [Data & Privacy](#data--privacy)
+- [Contributing](#contributing)
+- [Trust & Transparency](#trust--transparency)
+- [License](#license)
+
+---
+
+## What is GhostRun?
+
+Most testing tools make you choose — browser OR API OR load testing. GhostRun does all three from a single CLI, using the same flow format.
+
+| What you want to do | How GhostRun helps |
+|---------------------|-------------------|
+| Test a web UI regression | Record a browser flow once, replay headlessly on every deploy |
+| Test a REST API | Write or import flows with HTTP requests, assertions, and variable extraction |
+| Stress-test an endpoint | Run any API flow as a load test with configurable VUs and duration |
+| Monitor a live site | Schedule flows to run on a cron and alert on failure |
+| Give AI agents your test suite | MCP server exposes all flows as tools for Claude, Cursor, etc. |
+
+Everything is stored locally in SQLite (`~/.ghostrun/`). No accounts, no telemetry, no cloud.
 
 ---
 
@@ -15,105 +64,116 @@ Browser automation + API testing + load testing in one CLI — record real brows
 
 ```bash
 npm install -g ghostrun-cli
+ghostrun init        # guided setup: installs Chromium, configures AI (optional)
 ```
 
 Or run from source:
 
 ```bash
 git clone https://github.com/TechBuiltBySharan/ghostrun
-cd ghostrun
-npm install
-npm run build
-node ghostrun.js init   # guided setup
+cd ghostrun && npm install && npm run build
+node ghostrun.js init
 ```
+
+**Requirements:** Node 18+, macOS/Linux/Windows
 
 ---
 
 ## Quick Start
 
+**Record a browser flow:**
+
 ```bash
-ghostrun init                          # setup wizard: installs Chromium, configures AI
-ghostrun learn https://yourapp.com     # record a browser flow
-ghostrun api:learn                     # import a .flow.json with API actions
-ghostrun run <flow-id>                 # replay headlessly (browser or API)
-ghostrun perf:run <flow-id>            # load test an API flow (VU-based)
-ghostrun chat                          # AI chat: ask questions, run flows by name
-ghostrun serve --ui                    # web dashboard at http://localhost:3000
+ghostrun learn https://yourapp.com     # real browser opens, you interact, GhostRun records
+ghostrun run "My Flow"                 # replay headlessly
+```
+
+**Test an API:**
+
+```bash
+ghostrun flow:from-curl "curl -X POST https://api.example.com/login \
+  -H 'Content-Type: application/json' \
+  -d '{\"email\":\"user@example.com\",\"password\":\"secret\"}'"
+ghostrun run "POST /login"
+```
+
+**Run a load test:**
+
+```bash
+ghostrun perf:run "POST /login" --vus 20 --duration 30
 ```
 
 ---
 
-## What Needs AI vs What Doesn't
+## The Three Modes
 
-Every core feature works with zero AI. AI is an optional enhancement.
+### 1. Browser Automation
 
-| Feature | AI Required? | Notes |
-|---------|:------------:|-------|
-| Browser recording | No | Real click/input capture via Playwright |
-| Flow execution | No | Headless Playwright replay |
-| Screenshot capture | No | PNG per step, pass and fail |
-| Failure detection | No | Stops on error, shows what failed |
-| Selector repair (`flow:fix`) | No | Interactive browser-based fix |
-| Screenshot diff (`run:diff`) | No | Pixel comparison, no AI needed |
-| Flow scheduling | No | Cron-based, runs offline |
-| Monitor & diff extracted data | No | `ghostrun monitor <flow>` |
-| PII sanitization | No | Regex-based, local only |
-| Web dashboard | No | `ghostrun serve --ui` |
-| **API testing** | No | HTTP requests, assertions, variable extraction |
-| **Environment profiles** | No | Named env sets, injected at runtime |
-| **Load testing** | No | VU-based perf runs, p50/p95/p99 stats |
-| **k6 export** | No | `perf:export` generates a k6 script |
-| **Failure analysis** | Optional ✨ | Plain-English explanation of why it failed |
-| **Auto run summary** | Optional ✨ | Attached to every failed run automatically |
-| **Chat assistant** | Optional ✨ | Q&A + run flows by name via `ghostrun chat` |
+GhostRun opens a real browser (Playwright/Chromium), watches your interactions, and saves them as a flow. Replay runs headlessly.
 
-**Bottom line:** Record, replay, schedule, diff, and fix flows entirely offline. AI adds explanations and a conversational interface.
+```bash
+ghostrun learn https://yourapp.com     # record
+ghostrun run <id|name>                 # replay headlessly
+ghostrun run <id|name> --visible       # replay with browser window visible
+```
+
+**What gets recorded:** clicks, form fills, navigation, waits, checkboxes, dropdowns, keyboard input, file uploads, scroll, drag and drop.
+
+**Selector repair:** If a flow breaks after a UI update, `ghostrun flow:fix <id>` opens the browser, replays up to the broken step, and lets you click the correct element. Selector is updated automatically — no manual JSON editing.
 
 ---
 
-## AI Setup
+### 2. API Testing
 
-### Option 1 — Local (Default, Recommended)
+When all steps in a flow are API actions (no `click`, `fill`, etc.), GhostRun skips Playwright entirely. Execution is ~30ms per run.
 
-GhostRun uses **Ollama** by default. No API key, no internet, runs on your machine.
-
-```bash
-brew install ollama
-ollama serve &
-ollama pull gemma3:4b          # 2.6 GB, fast on Apple Silicon
-node ghostrun.js status        # → AI Provider: Ollama (gemma3:4b)
-```
-
-**Model options by hardware:**
-
-| Model | Size | Best for |
-|-------|------|---------|
-| `gemma3:4b` | 2.6 GB | Apple Silicon M1/M2/M3, fast |
-| `gemma2:9b` | 5.4 GB | Better quality, more RAM needed |
-| `llama3.2:3b` | 2.0 GB | Fastest, lighter quality |
-
-Override model: `export GHOSTRUN_OLLAMA_MODEL=llama3.2:3b`
-
-### Option 2 — Anthropic Cloud (Fallback)
+**Three ways to create an API flow:**
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+# From a curl command
+ghostrun flow:from-curl "curl -X GET https://api.example.com/users \
+  -H 'Authorization: Bearer {{token}}'"
+
+# From an OpenAPI/Swagger spec
+ghostrun flow:from-spec openapi.json       # JSON or YAML
+ghostrun flow:from-spec swagger.yaml
+
+# Import a hand-crafted .flow.json
+ghostrun flow:import my-api-tests.flow.json
 ```
 
-### Fallback chain
+**API flow features:**
+- HTTP requests with custom headers, JSON body, bearer auth
+- Response assertions (status code, JSON path, headers, response time)
+- Variable extraction from responses — use in subsequent steps
+- Named environment profiles (dev / staging / prod)
+
+---
+
+### 3. Load Testing
+
+Run any API flow as a load test. GhostRun sends parallel VU requests, collects timing, and prints a latency breakdown.
+
+```bash
+ghostrun perf:run <id|name>                               # defaults: 10 VUs, 30s
+ghostrun perf:run <id|name> --vus 50 --duration 60 --ramp-up 10
+ghostrun perf:compare <run-A-id> <run-B-id>              # diff two runs
+ghostrun perf:export <id|name>                           # generate a k6 script
+```
+
+**Output includes:** HTTP requests, success rate, avg RPS, p50 / p95 / p99 latency, min/max, per-step breakdown, checks passed/failed.
+
+**perf:compare** shows side-by-side deltas with color-coded improvement/regression:
 
 ```
-run → try Ollama → if down → try Anthropic → if no key → skip AI silently
+                       Before     After      Delta
+  p50 latency          142ms      98ms       ↓ 44ms  ✓
+  p95 latency          310ms      201ms      ↓ 109ms ✓
+  p99 latency          580ms      390ms      ↓ 190ms ✓
+  avg RPS              47.2       68.1       ↑ 20.9  ✓
 ```
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GHOSTRUN_AI_PROVIDER` | auto | `ollama`, `anthropic`, or auto |
-| `GHOSTRUN_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `GHOSTRUN_OLLAMA_MODEL` | auto-detected | Model to use |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (cloud fallback) |
+**perf:export** generates a valid k6 script with VU stages, `http.get`/`http.post` calls, `check()` assertions, and `Trend` metrics per step.
 
 ---
 
@@ -123,63 +183,87 @@ run → try Ollama → if down → try Anthropic → if no key → skip AI silen
 
 ```bash
 ghostrun init                          # guided setup wizard
-ghostrun status                        # stats + AI provider info
+ghostrun status                        # stats, AI provider, data path
 ```
 
 ### Recording
 
 ```bash
-ghostrun learn <url> [name]            # record a flow (real browser opens)
-ghostrun learn <url> --name "Login"    # with explicit name
+ghostrun learn <url>                   # open browser and record a flow
+ghostrun learn <url> --name "Login"    # with an explicit name
 ```
 
-### Running
+### Running Flows
 
 ```bash
-ghostrun run <id|name>                 # headless execution
-ghostrun run <id|name> --visible       # show the browser window
-ghostrun run <id|name> --output json   # structured JSON output with extracted data
-ghostrun run <id|name> --var key=val   # inject variables
-ghostrun run <id|name> --session-save mysession   # save cookies/storage
-ghostrun run <id|name> --session-load mysession   # restore cookies/storage
+ghostrun run <id|name>                         # headless execution
+ghostrun run <id|name> --visible               # show the browser window
+ghostrun run <id|name> --var key=val           # inject a variable
+ghostrun run <id|name> --output json           # JSON output (for scripting/CI)
+ghostrun run <id|name> --report html           # save an HTML run report
+ghostrun run <id|name> --session-save <name>   # save browser cookies/storage
+ghostrun run <id|name> --session-load <name>   # restore browser cookies/storage
 ```
 
 ### Flow Management
 
 ```bash
-ghostrun flow:list                     # list all flows
-ghostrun flow:show <id|name>           # show steps
-ghostrun flow:fix <id|name>            # fix broken selectors interactively
-ghostrun flow:delete <id|name>         # delete a flow
-ghostrun flow:export <id|name>         # export to .flow.json
-ghostrun flow:import <file>            # import from .flow.json
-ghostrun flow:clone <id|name>          # duplicate a flow
-ghostrun flow:rename <id|name> <new>   # rename a flow
+ghostrun flow:list                         # list all flows
+ghostrun flow:show <id|name>               # show steps for a flow
+ghostrun flow:rename <id|name> <new-name>  # rename a flow
+ghostrun flow:clone <id|name>              # duplicate a flow
+ghostrun flow:delete <id|name>             # delete a flow
+ghostrun flow:export <id|name>             # export to .flow.json
+ghostrun flow:import <file>                # import from .flow.json
+ghostrun flow:fix <id|name>                # fix broken selectors interactively
+ghostrun flow:from-curl "<curl>"           # create a flow from a curl command
+ghostrun flow:from-spec <file>             # create flows from an OpenAPI spec
 ```
 
-### Data Extraction & Monitoring
+### Environments
+
+Named variable sets injected at run time. Perfect for dev / staging / prod.
 
 ```bash
-ghostrun monitor <id|name>             # run + show extracted data, diff vs previous
-ghostrun run:show <id>                 # step details + screenshots + extracted data
+ghostrun env:create <name> [base-url]  # create an environment
+ghostrun env:set <name> <key=value>    # add or update a variable
+ghostrun env:list                      # list all environments
+ghostrun env:show <name>               # show variables in an environment
+ghostrun env:use <name>                # set as the active environment
+ghostrun env:delete <name>             # delete an environment
 ```
+
+Reference variables in any URL, header, or body field with `{{variableName}}`. The active environment's variables are injected automatically before each run.
 
 ### Run History
 
 ```bash
 ghostrun run:list                      # list recent runs
-ghostrun run:show <id>                 # step details + screenshots
-ghostrun run:diff <id1> <id2>          # visual screenshot diff (no AI needed)
-ghostrun run:analyze <id>              # AI failure analysis (optional)
+ghostrun run:show <id>                 # step-by-step detail, screenshots, extracted data
+ghostrun run:diff <id1> <id2>          # pixel-level screenshot comparison
+ghostrun run:analyze <id>              # AI failure analysis (requires AI setup)
+ghostrun var:dump <run-id>             # show all variables extracted during a run
 ```
 
 ### Scheduling
 
 ```bash
-ghostrun flow:schedule <id> "<cron>"   # e.g. "0 9 * * *" = daily 9am
+ghostrun flow:schedule <id> "<cron>"   # e.g. "0 9 * * *" = daily at 9am
 ghostrun schedule:list                 # list all schedules
 ghostrun schedule:remove <id>          # remove a schedule
 ghostrun serve                         # start the scheduler daemon
+```
+
+### Test Suites
+
+Group flows and run them together:
+
+```bash
+ghostrun suite:create <name>           # create a suite
+ghostrun suite:add <suite> <flow>      # add a flow to the suite
+ghostrun suite:run <suite>             # run all flows in the suite
+ghostrun suite:list                    # list suites
+ghostrun suite:show <suite>            # show flows in a suite
 ```
 
 ### Web Dashboard
@@ -189,228 +273,71 @@ ghostrun serve --ui                    # launch dashboard at http://localhost:30
 ghostrun serve --ui --port 8080        # custom port
 ```
 
-The dashboard shows:
-- All flows with one-click run buttons
-- Live run log with SSE streaming
-- Run history with status and duration
-- Chat tab for natural-language interaction
+The dashboard shows all flows with one-click run, a live log stream, run history, and a chat tab.
 
 ### Chat Assistant
 
+Ask questions about your flows in plain English:
+
 ```bash
-ghostrun chat                          # interactive AI chat (requires Ollama or ANTHROPIC_API_KEY)
+ghostrun chat
 ```
 
-Ask questions in plain English:
+Examples:
 - `did my login flow pass recently?`
 - `what flows do I have?`
-- `run the login flow`  ← executes the flow with confirmation
+- `run the login flow`  ← executes with confirmation
 
-### Test Suites
-
-```bash
-ghostrun suite:create <name>           # create a suite
-ghostrun suite:add <suite> <flow>      # add a flow to a suite
-ghostrun suite:list                    # list suites
-ghostrun suite:show <suite>            # show flows in suite
-ghostrun suite:run <suite>             # run all flows in suite
-```
-
-### Visual Baselines
-
-```bash
-ghostrun baseline:set <flow-id>        # capture reference screenshots
-ghostrun baseline:clear <flow-id>      # clear baselines
-ghostrun baseline:show <flow-id>       # list baselines
-```
-
-### Importing Flows
-
-```bash
-ghostrun flow:from-curl                         # paste a curl command → instant flow
-ghostrun flow:from-curl "curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d '{\"name\":\"Alice\"}'"
-ghostrun flow:from-spec openapi.json            # import all endpoints from an OpenAPI spec
-ghostrun flow:from-spec swagger.yaml            # YAML supported too
-ghostrun flow:import <file>                     # import a .flow.json directly
-```
-
-`flow:from-curl` parses the curl command (method, headers, body, bearer auth) and creates a ready-to-run flow with a status assertion. `flow:from-spec` reads an OpenAPI/Swagger spec and lets you choose: one flow per tag group, one per endpoint, or one big flow.
-
-### Run Reports
-
-```bash
-ghostrun run <id> --report html                 # run + save HTML report
-ghostrun perf:run <id> --report html            # load test + save HTML report
-```
-
-Reports are dark-themed HTML files saved to the current directory — shareable, self-contained, screenshot-inclusive.
-
-### API Testing
-
-Import an API flow from a `.flow.json` file (no browser needed):
-
-```bash
-ghostrun api:learn                     # interactive: pick a .flow.json file to import
-ghostrun flow:import <file>            # import directly by path
-ghostrun run <id|name>                 # runs pure API flows without launching a browser
-```
-
-When all steps in a flow are API actions (`http:request`, `assert:response`, `set:variable`, `extract:json`, `env:switch`), GhostRun skips Playwright entirely — execution is ~30ms.
-
-### Environments
-
-Named variable sets injected at flow start. Great for dev / staging / prod:
-
-```bash
-ghostrun env:create <name> [base-url]  # create an environment profile
-ghostrun env:list                      # list all environments
-ghostrun env:show <name>               # show variables in an environment
-ghostrun env:set <name> <key=value>    # add or update a variable
-ghostrun env:use <name>                # set as active environment
-ghostrun env:delete <name>             # delete an environment
-```
-
-The active environment's variables are automatically injected before each flow run. Use `{{variableName}}` in any URL, header, or body field to reference them.
-
-### Variable Inspection
-
-```bash
-ghostrun var:dump <run-id>             # show all variables extracted during a run
-```
-
-### Load & Performance Testing
-
-```bash
-ghostrun perf:run <id|name>            # run a load test against an API flow
-ghostrun perf:run <id|name> --vus 20 --duration 30 --ramp-up 5
-ghostrun perf:export <id|name>         # generate a k6 script from the flow
-ghostrun perf:export <id|name> --output mytest.js
-ghostrun perf:list                     # list past perf runs
-ghostrun perf:show <perf-run-id>       # show stats for a specific perf run
-```
-
-**perf:run options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--vus <n>` | 10 | Number of virtual users |
-| `--duration <s>` | 30 | Test duration in seconds |
-| `--ramp-up <s>` | 5 | Ramp-up time (VUs staggered over this window) |
-| `--timeout <ms>` | 10000 | Per-request timeout in ms |
-
-Output includes: HTTP Requests, HTTP Success Rate, Avg RPS, p50/p95/p99 latency, min/max, per-step breakdown, and separate Checks Passed/Failed count.
-
-**perf:compare** — diff two runs side by side to see if a deploy made things faster or slower:
-
-```bash
-ghostrun perf:compare <run-A-id> <run-B-id>
-```
-
-Shows p50/p95/p99/RPS for both runs with color-coded deltas (green = better, red = worse).
-
-**perf:export** generates a valid k6 JavaScript file with:
-- VU stages matching your `--vus`/`--duration`/`--ramp-up` config
-- `http.get`/`http.post` calls with headers and JSON body
-- `check()` assertions mapped to your `assert:response` steps
-- `Trend` metrics per step for p95 thresholds
-- `{{variable}}` → template literal interpolation
+Requires Ollama (local, free) or an Anthropic API key. See [AI Setup](#ai-setup).
 
 ### MCP Server
 
+Expose GhostRun to AI agents (Claude Desktop, Cursor, etc.):
+
 ```bash
-node mcp-server.js                     # start MCP server (Claude Desktop, Cursor, etc.)
+node mcp-server.js
 ```
+
+Tools exposed: `list_flows`, `get_flow`, `run_flow`, `get_run_result`, `list_runs`, `delete_flow`, `get_status`.
 
 See [MCP-SETUP.md](MCP-SETUP.md) for connection setup.
 
-Tools exposed: `list_flows`, `get_flow`, `run_flow`, `get_run_result`, `list_runs`, `delete_flow`, `get_status`
+---
+
+## Reports
+
+```bash
+ghostrun run <id> --report html           # browser or API run report
+ghostrun perf:run <id> --report html      # load test report
+```
+
+Dark-themed, self-contained HTML files saved to the current directory. Include per-step timing, status, screenshots (for browser flows), and extracted data. Shareable without any external dependencies.
 
 ---
 
-## CI/CD Integration
+## Selector Repair
 
-### GitHub Actions
-
-```yaml
-# .github/workflows/ghostrun.yml
-name: GhostRun Tests
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install GhostRun
-        run: npm install -g ghostrun-cli
-
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
-
-      - name: Import test flows
-        run: |
-          ghostrun flow:import test-flows/health-check.flow.json
-          ghostrun flow:import test-flows/auth-and-users.flow.json
-
-      - name: Run flows
-        run: |
-          ghostrun run "API Health Check" --report html
-          ghostrun run "Auth + User List" --report html
-
-      - name: Upload reports
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ghostrun-reports
-          path: ghostrun-report-*.html
-```
-
-### Exit Codes
-
-GhostRun exits with code `1` on failure and `0` on pass — standard CI behaviour, no extra flags needed.
-
-### API-only flows in CI
-
-API flows skip Playwright entirely — no `playwright install` step needed:
-
-```yaml
-      - name: Install GhostRun (API testing only)
-        run: npm install -g ghostrun-cli
-        # No playwright install needed for pure API flows
-
-      - name: Run API tests
-        run: ghostrun run "Auth + User List"
-```
-
----
-
-## Selector Repair (`flow:fix`)
-
-When a flow fails because a selector broke:
+When a UI update breaks a selector:
 
 ```bash
 ghostrun flow:fix <id|name>
 ```
 
-Browser opens, replays all passing steps automatically, **pauses on broken ones**, and asks you to click the correct element. Selector is updated and saved. No manual editing.
+The browser opens, replays all passing steps automatically, then **pauses on the broken step** and asks you to click the correct element. The selector is updated and saved. No JSON editing needed.
 
 ---
 
-## Screenshot Diff (`run:diff`)
+## Screenshot Diff
 
 Compare any two runs pixel-by-pixel — no AI needed:
 
 ```bash
 ghostrun run:diff <run1-id> <run2-id>
+```
 
-  Step  Status    Diff %  Screenshot
-  ──────────────────────────────────────────────────────────
+```
+  Step  Status    Diff %  Name
+  ───────────────────────────────────────────
      1  same        0.0%  Navigate to homepage
      2  same        0.1%  Click Login
      3  changed    12.4%  Fill email field
@@ -422,228 +349,122 @@ ghostrun run:diff <run1-id> <run2-id>
 
 ---
 
-## Flow Actions Reference
+## CI/CD Integration
 
-All actions you can use in recorded or imported `.flow.json` files:
+GhostRun exits with code `1` on failure and `0` on success — standard CI behaviour, no extra flags needed.
 
-### Navigation
+### GitHub Actions example
 
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `navigate` | `url` | Go to URL |
-| `reload` | — | Reload the current page |
-| `back` | — | Browser back |
-| `forward` | — | Browser forward |
+```yaml
+# .github/workflows/ghostrun.yml
+name: GhostRun Tests
+on: [push, pull_request]
 
-### Interaction
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `click` | `selector` | Left-click an element |
-| `dblclick` | `selector` | Double-click an element |
-| `fill` | `selector`, `value` | Clear field and type value |
-| `type` | `selector`, `value`, `delay?` | Type with configurable key delay (ms) |
-| `clear` | `selector` | Clear a field |
-| `select` | `selector`, `value` | Select a dropdown option by value |
-| `check` | `selector`, `value: "true"\|"false"` | Check/uncheck a checkbox |
-| `focus` | `selector` | Focus an element |
-| `hover` | `selector` | Mouse hover |
-| `drag` | `selector`, `targetSelector` | Drag one element to another |
-| `keyboard` | `key`, `selector?` | Press a key (e.g. `Enter`, `Tab`, `Control+a`) |
-| `upload` | `selector`, `value` | Set file input (comma-separated paths) |
+      - name: Install GhostRun
+        run: npm install -g ghostrun-cli
 
-### Waiting
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+        # Skip this step for pure API flows — no browser needed
 
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `wait` | `selector` | Wait for element to appear |
-| `wait:text` | `selector`, `value` | Wait until element contains text |
-| `wait:url` | `value` | Wait for URL to match pattern |
-| `wait:ms` | `value` | Wait for N milliseconds |
+      - name: Import and run flows
+        run: |
+          ghostrun flow:import test-flows/auth.flow.json
+          ghostrun run "Auth Flow" --report html
 
-### Scrolling
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `scroll` | `selector?` | Scroll to element (or page) |
-| `scroll:element` | `selector` | Scroll element into view |
-| `scroll:bottom` | — | Scroll to bottom of page |
-| `scroll:load` | `value?` | Scroll to bottom, wait for load (repeat N times) |
-| `next:page` | `selector?` | Click next page link and wait |
-
-### Assertions
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `assert:visible` | `selector` | Assert element is visible |
-| `assert:hidden` | `selector` | Assert element is not visible |
-| `assert:text` | `selector`, `value` | Assert element contains text |
-| `assert:not-text` | `selector`, `value` | Assert element does NOT contain text |
-| `assert:value` | `selector`, `value` | Assert input value |
-| `assert:count` | `selector`, `value` | Assert number of matching elements |
-| `assert:attr` | `selector`, `value: "attr=expected"` | Assert element attribute |
-
-### Data Extraction
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `extract` | `selector`, `value: "variableName"` | Extract text → variable |
-| `screenshot` | — | Capture screenshot at this step |
-
-### Browser State
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `cookie:set` | `value: "name=value; domain=..."` | Set a cookie |
-| `cookie:clear` | — | Clear all cookies |
-| `storage:set` | `selector: "key"`, `value: "val"` | Set localStorage item |
-| `eval` | `value` | Execute JavaScript on the page |
-| `iframe:enter` | `selector` | Enter an iframe context |
-| `iframe:exit` | — | Exit iframe context, return to main frame |
-
-### API — HTTP Requests
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `http:request` | `method`, `url`, `headers?`, `body?`, `auth?`, `extract?` | Make an HTTP request. `auth` supports `{ type: "bearer", token: "{{var}}" }`. `extract` is a map of `variableName → $.jsonPath`. |
-
-### API — Assertions
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `assert:response` | `assert: "status"`, `expected` | Assert HTTP status code |
-| `assert:response` | `assert: "json:path"`, `path`, `expected` | Assert JSONPath value equals expected |
-| `assert:response` | `assert: "json:exists"`, `path` | Assert JSONPath exists in response |
-| `assert:response` | `assert: "header"`, `header`, `expected` | Assert response header value |
-| `assert:response` | `assert: "body:contains"`, `expected` | Assert raw body contains string |
-| `assert:response` | `assert: "time"`, `expected` | Assert response time < expected ms |
-
-### API — Variables & Flow Control
-
-| Action | Fields | Description |
-|--------|--------|-------------|
-| `set:variable` | `variable`, `value` | Set a named variable (supports `{{interpolation}}`) |
-| `extract:json` | `variable`, `path` | Extract a value from the last response body via JSONPath |
-| `env:switch` | `value` | Switch active environment mid-flow |
-
-### Variables
-
-Use `{{variableName}}` in any `value`, `url`, `selector`, or `body` field to inject variables:
-
-```json
-{ "action": "fill", "selector": "#email", "value": "{{userEmail}}" }
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ghostrun-reports
+          path: ghostrun-report-*.html
 ```
 
-Pass at runtime: `ghostrun run <id> --var userEmail=user@example.com`
+---
 
-Extracted values (from `extract:` steps) are automatically available as variables in subsequent steps.
+## AI Setup
+
+Every core feature works with zero AI. AI adds failure explanations and a chat interface — both are optional.
+
+### Option 1 — Ollama (local, recommended)
+
+No API key, no internet required. Runs on your machine.
+
+```bash
+brew install ollama
+ollama serve &
+ollama pull gemma3:4b          # 2.6 GB, fast on Apple Silicon
+```
+
+| Model | Size | Best for |
+|-------|------|---------|
+| `gemma3:4b` | 2.6 GB | Apple Silicon M1/M2/M3 |
+| `gemma2:9b` | 5.4 GB | Better quality |
+| `llama3.2:3b` | 2.0 GB | Fastest, lighter quality |
+
+Override: `export GHOSTRUN_OLLAMA_MODEL=llama3.2:3b`
+
+### Option 2 — Anthropic (cloud fallback)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Fallback order
+
+```
+Run → try Ollama → if down → try Anthropic → if no key → skip AI silently
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GHOSTRUN_AI_PROVIDER` | `auto` | `ollama`, `anthropic`, or `auto` |
+| `GHOSTRUN_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
+| `GHOSTRUN_OLLAMA_MODEL` | auto-detected | Model to use with Ollama |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (cloud fallback) |
 
 ---
 
-## Unsupported / Limited Interactions
+## Data & Privacy
 
-The following browser patterns have limited or no support today:
-
-| Interaction | Status | Notes |
-|------------|--------|-------|
-| Canvas drawing | ❌ Not supported | `<canvas>` elements — no visual capture |
-| WebGL / Three.js | ❌ Not supported | GPU-rendered content |
-| Browser native dialogs | ⚠️ Partial | `alert()`/`confirm()`/`prompt()` auto-dismissed |
-| File download verification | ⚠️ Partial | Download triggers but content is not validated |
-| WebRTC / media streams | ❌ Not supported | Camera, mic, screen capture APIs |
-| Browser extensions | ❌ Not supported | Extension UI is not accessible via Playwright |
-| Shadow DOM (closed mode) | ⚠️ Limited | Open shadow DOM works; closed mode requires `eval:` workaround |
-| Multi-tab / popup flows | ⚠️ Partial | New tabs opened by click are not automatically followed |
-| OS-level dialogs | ❌ Not supported | Native file picker, print dialog, OS auth prompts |
-| CAPTCHAs | ❌ Not supported | By design — no circumvention |
-| Biometric auth | ❌ Not supported | Touch ID, Face ID, WebAuthn |
-| Browser gestures (pinch/zoom) | ❌ Not supported | Mobile multi-touch gestures |
-| Hover-only menus (CSS `:hover`) | ✅ Works | Use `hover` action before clicking submenu items |
-| Right-click context menus | ⚠️ Limited | Browser context menus not accessible; app-level menus often work |
-| Drag and drop | ✅ Works | Use `drag` action with `selector` + `targetSelector` |
-| Infinite scroll / lazy load | ✅ Works | Use `scroll:load` with repeat count |
-
-**Workarounds for unsupported interactions:**
-- Use `eval:` to run JavaScript directly: `{ "action": "eval", "value": "document.querySelector('#btn').click()" }`
-- Use `wait:ms:` to pause before difficult timing-sensitive interactions
-- For shadow DOM: `{ "action": "eval", "value": "document.querySelector('my-el').shadowRoot.querySelector('button').click()" }`
-
----
-
-## Data Storage
-
-All data is local in `~/.ghostrun/`:
+All data lives locally in `~/.ghostrun/`:
 
 ```
 ~/.ghostrun/
-├── data/ghostrun.db       # SQLite: flows, runs, steps, schedules, extracted data,
-│                          #         environments, api_responses, perf_runs
+├── data/ghostrun.db       # SQLite: flows, runs, steps, schedules, environments
 ├── screenshots/           # PNG per step per run
 ├── baselines/             # Visual baseline reference screenshots
 └── diffs/                 # Screenshot diff images
 ```
 
----
-
-## Privacy
-
-PII is sanitized before storage — emails, phones, cards, JWTs, API keys, passwords are replaced with `[EMAIL]`, `[PHONE]`, etc. Nothing sensitive is sent to AI unless you explicitly call `run:analyze`.
-
----
-
-## Build from Source
-
-```bash
-npm install
-npm run build    # compiles .ts → .js via esbuild
-```
-
----
-
-## Publishing to npm
-
-```bash
-# 1. Log in to npm
-npm login
-
-# 2. Make sure the build is fresh
-npm run build
-
-# 3. Dry-run to verify what gets published
-npm publish --dry-run
-
-# 4. Publish
-npm publish --access public
-```
-
-After publishing, users can install with:
-```bash
-npm install -g ghostrun-cli
-ghostrun init
-```
-
----
-
-## Trust & Transparency
-
-- **100% local by default** — No cloud, no telemetry, no tracking. Everything runs on your machine.
-- **Open source (MIT)** — Full source code at [github.com/TechBuiltBySharan/ghostrun](https://github.com/TechBuiltBySharan/ghostrun)
-- **No surprise costs** — AI works offline with [Ollama](https://ollama.com) (free). Anthropic API key is optional.
-- **PII sanitization built-in** — Emails, passwords, tokens, and API keys are redacted before being stored in the local SQLite database.
-- **No vendor lock-in** — Flows are plain JSON files you own. Export, import, version-control them like code.
-- **I use this for** — Regression testing my own web apps, monitoring live API endpoints, and running load tests before deploys.
+**PII sanitization:** Emails, phone numbers, credit cards, JWTs, API keys, and passwords are redacted before storage. Nothing sensitive is sent to AI unless you explicitly call `run:analyze`.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started, and [REFERENCE.md](REFERENCE.md) for the full flow actions reference.
 
 ---
 
-## Built with
+## Trust & Transparency
 
-This project was built with the help of [Claude](https://claude.ai) and [Goose](https://goose-docs.ai).
+- **100% local by default** — no cloud, no telemetry, no tracking
+- **Open source (MIT)** — full source at [github.com/TechBuiltBySharan/ghostrun](https://github.com/TechBuiltBySharan/ghostrun)
+- **No surprise costs** — AI works offline via [Ollama](https://ollama.com) (free); Anthropic key is optional
+- **No vendor lock-in** — flows are plain JSON files you own; export, import, version-control them like code
+- Built with the help of [Claude](https://claude.ai) and [Goose](https://goose-docs.ai)
 
 ---
 
