@@ -1,10 +1,13 @@
 # GhostRun
 
+[![npm version](https://badge.fury.io/js/ghostrun-cli.svg)](https://www.npmjs.com/package/ghostrun-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![Downloads](https://img.shields.io/npm/dm/ghostrun-cli)](https://www.npmjs.com/package/ghostrun-cli)
+
 Record once. Replay as a ghost.
 
-Memory-driven browser automation and API testing CLI — record real browser flows, replay them headlessly, test REST APIs with assertions and variable extraction, run load tests, detect failures with AI analysis, and chat with your test suite. Entirely local.
-
-![GhostRun Demo](demo/out/ghostrun-demo.gif)
+Browser automation + API testing + load testing in one CLI — record real browser flows, test REST APIs with assertions and variable extraction, run VU-based load tests, export to k6, detect failures with AI analysis, and chat with your test suite. Entirely local.
 
 ---
 
@@ -17,7 +20,7 @@ npm install -g ghostrun-cli
 Or run from source:
 
 ```bash
-git clone https://github.com/your-org/ghostrun
+git clone https://github.com/TechBuiltBySharan/ghostrun
 cd ghostrun
 npm install
 npm run build
@@ -621,6 +624,23 @@ ghostrun init
 
 ---
 
+## Trust & Transparency
+
+- **100% local by default** — No cloud, no telemetry, no tracking. Everything runs on your machine.
+- **Open source (MIT)** — Full source code at [github.com/TechBuiltBySharan/ghostrun](https://github.com/TechBuiltBySharan/ghostrun)
+- **No surprise costs** — AI works offline with [Ollama](https://ollama.com) (free). Anthropic API key is optional.
+- **PII sanitization built-in** — Emails, passwords, tokens, and API keys are redacted before being stored in the local SQLite database.
+- **No vendor lock-in** — Flows are plain JSON files you own. Export, import, version-control them like code.
+- **I use this for** — Regression testing my own web apps, monitoring live API endpoints, and running load tests before deploys.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started.
+
+---
+
 ## Built with
 
 This project was built with the help of [Claude](https://claude.ai) and [Goose](https://goose-docs.ai).
@@ -629,4 +649,4 @@ This project was built with the help of [Claude](https://claude.ai) and [Goose](
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
