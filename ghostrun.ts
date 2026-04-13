@@ -262,6 +262,7 @@ interface PerfSample {
   duration: number;
   success: boolean;
   vuId: number;
+  isHttp: boolean;   // true = actual HTTP call, false = assertion/extract
 }
 
 interface PerfStats {
@@ -291,10 +292,13 @@ function calcPercentile(sortedMs: number[], pct: number): number {
 }
 
 function calcStats(samples: PerfSample[], durationMs: number): PerfStats {
-  const total = samples.length;
-  const success = samples.filter(s => s.success).length;
+  // Summary counts only HTTP requests; assertions are in-process and don't count as "requests"
+  const httpSamples = samples.filter(s => s.isHttp);
+  const total = httpSamples.length;
+  const success = httpSamples.filter(s => s.success).length;
   const failed = total - success;
-  const durations = samples.map(s => s.duration).sort((a, b) => a - b);
+  // Latency is also HTTP-only (assertions complete in <1ms and skew p99 to zero)
+  const durations = httpSamples.map(s => s.duration).sort((a, b) => a - b);
   return {
     total, success, failed,
     errorRate: total > 0 ? parseFloat(((failed / total) * 100).toFixed(1)) : 0,
@@ -400,9 +404,11 @@ async function runVU(
           value: node.value ? resolveVarsDeep(node.value as string, ctx) : node.value,
         };
         await runApiStepDirect(resolvedNode, action, ctx, timeoutMs);
-        samples.push({ label, duration: Date.now() - t, success: true, vuId });
+        const isHttp = action === 'http:request';
+        samples.push({ label, duration: Date.now() - t, success: true, vuId, isHttp });
       } catch {
-        samples.push({ label, duration: Date.now() - t, success: false, vuId });
+        const isHttp = action === 'http:request';
+        samples.push({ label, duration: Date.now() - t, success: false, vuId, isHttp });
         break; // restart iteration on failure
       }
     }
@@ -412,7 +418,7 @@ async function runVU(
 async function runPerfTest(
   flowId: string,
   config: PerfConfig
-): Promise<{ stats: PerfStats; perStep: Record<string, PerfStats>; perfRunId: string }> {
+): Promise<{ stats: PerfStats; checksTotal: number; checksFailed: number; perStep: Record<string, PerfStats>; perfRunId: string }> {
   const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) throw new Error('Flow not found: ' + flowId);
 
@@ -450,12 +456,30 @@ async function runPerfTest(
 
   const stats = calcStats(samples, actualDuration);
 
-  // Per-step breakdown
+  // Per-step breakdown — use all samples so assert/extract steps still show counts
   const perStep: Record<string, PerfStats> = {};
   const stepLabels = [...new Set(samples.map(s => s.label))];
   for (const label of stepLabels) {
     const stepSamples = samples.filter(s => s.label === label);
-    perStep[label] = calcStats(stepSamples, actualDuration);
+    // For HTTP steps: filter by isHttp (real timings). For non-HTTP: use raw count/success.
+    const isHttpStep = stepSamples.some(s => s.isHttp);
+    if (isHttpStep) {
+      perStep[label] = calcStats(stepSamples, actualDuration);
+    } else {
+      // Assertion / extract step — show all samples, latency is trivially 0ms
+      const total = stepSamples.length;
+      const success = stepSamples.filter(s => s.success).length;
+      const failed = total - success;
+      const durations = stepSamples.map(s => s.duration).sort((a, b) => a - b);
+      perStep[label] = {
+        total, success, failed,
+        errorRate: total > 0 ? parseFloat(((failed / total) * 100).toFixed(1)) : 0,
+        avgRps: parseFloat((total / (actualDuration / 1000)).toFixed(1)),
+        p50: calcPercentile(durations, 50), p95: calcPercentile(durations, 95),
+        p99: calcPercentile(durations, 99), min: durations[0] ?? 0,
+        max: durations[durations.length - 1] ?? 0,
+      };
+    }
   }
 
   db.updatePerfRun(perfRunId, {
@@ -465,7 +489,11 @@ async function runPerfTest(
     minMs: stats.min, maxMs: stats.max, perStepStats: perStep,
   });
 
-  return { stats, perStep, perfRunId };
+  const checkSamples = samples.filter(s => !s.isHttp);
+  const checksTotal = checkSamples.length;
+  const checksFailed = checkSamples.filter(s => !s.success).length;
+
+  return { stats, checksTotal, checksFailed, perStep, perfRunId };
 }
 
 // ============================================
@@ -5379,9 +5407,11 @@ function parsePerfArgs(extraArgs: string[]): PerfConfig {
   };
 }
 
-function renderPerfStats(stats: PerfStats, perStep: Record<string, PerfStats>, flowName: string, config: PerfConfig): void {
+function renderPerfStats(stats: PerfStats, checksTotal: number, checksFailed: number, perStep: Record<string, PerfStats>, flowName: string, config: PerfConfig): void {
   const errColor = stats.errorRate > 5 ? chalk.red : stats.errorRate > 1 ? chalk.yellow : chalk.green;
   const p95Color = stats.p95 > 1000 ? chalk.red : stats.p95 > 500 ? chalk.yellow : chalk.green;
+  const checkPassRate = checksTotal > 0 ? parseFloat((((checksTotal - checksFailed) / checksTotal) * 100).toFixed(1)) : 100;
+  const checkColor = checksFailed > 0 ? chalk.red : chalk.green;
 
   divider();
   console.log(chalk.bold.white('\n  PERFORMANCE RESULTS') + chalk.gray(` — ${flowName}`));
@@ -5395,10 +5425,14 @@ function renderPerfStats(stats: PerfStats, perStep: Record<string, PerfStats>, f
   console.log(`  ┌${'─'.repeat(w)}┐`);
   console.log(`  │  ${'Summary'.padEnd(w - 2)}│`);
   console.log(`  ├${'─'.repeat(w)}┤`);
-  console.log(line('Total Requests', chalk.white(stats.total.toLocaleString())));
+  console.log(line('HTTP Requests', chalk.white(stats.total.toLocaleString())));
   console.log(line('Throughput', chalk.cyan(stats.avgRps + ' req/s')));
-  console.log(line('Success Rate', chalk.green(`${(100 - stats.errorRate).toFixed(1)}%  (${stats.success.toLocaleString()})`)));
-  console.log(line('Error Rate', errColor(`${stats.errorRate}%  (${stats.failed.toLocaleString()})`)));
+  console.log(line('HTTP Success', chalk.green(`${(100 - stats.errorRate).toFixed(1)}%  (${stats.success.toLocaleString()})`)));
+  console.log(line('HTTP Errors', errColor(`${stats.errorRate}%  (${stats.failed.toLocaleString()})`)));
+  if (checksTotal > 0) {
+    console.log(line('Checks Passed', checkColor(`${checkPassRate}%  (${(checksTotal - checksFailed).toLocaleString()} / ${checksTotal.toLocaleString()})`)));
+    if (checksFailed > 0) console.log(line('Checks Failed', chalk.red(`${checksFailed.toLocaleString()} assertion failures`)));
+  }
   console.log(`  ├${'─'.repeat(w)}┤`);
   console.log(`  │  ${'Latency'.padEnd(w - 2)}│`);
   console.log(`  ├${'─'.repeat(w)}┤`);
@@ -5446,15 +5480,15 @@ async function runPerfRun(flowId: string, extraArgs: string[]): Promise<void> {
     process.stdout.write(`\r  [${bar}] ${pct}%  ${Math.round(elapsed / 1000)}s / ${config.duration / 1000}s  `);
   }, 250);
 
-  let stats: PerfStats, perStep: Record<string, PerfStats>, perfRunId: string;
+  let stats: PerfStats, checksTotal: number, checksFailed: number, perStep: Record<string, PerfStats>, perfRunId: string;
   try {
-    ({ stats, perStep, perfRunId } = await runPerfTest(flowId, config));
+    ({ stats, checksTotal, checksFailed, perStep, perfRunId } = await runPerfTest(flowId, config));
   } finally {
     clearInterval(progressInterval);
     process.stdout.write('\r' + ' '.repeat(60) + '\r');
   }
 
-  renderPerfStats(stats, perStep, flow.name, config);
+  renderPerfStats(stats, checksTotal, checksFailed, perStep, flow.name, config);
   info('Perf Run ID: ' + chalk.gray(perfRunId.slice(0, 8)));
   info('View details: ' + chalk.cyan(`ghostrun perf:show ${perfRunId.slice(0, 8)}`));
   console.log();
@@ -5549,7 +5583,7 @@ async function runPerfShow(runId: string): Promise<void> {
       avgRps: run.avgRps ?? 0, p50: run.p50 ?? 0, p95: run.p95 ?? 0, p99: run.p99 ?? 0,
       min: run.minMs ?? 0, max: run.maxMs ?? 0,
     };
-    renderPerfStats(stats, run.perStepStats || {}, run.flowName, cfg);
+    renderPerfStats(stats, 0, 0, run.perStepStats || {}, run.flowName, cfg);
   } else {
     warn('Perf run has no stats (may have failed or is still running).');
   }
