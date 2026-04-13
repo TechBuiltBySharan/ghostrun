@@ -10,366 +10,11 @@ import chalk from 'chalk';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
+import { DatabaseManager } from './packages/database/src/manager';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '.';
 const DATA_PATH = path.join(HOME_DIR, '.ghostrun');
-const DB_PATH = path.join(DATA_PATH, 'data', 'ghostrun.db');
-
-// ============================================
-// DATABASE
-// ============================================
-
-class DatabaseManager {
-  private db: Database.Database;
-
-  constructor() {
-    fs.mkdirSync(path.join(DATA_PATH, 'data'), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, 'sessions'), { recursive: true });
-    this.db = new Database(DB_PATH);
-    this.initialize();
-    this.runMigrations();
-  }
-
-  private initialize() {
-    this.db.pragma('foreign_keys = ON');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS flows (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, app_url TEXT,
-        graph TEXT NOT NULL DEFAULT '{}', version TEXT NOT NULL DEFAULT '1.0.0',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      CREATE TABLE IF NOT EXISTS runs (
-        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        started_at TEXT NOT NULL DEFAULT (datetime('now')),
-        completed_at TEXT, duration INTEGER, error_message TEXT, summary TEXT,
-        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS steps (
-        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_number INTEGER NOT NULL,
-        name TEXT NOT NULL, action TEXT NOT NULL, selector TEXT, value TEXT,
-        status TEXT NOT NULL DEFAULT 'pending', duration INTEGER,
-        error_message TEXT, screenshot_path TEXT,
-        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS schedules (
-        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, name TEXT NOT NULL,
-        cron_expression TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
-        last_run_at TEXT, last_run_status TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS suites (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      CREATE TABLE IF NOT EXISTS suite_flows (
-        id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, flow_id TEXT NOT NULL,
-        order_index INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (suite_id) REFERENCES suites(id) ON DELETE CASCADE,
-        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS baselines (
-        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, step_number INTEGER NOT NULL,
-        screenshot_path TEXT NOT NULL, captured_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(flow_id, step_number)
-      );
-      CREATE TABLE IF NOT EXISTS explore_reports (
-        id TEXT PRIMARY KEY, url TEXT NOT NULL, environment TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        report_path TEXT
-      );
-      CREATE TABLE IF NOT EXISTS explore_candidates (
-        id TEXT PRIMARY KEY, report_id TEXT NOT NULL,
-        name TEXT NOT NULL, description TEXT, route TEXT NOT NULL,
-        screenshot_path TEXT, graph TEXT NOT NULL DEFAULT '{}',
-        confirmed INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY (report_id) REFERENCES explore_reports(id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS run_data (
-        id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        variable_name TEXT NOT NULL,
-        variable_value TEXT NOT NULL,
-        step_number INTEGER NOT NULL,
-        UNIQUE(run_id, variable_name),
-        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-      );
-    `);
-  }
-
-  // ---- Flows ----
-  createFlow(data: { name: string; description?: string; appUrl?: string; graph?: object; createdBy?: string }) {
-    const id = uuidv4();
-    const now = new Date().toISOString();
-    const createdBy = data.createdBy || 'human';
-    this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now, createdBy);
-    return this.getFlow(id)!;
-  }
-  verifyFlow(id: string) { this.db.prepare('UPDATE flows SET verified = 1 WHERE id = ?').run(id); }
-  getFlow(id: string) {
-    const r = this.db.prepare('SELECT * FROM flows WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? this.mapFlow(r) : null;
-  }
-  findFlowByPartialId(q: string) {
-    const rows = this.db.prepare('SELECT * FROM flows WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
-    return rows.length === 1 ? this.mapFlow(rows[0]) : null;
-  }
-  findFlowByName(name: string) {
-    const rows = this.db.prepare('SELECT * FROM flows WHERE LOWER(name) LIKE ?').all(`%${name.toLowerCase()}%`) as Record<string, unknown>[];
-    return rows.length === 1 ? this.mapFlow(rows[0]) : null;
-  }
-  listFlows() {
-    return (this.db.prepare('SELECT * FROM flows ORDER BY updated_at DESC').all() as Record<string, unknown>[]).map(r => this.mapFlow(r));
-  }
-  updateFlow(id: string, data: Partial<{ name: string; description: string; appUrl: string; graph: object }>) {
-    const updates: string[] = []; const values: unknown[] = [];
-    if (data.name !== undefined) { updates.push('name = ?'); values.push(data.name); }
-    if (data.description !== undefined) { updates.push('description = ?'); values.push(data.description); }
-    if (data.appUrl !== undefined) { updates.push('app_url = ?'); values.push(data.appUrl); }
-    if (data.graph !== undefined) { updates.push('graph = ?'); values.push(JSON.stringify(data.graph)); }
-    updates.push("updated_at = datetime('now')"); values.push(id);
-    this.db.prepare(`UPDATE flows SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    return this.getFlow(id);
-  }
-  deleteFlow(id: string) { return this.db.prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0; }
-  private mapFlow(r: Record<string, unknown>) {
-    return { id: r.id as string, name: r.name as string, description: r.description as string | null,
-      appUrl: r.app_url as string | null, graph: r.graph as string,
-      createdAt: new Date(r.created_at as string), updatedAt: new Date(r.updated_at as string),
-      createdBy: r.created_by as string || 'human',
-      verified: Boolean(r.verified) };
-  }
-
-  // ---- Runs ----
-  createRun(flowId: string) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO runs (id, flow_id, status, started_at) VALUES (?, ?, 'running', datetime('now'))`).run(id, flowId);
-    return this.getRun(id)!;
-  }
-  getRun(id: string) {
-    const r = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? this.mapRun(r) : null;
-  }
-  findRunByPartialId(q: string) {
-    const rows = this.db.prepare('SELECT * FROM runs WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
-    return rows.length === 1 ? this.mapRun(rows[0]) : null;
-  }
-  listRuns(flowId?: string, limit = 50) {
-    const sql = flowId ? 'SELECT * FROM runs WHERE flow_id = ? ORDER BY started_at DESC LIMIT ?' : 'SELECT * FROM runs ORDER BY started_at DESC LIMIT ?';
-    const params = flowId ? [flowId, limit] : [limit];
-    return (this.db.prepare(sql).all(...params) as Record<string, unknown>[]).map(r => this.mapRun(r));
-  }
-  updateRun(id: string, data: Partial<{ status: string; completedAt: Date; duration: number; errorMessage: string; summary: string }>) {
-    const updates: string[] = []; const values: unknown[] = [];
-    if (data.status !== undefined) { updates.push('status = ?'); values.push(data.status); }
-    if (data.completedAt !== undefined) { updates.push('completed_at = ?'); values.push(data.completedAt.toISOString()); }
-    if (data.duration !== undefined) { updates.push('duration = ?'); values.push(data.duration); }
-    if (data.errorMessage !== undefined) { updates.push('error_message = ?'); values.push(data.errorMessage); }
-    if (data.summary !== undefined) { updates.push('summary = ?'); values.push(data.summary); }
-    values.push(id);
-    if (updates.length > 0) this.db.prepare(`UPDATE runs SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    return this.getRun(id);
-  }
-  private mapRun(r: Record<string, unknown>) {
-    return { id: r.id as string, flowId: r.flow_id as string, status: r.status as string,
-      startedAt: new Date(r.started_at as string), completedAt: r.completed_at ? new Date(r.completed_at as string) : null,
-      duration: r.duration as number | null, errorMessage: r.error_message as string | null, summary: r.summary as string | null };
-  }
-
-  // ---- Steps ----
-  createStep(data: { runId: string; stepNumber: number; name: string; action: string; selector?: string; value?: string }) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO steps (id, run_id, step_number, name, action, selector, value, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`)
-      .run(id, data.runId, data.stepNumber, data.name, data.action, data.selector || null, data.value || null);
-    return this.getStep(id)!;
-  }
-  getStep(id: string) {
-    const r = this.db.prepare('SELECT * FROM steps WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? this.mapStep(r) : null;
-  }
-  listSteps(runId: string) {
-    return (this.db.prepare('SELECT * FROM steps WHERE run_id = ? ORDER BY step_number').all(runId) as Record<string, unknown>[]).map(r => this.mapStep(r));
-  }
-  updateStep(id: string, data: Partial<{ status: string; duration: number; errorMessage: string; screenshotPath: string; diffPercent: number }>) {
-    const updates: string[] = []; const values: unknown[] = [];
-    if (data.status !== undefined) { updates.push('status = ?'); values.push(data.status); }
-    if (data.duration !== undefined) { updates.push('duration = ?'); values.push(data.duration); }
-    if (data.errorMessage !== undefined) { updates.push('error_message = ?'); values.push(data.errorMessage); }
-    if (data.screenshotPath !== undefined) { updates.push('screenshot_path = ?'); values.push(data.screenshotPath); }
-    if (data.diffPercent !== undefined) { updates.push('diff_percent = ?'); values.push(data.diffPercent); }
-    values.push(id);
-    if (updates.length > 0) this.db.prepare(`UPDATE steps SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    return this.getStep(id);
-  }
-  private mapStep(r: Record<string, unknown>) {
-    return { id: r.id as string, runId: r.run_id as string, stepNumber: r.step_number as number,
-      name: r.name as string, action: r.action as string, selector: r.selector as string | null,
-      value: r.value as string | null, status: r.status as string, duration: r.duration as number | null,
-      errorMessage: r.error_message as string | null, screenshotPath: r.screenshot_path as string | null,
-      diffPercent: r.diff_percent as number | null };
-  }
-  getScreenshotsPath(runId: string) {
-    const dir = path.join(DATA_PATH, 'screenshots', runId);
-    fs.mkdirSync(dir, { recursive: true });
-    return dir;
-  }
-
-  // ---- Schedules ----
-  createSchedule(data: { flowId: string; name: string; cronExpression: string }) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO schedules (id, flow_id, name, cron_expression) VALUES (?, ?, ?, ?)`)
-      .run(id, data.flowId, data.name, data.cronExpression);
-    return this.getSchedule(id)!;
-  }
-  getSchedule(id: string) {
-    const r = this.db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? this.mapSchedule(r) : null;
-  }
-  listSchedules() {
-    return (this.db.prepare('SELECT s.*, f.name as flow_name FROM schedules s JOIN flows f ON s.flow_id = f.id ORDER BY s.created_at DESC').all() as Record<string, unknown>[]).map(r => this.mapSchedule(r));
-  }
-  deleteSchedule(id: string) { return this.db.prepare('DELETE FROM schedules WHERE id = ?').run(id).changes > 0; }
-  updateScheduleLastRun(id: string, status: string) {
-    this.db.prepare(`UPDATE schedules SET last_run_at = datetime('now'), last_run_status = ? WHERE id = ?`).run(status, id);
-  }
-  private mapSchedule(r: Record<string, unknown>) {
-    return { id: r.id as string, flowId: r.flow_id as string, flowName: r.flow_name as string | undefined,
-      name: r.name as string, cronExpression: r.cron_expression as string, enabled: Boolean(r.enabled),
-      lastRunAt: r.last_run_at ? new Date(r.last_run_at as string) : null, lastRunStatus: r.last_run_status as string | null };
-  }
-
-  // ---- DB migrations ----
-  private runMigrations() {
-    try { this.db.exec('ALTER TABLE steps ADD COLUMN diff_percent REAL'); } catch {}
-    try { this.db.exec("ALTER TABLE flows ADD COLUMN created_by TEXT NOT NULL DEFAULT 'human'"); } catch {}
-    try { this.db.exec('ALTER TABLE flows ADD COLUMN verified INTEGER NOT NULL DEFAULT 0'); } catch {}
-    try { this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))"); } catch {}
-  }
-
-  // ---- Suites ----
-  createSuite(data: { name: string; description?: string }) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO suites (id, name, description) VALUES (?, ?, ?)`).run(id, data.name, data.description || null);
-    return this.getSuite(id)!;
-  }
-  getSuite(id: string) {
-    const r = this.db.prepare('SELECT * FROM suites WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? { id: r.id as string, name: r.name as string, description: r.description as string | null, createdAt: new Date(r.created_at as string) } : null;
-  }
-  findSuiteByNameOrId(q: string) {
-    const byId = this.db.prepare('SELECT * FROM suites WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
-    if (byId.length === 1) return this.getSuite(byId[0].id as string);
-    const byName = this.db.prepare('SELECT * FROM suites WHERE LOWER(name) LIKE ?').all(`%${q.toLowerCase()}%`) as Record<string, unknown>[];
-    if (byName.length === 1) return this.getSuite(byName[0].id as string);
-    if (byName.length > 1) return this.getSuite(byName[0].id as string);
-    return null;
-  }
-  listSuites() {
-    return (this.db.prepare('SELECT * FROM suites ORDER BY created_at DESC').all() as Record<string, unknown>[]).map(r => ({ id: r.id as string, name: r.name as string, description: r.description as string | null, createdAt: new Date(r.created_at as string) }));
-  }
-  deleteSuite(id: string) { return this.db.prepare('DELETE FROM suites WHERE id = ?').run(id).changes > 0; }
-  addFlowToSuite(suiteId: string, flowId: string) {
-    const count = (this.db.prepare('SELECT COUNT(*) as c FROM suite_flows WHERE suite_id = ?').get(suiteId) as { c: number }).c;
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO suite_flows (id, suite_id, flow_id, order_index) VALUES (?, ?, ?, ?)`).run(id, suiteId, flowId, count);
-  }
-  removeFlowFromSuite(suiteId: string, flowId: string) {
-    this.db.prepare('DELETE FROM suite_flows WHERE suite_id = ? AND flow_id = ?').run(suiteId, flowId);
-  }
-  getSuiteFlows(suiteId: string) {
-    return (this.db.prepare('SELECT sf.*, f.name as flow_name FROM suite_flows sf JOIN flows f ON sf.flow_id = f.id WHERE sf.suite_id = ? ORDER BY sf.order_index').all(suiteId) as Record<string, unknown>[]).map(r => ({ id: r.id as string, suiteId: r.suite_id as string, flowId: r.flow_id as string, flowName: r.flow_name as string, orderIndex: r.order_index as number }));
-  }
-
-  // ---- Baselines ----
-  setBaseline(flowId: string, stepNumber: number, screenshotPath: string) {
-    const existing = this.db.prepare('SELECT id FROM baselines WHERE flow_id = ? AND step_number = ?').get(flowId, stepNumber) as { id: string } | undefined;
-    if (existing) {
-      this.db.prepare('UPDATE baselines SET screenshot_path = ?, captured_at = datetime(\'now\') WHERE id = ?').run(screenshotPath, existing.id);
-    } else {
-      this.db.prepare('INSERT INTO baselines (id, flow_id, step_number, screenshot_path) VALUES (?, ?, ?, ?)').run(uuidv4(), flowId, stepNumber, screenshotPath);
-    }
-  }
-  getBaseline(flowId: string, stepNumber: number) {
-    return this.db.prepare('SELECT * FROM baselines WHERE flow_id = ? AND step_number = ?').get(flowId, stepNumber) as { id: string; flow_id: string; step_number: number; screenshot_path: string; captured_at: string } | undefined;
-  }
-  clearBaselines(flowId: string) { this.db.prepare('DELETE FROM baselines WHERE flow_id = ?').run(flowId); }
-  listBaselines(flowId: string) {
-    return (this.db.prepare('SELECT * FROM baselines WHERE flow_id = ? ORDER BY step_number').all(flowId) as Record<string, unknown>[]).map(r => ({ stepNumber: r.step_number as number, screenshotPath: r.screenshot_path as string, capturedAt: new Date(r.captured_at as string) }));
-  }
-
-  // ---- Explore Reports ----
-  createExploreReport(url: string, environment: string) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO explore_reports (id, url, environment, status) VALUES (?, ?, ?, 'pending')`).run(id, url, environment);
-    return this.getExploreReport(id)!;
-  }
-  getExploreReport(id: string) {
-    const r = this.db.prepare('SELECT * FROM explore_reports WHERE id = ?').get(id) as Record<string, unknown> | undefined;
-    return r ? { id: r.id as string, url: r.url as string, environment: r.environment as string, status: r.status as string, reportPath: r.report_path as string | null } : null;
-  }
-  listExploreReports() {
-    return (this.db.prepare('SELECT * FROM explore_reports ORDER BY rowid DESC LIMIT 20').all() as Record<string, unknown>[])
-      .map(r => ({ id: r.id as string, url: r.url as string, status: r.status as string, reportPath: r.report_path as string | null, createdAt: r.created_at as string | null }));
-  }
-  findExploreReportByPartialId(q: string) {
-    const rows = this.db.prepare('SELECT * FROM explore_reports WHERE id LIKE ?').all(q + '%') as Record<string, unknown>[];
-    if (rows.length !== 1) return null;
-    const r = rows[0];
-    return { id: r.id as string, url: r.url as string, environment: r.environment as string, status: r.status as string, reportPath: r.report_path as string | null };
-  }
-  updateExploreReport(id: string, data: { status?: string; reportPath?: string }) {
-    const updates: string[] = []; const values: unknown[] = [];
-    if (data.status) { updates.push('status = ?'); values.push(data.status); }
-    if (data.reportPath) { updates.push('report_path = ?'); values.push(data.reportPath); }
-    values.push(id);
-    if (updates.length > 0) this.db.prepare(`UPDATE explore_reports SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-  }
-  createExploreCandidate(data: { reportId: string; name: string; description: string; route: string; screenshotPath?: string; graph: object }) {
-    const id = uuidv4();
-    this.db.prepare(`INSERT INTO explore_candidates (id, report_id, name, description, route, screenshot_path, graph) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, data.reportId, data.name, data.description, data.route, data.screenshotPath || null, JSON.stringify(data.graph));
-    return id;
-  }
-  listExploreCandidates(reportId: string) {
-    return (this.db.prepare('SELECT * FROM explore_candidates WHERE report_id = ? ORDER BY rowid').all(reportId) as Record<string, unknown>[])
-      .map(r => ({ id: r.id as string, reportId: r.report_id as string, name: r.name as string, description: r.description as string, route: r.route as string, screenshotPath: r.screenshot_path as string | null, graph: r.graph as string, confirmed: Boolean(r.confirmed) }));
-  }
-  confirmExploreCandidate(id: string) {
-    this.db.prepare('UPDATE explore_candidates SET confirmed = 1 WHERE id = ?').run(id);
-  }
-
-  close() { this.db.close(); }
-
-  // ---- Run Data (extracted variables) ----
-  saveRunData(runId: string, stepNumber: number, variableName: string, value: string) {
-    const id = uuidv4();
-    this.db.prepare('INSERT OR REPLACE INTO run_data (id, run_id, step_number, variable_name, variable_value) VALUES (?,?,?,?,?)')
-      .run(id, runId, stepNumber, variableName, value);
-  }
-  getRunData(runId: string): Array<{variableName: string; variableValue: string; stepNumber: number}> {
-    return (this.db.prepare('SELECT * FROM run_data WHERE run_id = ? ORDER BY step_number').all(runId) as any[])
-      .map(r => ({ variableName: r.variable_name, variableValue: r.variable_value, stepNumber: r.step_number }));
-  }
-
-  // ---- Flow Stats ----
-  getFlowStats(flowId: string): { totalRuns: number; passRate: number; lastRunStatus: string | null; lastRunAt: string | null } {
-    const r = this.db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) as passed, MAX(started_at) as last_run_at FROM runs WHERE flow_id = ?").get(flowId) as any;
-    const last = this.db.prepare('SELECT status FROM runs WHERE flow_id = ? ORDER BY started_at DESC LIMIT 1').get(flowId) as any;
-    return {
-      totalRuns: r?.total || 0,
-      passRate: r?.total > 0 ? (r.passed || 0) / r.total : 0,
-      lastRunStatus: last?.status || null,
-      lastRunAt: r?.last_run_at || null,
-    };
-  }
-}
 
 // ============================================
 // PII SANITIZER
@@ -385,6 +30,227 @@ function sanitizePII(text: string): string {
   text = text.replace(/\b(?:password|passwd|pwd)\s*[:=]\s*\S+/gi, 'password=[REDACTED]');
   text = text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[SSN]');
   return text;
+}
+
+// ============================================
+// API TESTING — EXECUTION CONTEXT
+// ============================================
+
+interface ApiResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: any;
+  bodyText: string;
+  responseTimeMs: number;
+  url: string;
+  method: string;
+}
+
+interface ExecutionContext {
+  variables: Record<string, string>;
+  lastResponse?: ApiResponse;
+  environmentName?: string;
+}
+
+function resolveVarsDeep(value: unknown, ctx: ExecutionContext): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{(\w+)\}\}/g, (_, k) => ctx.variables[k] ?? '');
+  }
+  if (Array.isArray(value)) return value.map(v => resolveVarsDeep(v, ctx));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = resolveVarsDeep(v, ctx);
+    return out;
+  }
+  return value;
+}
+
+function getJsonPath(obj: unknown, path: string): unknown {
+  // Simple dot/bracket notation: $.user.name, $.items[0].id, $.token
+  const parts = path.replace(/^\$\.?/, '').split(/\.|\[(\d+)\]/).filter(p => p !== undefined && p !== '');
+  let cur: unknown = obj;
+  for (const part of parts) {
+    if (cur === null || cur === undefined) return undefined;
+    if (typeof cur === 'object') cur = (cur as Record<string, unknown>)[part];
+    else return undefined;
+  }
+  return cur;
+}
+
+async function executeHttpRequest(node: Record<string, unknown>, ctx: ExecutionContext, runId: string, stepNumber: number): Promise<void> {
+  const method = ((node.method as string) || 'GET').toUpperCase();
+  const url = resolveVarsDeep(node.url as string, ctx) as string;
+  if (!url) throw new Error('http:request requires a url');
+
+  // Build headers
+  const rawHeaders = (node.headers as Record<string, string>) || {};
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawHeaders)) {
+    headers[k] = resolveVarsDeep(v, ctx) as string;
+  }
+
+  // Auth injection
+  const auth = node.auth as Record<string, string> | undefined;
+  if (auth?.type === 'bearer' && auth.token) {
+    headers['Authorization'] = `Bearer ${resolveVarsDeep(auth.token, ctx)}`;
+  } else if (auth?.type === 'basic' && auth.username) {
+    const creds = Buffer.from(`${resolveVarsDeep(auth.username, ctx)}:${resolveVarsDeep(auth.password || '', ctx)}`).toString('base64');
+    headers['Authorization'] = `Basic ${creds}`;
+  } else if (auth?.type === 'apikey' && auth.key) {
+    const headerName = auth.header || 'X-API-Key';
+    headers[headerName] = resolveVarsDeep(auth.key, ctx) as string;
+  }
+
+  // Build body
+  let body: string | undefined;
+  if (node.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+    const resolvedBody = resolveVarsDeep(node.body, ctx);
+    body = typeof resolvedBody === 'string' ? resolvedBody : JSON.stringify(resolvedBody);
+    if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  }
+
+  const start = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(url, { method, headers, body });
+  } catch (e) {
+    db.saveApiResponse({ runId, stepNumber, method, url, errorMessage: String(e) });
+    throw new Error(`HTTP request failed: ${e}`);
+  }
+  const responseTimeMs = Date.now() - start;
+
+  const responseHeaders: Record<string, string> = {};
+  response.headers.forEach((v, k) => { responseHeaders[k] = v; });
+
+  let bodyText = '';
+  let bodyJson: unknown = null;
+  try { bodyText = await response.text(); } catch {}
+  try { bodyJson = JSON.parse(bodyText); } catch {}
+
+  ctx.lastResponse = {
+    status: response.status,
+    headers: responseHeaders,
+    body: bodyJson ?? bodyText,
+    bodyText,
+    responseTimeMs,
+    url,
+    method,
+  };
+
+  db.saveApiResponse({
+    runId, stepNumber, method, url,
+    statusCode: response.status,
+    responseTimeMs,
+    responseHeaders,
+    responseBody: bodyText.slice(0, 10000),
+  });
+
+  // Auto-extract variables from response if 'extract' map is specified
+  const extract = node.extract as Record<string, string> | undefined;
+  if (extract && bodyJson) {
+    for (const [varName, jsonPath] of Object.entries(extract)) {
+      const val = getJsonPath(bodyJson, jsonPath);
+      if (val !== undefined) {
+        ctx.variables[varName] = String(val);
+        db.saveRunData(runId, stepNumber, varName, String(val));
+      }
+    }
+  }
+}
+
+async function executeApiAssert(node: Record<string, unknown>, ctx: ExecutionContext): Promise<void> {
+  const lastResp = ctx.lastResponse;
+  if (!lastResp) throw new Error('assert:response — no HTTP response in context (run http:request first)');
+
+  const assertType = (node.assert as string) || 'status';
+  const expected = node.expected !== undefined ? resolveVarsDeep(node.expected, ctx) : undefined;
+
+  switch (assertType) {
+    case 'status': {
+      const exp = Number(expected ?? 200);
+      if (lastResp.status !== exp) {
+        throw new Error(`Expected status ${exp}, got ${lastResp.status} — ${lastResp.url}`);
+      }
+      break;
+    }
+    case 'status:range': {
+      const min = Number(node.min ?? 200), max = Number(node.max ?? 299);
+      if (lastResp.status < min || lastResp.status > max) {
+        throw new Error(`Status ${lastResp.status} outside range [${min}-${max}]`);
+      }
+      break;
+    }
+    case 'body:contains': {
+      const needle = String(expected ?? '');
+      if (!lastResp.bodyText.includes(needle)) {
+        throw new Error(`Response body does not contain "${needle}"`);
+      }
+      break;
+    }
+    case 'body:equals': {
+      const expStr = typeof expected === 'object' ? JSON.stringify(expected) : String(expected ?? '');
+      const gotStr = typeof lastResp.body === 'object' ? JSON.stringify(lastResp.body) : lastResp.bodyText;
+      if (gotStr !== expStr) {
+        throw new Error(`Response body mismatch.\nExpected: ${expStr.slice(0, 200)}\nGot:      ${gotStr.slice(0, 200)}`);
+      }
+      break;
+    }
+    case 'json:path': {
+      const jpath = (node.path as string) || '';
+      const val = getJsonPath(lastResp.body, jpath);
+      const exp = resolveVarsDeep(node.expected, ctx);
+      if (String(val) !== String(exp)) {
+        throw new Error(`JSON path "${jpath}": expected "${exp}", got "${val}"`);
+      }
+      break;
+    }
+    case 'json:exists': {
+      const jpath = (node.path as string) || '';
+      const val = getJsonPath(lastResp.body, jpath);
+      if (val === undefined || val === null) {
+        throw new Error(`JSON path "${jpath}" does not exist in response`);
+      }
+      break;
+    }
+    case 'header': {
+      const headerName = (node.header as string || '').toLowerCase();
+      const headerVal = lastResp.headers[headerName];
+      if (expected !== undefined && String(headerVal) !== String(expected)) {
+        throw new Error(`Header "${headerName}": expected "${expected}", got "${headerVal}"`);
+      } else if (!headerVal) {
+        throw new Error(`Header "${headerName}" not present in response`);
+      }
+      break;
+    }
+    case 'time': {
+      const maxMs = Number(expected ?? 2000);
+      if (lastResp.responseTimeMs > maxMs) {
+        throw new Error(`Response took ${lastResp.responseTimeMs}ms, expected < ${maxMs}ms`);
+      }
+      break;
+    }
+    default:
+      throw new Error(`Unknown assert type: "${assertType}"`);
+  }
+}
+
+function executeSetVariable(node: Record<string, unknown>, ctx: ExecutionContext, runId: string, stepNumber: number): void {
+  const varName = node.variable as string;
+  const value = resolveVarsDeep(node.value, ctx) as string;
+  if (!varName) throw new Error('set:variable requires a variable name');
+  ctx.variables[varName] = String(value ?? '');
+  db.saveRunData(runId, stepNumber, varName, String(value ?? ''));
+}
+
+function executeExtractJson(node: Record<string, unknown>, ctx: ExecutionContext, runId: string, stepNumber: number): void {
+  const varName = node.variable as string;
+  const jsonPath = node.path as string;
+  if (!varName || !jsonPath) throw new Error('extract:json requires variable and path');
+  if (!ctx.lastResponse) throw new Error('extract:json — no HTTP response in context');
+  const val = getJsonPath(ctx.lastResponse.body, jsonPath);
+  if (val === undefined) throw new Error(`JSON path "${jsonPath}" not found in response`);
+  ctx.variables[varName] = String(val);
+  db.saveRunData(runId, stepNumber, varName, String(val));
 }
 
 // ============================================
@@ -897,24 +763,43 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
 
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
-  const browser = await chromium.launch({ headless: !opts?.visible });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-
-  if (opts?.sessionLoad) {
-    try {
-      const count = await loadSession(context, opts.sessionLoad);
-      if (!opts?.quiet) info(`Session: ${chalk.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
-    } catch (e) { warn(String(e)); }
-  }
-
-  if (startUrl) await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
   const actionNodes = graph.nodes.filter(n => n.type === 'action') as Array<Record<string, unknown>>;
   let stepNum = 1, failed = false;
   let failedStepInfo: { name: string; action: string; selector?: string | null; errorMessage: string } | null = null;
   const runStart = Date.now();
   const runVars: Record<string, string> = { ...(vars || {}) };
+
+  // Load active environment variables into context
+  const activeEnv = db.getActiveEnvironment();
+  if (activeEnv) {
+    Object.assign(runVars, activeEnv.variables);
+    if (activeEnv.baseUrl && !runVars['__baseUrl']) runVars['__baseUrl'] = activeEnv.baseUrl;
+  }
+  const ctx: ExecutionContext = { variables: runVars, environmentName: activeEnv?.name };
+
+  // Determine if any browser actions exist (if not, skip browser entirely)
+  const API_ONLY_ACTIONS = new Set(['http:request','assert:response','assert:status','assert:body','assert:header','assert:time','set:variable','extract:json','env:switch']);
+  const hasBrowserActions = actionNodes.some(n => !API_ONLY_ACTIONS.has(n.action as string));
+
+  let browser: import('playwright').Browser | null = null;
+  let browserCtx: import('playwright').BrowserContext | null = null;
+  let page: import('playwright').Page | null = null;
+
+  if (hasBrowserActions) {
+    browser = await chromium.launch({ headless: !opts?.visible });
+    browserCtx = await browser.newContext();
+    page = await browserCtx.newPage();
+
+    if (opts?.sessionLoad) {
+      try {
+        const count = await loadSession(browserCtx, opts.sessionLoad);
+        if (!opts?.quiet) info(`Session: ${chalk.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+      } catch (e) { warn(String(e)); }
+    }
+
+    if (startUrl) await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  }
 
   // Load pixelmatch for baseline diffs (optional)
   let PNG: typeof import('pngjs').PNG | null = null;
@@ -940,37 +825,43 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
         value: node.value ? resolveVars(node.value as string, runVars) : node.value,
         selector: node.selector ? resolveVars(node.selector as string, runVars) : node.selector,
       };
-      await executeAction(page, action, resolvedNode);
+      await executeAction(page, action, resolvedNode, ctx, run.id, stepNum);
       // Auto wait-for-nav after clicks — resolves immediately if no navigation occurred
-      if (action === 'click') {
+      if (action === 'click' && page) {
         await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
       }
       const duration = Date.now() - t;
-      const screenshot = await page.screenshot();
-      const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
-      fs.writeFileSync(sp, screenshot);
 
-      // Visual baseline diff
-      let diffPercent: number | undefined;
-      const baseline = db.getBaseline(flow!.id, stepNum);
-      if (baseline && PNG && pixelmatch && fs.existsSync(baseline.screenshot_path)) {
-        try {
-          const img1 = PNG.sync.read(fs.readFileSync(baseline.screenshot_path));
-          const img2 = PNG.sync.read(screenshot);
-          const w = Math.min(img1.width, img2.width);
-          const h = Math.min(img1.height, img2.height);
-          const diff = new PNG({ width: w, height: h });
-          const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
-          diffPercent = parseFloat(((numDiff / (w * h)) * 100).toFixed(1));
-          if (diffPercent > 5) {
-            log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
-          }
-        } catch { /* skip diff on error */ }
-      }
+      const isApiAction = API_ONLY_ACTIONS.has(action);
+      if (!isApiAction && page) {
+        const screenshot = await page.screenshot();
+        const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
+        fs.writeFileSync(sp, screenshot);
 
-      db.updateStep(step.id, { status: 'passed', duration, screenshotPath: sp, ...(diffPercent !== undefined ? { diffPercent } : {}) });
-      if (diffPercent !== undefined && diffPercent > 5) {
-        db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
+        // Visual baseline diff
+        let diffPercent: number | undefined;
+        const baseline = db.getBaseline(flow!.id, stepNum);
+        if (baseline && PNG && pixelmatch && fs.existsSync(baseline.screenshot_path)) {
+          try {
+            const img1 = PNG.sync.read(fs.readFileSync(baseline.screenshot_path));
+            const img2 = PNG.sync.read(screenshot);
+            const w = Math.min(img1.width, img2.width);
+            const h = Math.min(img1.height, img2.height);
+            const diff = new PNG({ width: w, height: h });
+            const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
+            diffPercent = parseFloat(((numDiff / (w * h)) * 100).toFixed(1));
+            if (diffPercent > 5) {
+              log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
+            }
+          } catch { /* skip diff on error */ }
+        }
+
+        db.updateStep(step.id, { status: 'passed', duration, screenshotPath: sp, ...(diffPercent !== undefined ? { diffPercent } : {}) });
+        if (diffPercent !== undefined && diffPercent > 5) {
+          db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
+        }
+      } else {
+        db.updateStep(step.id, { status: 'passed', duration });
       }
       log(chalk.green(`      ✓ passed`) + chalk.gray(` (${duration}ms)`));
 
@@ -986,12 +877,12 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
       let errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
 
       // Healing selectors: try AI-suggested selector on click/fill/select failures
-      if (['click', 'fill', 'select'].includes(action)) {
+      if (['click', 'fill', 'select'].includes(action) && page) {
         const healed = await attemptHeal(page, label, node.selector as string, action);
         if (healed) {
           try {
             const healedNode = { ...node, selector: healed };
-            await executeAction(page, action, healedNode);
+            await executeAction(page, action, healedNode, ctx, run.id, stepNum);
             if (action === 'click') await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
             const healDuration = Date.now() - t;
             const screenshot = await page.screenshot();
@@ -1007,10 +898,14 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
       }
 
       try {
-        const screenshot = await page.screenshot();
-        const sp = path.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
-        fs.writeFileSync(sp, screenshot);
-        db.updateStep(step.id, { status: 'failed', duration, errorMessage, screenshotPath: sp });
+        if (page) {
+          const screenshot = await page.screenshot();
+          const sp = path.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
+          fs.writeFileSync(sp, screenshot);
+          db.updateStep(step.id, { status: 'failed', duration, errorMessage, screenshotPath: sp });
+        } else {
+          db.updateStep(step.id, { status: 'failed', duration, errorMessage });
+        }
       } catch { db.updateStep(step.id, { status: 'failed', duration, errorMessage }); }
       log(chalk.red(`      ✗ failed (${duration}ms)`));
       log(chalk.red(`        └─ ${errorMessage}`));
@@ -1022,14 +917,14 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
     stepNum++;
   }
 
-  if (opts?.sessionSave) {
+  if (opts?.sessionSave && browserCtx) {
     try {
-      const count = await saveSession(context, opts.sessionSave);
+      const count = await saveSession(browserCtx, opts.sessionSave);
       if (!opts?.quiet) success(`Session saved: ${chalk.cyan(opts.sessionSave)} (${count} cookies)`);
     } catch (e) { warn(`Could not save session: ${e}`); }
   }
 
-  await browser.close();
+  if (browser) await browser.close();
 
   const totalDuration = Date.now() - runStart;
   let summary: string | null = null;
@@ -1088,44 +983,46 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
 }
 
-async function executeAction(page: import('playwright').Page, action: string, node: Record<string, unknown>) {
+async function executeAction(page: import('playwright').Page | null, action: string, node: Record<string, unknown>, ctx?: ExecutionContext, runId?: string, stepNumber?: number) {
+  // p is a non-null alias used by browser action cases; API-only cases don't use it
+  const p = page as import('playwright').Page;
   switch (action) {
-    case 'navigate': await page.goto((node.url || node.value) as string, { waitUntil: 'domcontentloaded', timeout: 15000 }); break;
-    case 'click':    await page.click(node.selector as string, { timeout: 10000 }); break;
-    case 'fill':     await page.fill(node.selector as string, sanitizePII((node.value as string) || ''), { timeout: 10000 }); break;
-    case 'select':   await page.selectOption(node.selector as string, (node.value as string) || '', { timeout: 10000 }); break;
+    case 'navigate': await p.goto((node.url || node.value) as string, { waitUntil: 'domcontentloaded', timeout: 15000 }); break;
+    case 'click':    await p.click(node.selector as string, { timeout: 10000 }); break;
+    case 'fill':     await p.fill(node.selector as string, sanitizePII((node.value as string) || ''), { timeout: 10000 }); break;
+    case 'select':   await p.selectOption(node.selector as string, (node.value as string) || '', { timeout: 10000 }); break;
     case 'check':
-      if (node.value === 'true') await page.check(node.selector as string, { timeout: 10000 });
-      else await page.uncheck(node.selector as string, { timeout: 10000 });
+      if (node.value === 'true') await p.check(node.selector as string, { timeout: 10000 });
+      else await p.uncheck(node.selector as string, { timeout: 10000 });
       break;
-    case 'wait':     await page.waitForSelector(node.selector as string, { timeout: 10000 }); break;
-    case 'press':    await page.press(node.selector as string, (node.value as string) || 'Enter'); break;
+    case 'wait':     await p.waitForSelector(node.selector as string, { timeout: 10000 }); break;
+    case 'press':    await p.press(node.selector as string, (node.value as string) || 'Enter'); break;
     case 'assert:text': {
       // Use first() to handle multiple matches, or fall back to body text check
       const val = node.value as string;
-      const count = await page.getByText(val, { exact: false }).count();
+      const count = await p.getByText(val, { exact: false }).count();
       const visible = count > 0
-        ? await page.getByText(val, { exact: false }).first().isVisible({ timeout: 5000 }).catch(() => false)
+        ? await p.getByText(val, { exact: false }).first().isVisible({ timeout: 5000 }).catch(() => false)
         : false;
       if (!visible) {
         // Final fallback: check raw body text
-        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+        const bodyText = await p.evaluate(() => document.body.innerText).catch(() => '');
         if (!bodyText.includes(val)) throw new Error(`assert:text failed — "${val}" not visible on page`);
       }
       break;
     }
     case 'assert:url': {
-      const currentUrl = page.url();
+      const currentUrl = p.url();
       if (!currentUrl.includes(node.value as string)) throw new Error(`assert:url failed — URL "${currentUrl}" does not contain "${node.value}"`);
       break;
     }
     case 'assert:element': {
-      const count = await page.locator(node.selector as string).count();
+      const count = await p.locator(node.selector as string).count();
       if (count === 0) throw new Error(`assert:element failed — selector "${node.selector}" not found`);
       break;
     }
     case 'assert:title': {
-      const title = await page.title();
+      const title = await p.title();
       if (!title.toLowerCase().includes((node.value as string).toLowerCase())) throw new Error(`assert:title failed — title "${title}" does not contain "${node.value}"`);
       break;
     }
@@ -1139,43 +1036,43 @@ async function executeAction(page: import('playwright').Page, action: string, no
       let extractedValue = '';
       if (selector) {
         try {
-          extractedValue = await page.locator(selector).first().innerText({ timeout: 10000 });
+          extractedValue = await p.locator(selector).first().innerText({ timeout: 10000 });
         } catch {
-          extractedValue = await page.locator(selector).first().getAttribute('value') || '';
+          extractedValue = await p.locator(selector).first().getAttribute('value') || '';
         }
       } else if (node.attribute && node.selector) {
-        extractedValue = await page.locator(node.selector as string).first().getAttribute(node.attribute as string) || '';
+        extractedValue = await p.locator(node.selector as string).first().getAttribute(node.attribute as string) || '';
       }
       (node as any).__extracted = { variable, value: extractedValue.trim() };
       break;
     }
     case 'scroll:bottom':
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await new Promise(r => setTimeout(r, 1500));
       break;
     case 'scroll:up':
-      await page.evaluate(() => window.scrollTo(0, 0));
+      await p.evaluate(() => window.scrollTo(0, 0));
       break;
     case 'scroll:load': {
       // Scroll to bottom N times, waiting for new content each time (infinite scroll)
       const times = parseInt((node.value as string) || '5', 10);
       for (let i = 0; i < times; i++) {
-        const prevHeight = await page.evaluate(() => document.body.scrollHeight);
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        const prevHeight = await p.evaluate(() => document.body.scrollHeight);
+        await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await new Promise(r => setTimeout(r, 2000));
-        const newHeight = await page.evaluate(() => document.body.scrollHeight);
+        const newHeight = await p.evaluate(() => document.body.scrollHeight);
         if (newHeight === prevHeight) break; // no more content loaded
       }
       break;
     }
     case 'next:page': {
       const nextSel = (node.selector as string) || 'a[rel="next"], [aria-label="Next page"], [aria-label="Next"], button:has-text("Next"), .next-page, .pagination-next';
-      await page.click(nextSel, { timeout: 10000 });
-      await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
+      await p.click(nextSel, { timeout: 10000 });
+      await p.waitForLoadState('domcontentloaded', { timeout: 15000 });
       break;
     }
     case 'hover':
-      await page.hover(node.selector as string, { timeout: 10000 });
+      await p.hover(node.selector as string, { timeout: 10000 });
       break;
     case 'screenshot':
       // No-op — screenshots are always taken after each step
@@ -1183,43 +1080,43 @@ async function executeAction(page: import('playwright').Page, action: string, no
 
     // ── Additional interactions ────────────────────────────────────────
     case 'dblclick':
-      await page.dblclick(node.selector as string, { timeout: 10000 });
+      await p.dblclick(node.selector as string, { timeout: 10000 });
       break;
 
     case 'type': {
       // Slow character-by-character typing (for autocomplete, debounced inputs)
       const delay = parseInt((node.delay as string) || '50', 10);
-      await page.type(node.selector as string, sanitizePII((node.value as string) || ''), { delay });
+      await p.type(node.selector as string, sanitizePII((node.value as string) || ''), { delay });
       break;
     }
 
     case 'clear':
-      await page.fill(node.selector as string, '', { timeout: 10000 });
+      await p.fill(node.selector as string, '', { timeout: 10000 });
       break;
 
     case 'upload': {
       // File upload — value = comma-separated file paths
       const files = ((node.value as string) || '').split(',').map(s => s.trim()).filter(Boolean);
       if (files.length === 0) throw new Error('upload: no file paths specified in value');
-      await page.setInputFiles(node.selector as string, files, { timeout: 10000 });
+      await p.setInputFiles(node.selector as string, files, { timeout: 10000 });
       break;
     }
 
     case 'focus':
-      await page.focus(node.selector as string, { timeout: 10000 });
+      await p.focus(node.selector as string, { timeout: 10000 });
       break;
 
     case 'drag': {
       // drag: selector = source, value = "targetSelector"
       const target = node.value as string;
       if (!target) throw new Error('drag: value must be the target selector');
-      const source = await page.locator(node.selector as string).first().boundingBox();
-      const dest   = await page.locator(target).first().boundingBox();
+      const source = await p.locator(node.selector as string).first().boundingBox();
+      const dest   = await p.locator(target).first().boundingBox();
       if (!source || !dest) throw new Error('drag: source or target element not found');
-      await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(dest.x + dest.width / 2, dest.y + dest.height / 2, { steps: 10 });
-      await page.mouse.up();
+      await p.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+      await p.mouse.down();
+      await p.mouse.move(dest.x + dest.width / 2, dest.y + dest.height / 2, { steps: 10 });
+      await p.mouse.up();
       break;
     }
 
@@ -1227,28 +1124,28 @@ async function executeAction(page: import('playwright').Page, action: string, no
       // Keyboard shortcut — e.g. value: "Control+A", "Meta+S", "Escape"
       const key = (node.value as string) || 'Enter';
       if (node.selector) {
-        await page.press(node.selector as string, key);
+        await p.press(node.selector as string, key);
       } else {
-        await page.keyboard.press(key);
+        await p.keyboard.press(key);
       }
       break;
     }
 
     case 'reload':
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await p.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
       break;
 
     case 'back':
-      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await p.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
       break;
 
     case 'forward':
-      await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
+      await p.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
       break;
 
     case 'wait:text': {
       const waitVal = node.value as string;
-      await page.waitForFunction(
+      await p.waitForFunction(
         (text: string) => document.body.innerText.includes(text),
         waitVal,
         { timeout: 15000 }
@@ -1258,7 +1155,7 @@ async function executeAction(page: import('playwright').Page, action: string, no
 
     case 'wait:url': {
       const urlPattern = node.value as string;
-      await page.waitForURL(url => url.toString().includes(urlPattern), { timeout: 15000 });
+      await p.waitForURL(url => url.toString().includes(urlPattern), { timeout: 15000 });
       break;
     }
 
@@ -1270,7 +1167,7 @@ async function executeAction(page: import('playwright').Page, action: string, no
 
     case 'scroll:element': {
       // Scroll within a scrollable container
-      await page.locator(node.selector as string).first().scrollIntoViewIfNeeded({ timeout: 10000 });
+      await p.locator(node.selector as string).first().scrollIntoViewIfNeeded({ timeout: 10000 });
       break;
     }
 
@@ -1278,43 +1175,43 @@ async function executeAction(page: import('playwright').Page, action: string, no
       // Execute arbitrary JavaScript on the page — value = JS expression
       const script = node.value as string;
       if (!script) throw new Error('eval: value must be a JavaScript expression');
-      await page.evaluate(new Function(script) as () => unknown);
+      await p.evaluate(new Function(script) as () => unknown);
       break;
     }
 
     case 'iframe:enter': {
       // Switch context into an iframe — selector = iframe selector
       // We store the iframe handle in node.__iframe for exit
-      const frame = page.frameLocator(node.selector as string);
-      (page as any).__activeFrame = frame;
+      const frame = p.frameLocator(node.selector as string);
+      (p as any).__activeFrame = frame;
       break;
     }
 
     case 'iframe:exit':
-      (page as any).__activeFrame = null;
+      (p as any).__activeFrame = null;
       break;
 
     case 'assert:visible': {
-      const isVisible = await page.locator(node.selector as string).first().isVisible({ timeout: 10000 }).catch(() => false);
+      const isVisible = await p.locator(node.selector as string).first().isVisible({ timeout: 10000 }).catch(() => false);
       if (!isVisible) throw new Error(`assert:visible failed — "${node.selector}" is not visible`);
       break;
     }
 
     case 'assert:hidden': {
-      const isHidden = await page.locator(node.selector as string).first().isHidden({ timeout: 5000 }).catch(() => true);
+      const isHidden = await p.locator(node.selector as string).first().isHidden({ timeout: 5000 }).catch(() => true);
       if (!isHidden) throw new Error(`assert:hidden failed — "${node.selector}" is visible but expected hidden`);
       break;
     }
 
     case 'assert:value': {
-      const inputVal = await page.inputValue(node.selector as string, { timeout: 10000 });
+      const inputVal = await p.inputValue(node.selector as string, { timeout: 10000 });
       if (!inputVal.includes(node.value as string)) throw new Error(`assert:value failed — input value "${inputVal}" does not contain "${node.value}"`);
       break;
     }
 
     case 'assert:count': {
       const expected = parseInt(node.value as string, 10);
-      const actual   = await page.locator(node.selector as string).count();
+      const actual   = await p.locator(node.selector as string).count();
       if (actual !== expected) throw new Error(`assert:count failed — found ${actual} elements, expected ${expected}`);
       break;
     }
@@ -1323,7 +1220,7 @@ async function executeAction(page: import('playwright').Page, action: string, no
       // selector = element, value = "attrName=expected"
       const [attrName, ...rest] = ((node.value as string) || '').split('=');
       const expected = rest.join('=');
-      const actual   = await page.locator(node.selector as string).first().getAttribute(attrName, { timeout: 10000 });
+      const actual   = await p.locator(node.selector as string).first().getAttribute(attrName, { timeout: 10000 });
       if (actual === null) throw new Error(`assert:attr failed — attribute "${attrName}" not found on "${node.selector}"`);
       if (!actual.includes(expected)) throw new Error(`assert:attr failed — "${attrName}" is "${actual}", expected to contain "${expected}"`);
       break;
@@ -1333,13 +1230,13 @@ async function executeAction(page: import('playwright').Page, action: string, no
       // value = "name=value;domain=example.com" or just "name=value"
       const parts = ((node.value as string) || '').split(';');
       const [cookieName, cookieVal] = parts[0].split('=');
-      const domain = parts.find(p => p.trim().startsWith('domain='))?.split('=')[1] || new URL(page.url()).hostname;
-      await page.context().addCookies([{ name: cookieName.trim(), value: cookieVal?.trim() || '', domain, path: '/' }]);
+      const domain = parts.find(cp => cp.trim().startsWith('domain='))?.split('=')[1] || new URL(p.url()).hostname;
+      await p.context().addCookies([{ name: cookieName.trim(), value: cookieVal?.trim() || '', domain, path: '/' }]);
       break;
     }
 
     case 'cookie:clear':
-      await page.context().clearCookies();
+      await p.context().clearCookies();
       break;
 
     case 'storage:set': {
@@ -1348,13 +1245,46 @@ async function executeAction(page: import('playwright').Page, action: string, no
       if (eqIdx === -1) throw new Error('storage:set: value must be "key=value"');
       const key = (node.value as string).slice(0, eqIdx);
       const val = (node.value as string).slice(eqIdx + 1);
-      await page.evaluate(([k, v]) => localStorage.setItem(k, v), [key, val] as [string, string]);
+      await p.evaluate(([k, v]) => localStorage.setItem(k, v), [key, val] as [string, string]);
       break;
     }
 
     case 'assert:not-text': {
-      const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+      const bodyText = await p.evaluate(() => document.body.innerText).catch(() => '');
       if (bodyText.includes(node.value as string)) throw new Error(`assert:not-text failed — "${node.value}" IS present on page (expected absent)`);
+      break;
+    }
+
+    case 'http:request':
+      if (!ctx) throw new Error('http:request requires execution context');
+      await executeHttpRequest(node, ctx, runId!, stepNumber!);
+      break;
+    case 'assert:response':
+    case 'assert:status':
+    case 'assert:body':
+    case 'assert:header':
+    case 'assert:time':
+      if (!ctx) throw new Error('assert actions require execution context');
+      await executeApiAssert(node, ctx);
+      break;
+    case 'set:variable':
+      if (!ctx) throw new Error('set:variable requires execution context');
+      executeSetVariable(node, ctx, runId!, stepNumber!);
+      break;
+    case 'extract:json':
+      if (!ctx) throw new Error('extract:json requires execution context');
+      executeExtractJson(node, ctx, runId!, stepNumber!);
+      break;
+    case 'env:switch': {
+      const envName = resolveVarsDeep(node.environment as string, ctx!) as string;
+      const env = db.findEnvironmentByName(envName);
+      if (!env) throw new Error(`Environment "${envName}" not found`);
+      db.setActiveEnvironment(env.id);
+      if (ctx) {
+        ctx.environmentName = env.name;
+        for (const [k, v] of Object.entries(env.variables)) ctx.variables[k] = v;
+        if (env.baseUrl) ctx.variables['__baseUrl'] = env.baseUrl;
+      }
       break;
     }
   }
@@ -2606,7 +2536,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       const flowData = flows.map(f => {
         const lastRun = lastRunMap[f.id];
         const steps = (() => {
-          try { return (JSON.parse(f.nodes || '[]') as any[]).length; } catch { return 0; }
+          try { return (JSON.parse(f.graph || '{}') as any).nodes?.length ?? 0; } catch { return 0; }
         })();
         return {
           id: f.id,
@@ -2671,10 +2601,11 @@ setInterval(loadFlows, 10000); // refresh every 10s
 
       const startTime = Date.now();
       try {
-        const nodes: any[] = JSON.parse(flow.nodes || '[]');
+        const parsedGraph = JSON.parse(flow.graph || '{}') as { nodes?: any[] };
+        const nodes: any[] = parsedGraph.nodes || [];
         sendEvent('log', { type: 'info', message: `Flow: ${flow.name} (${nodes.length} steps)` });
 
-        const result = await executeFlow(flowId, {
+        const result = await executeFlow(flowId, undefined, {
           onStep: (stepIdx: number, action: string, selector?: string) => {
             sendEvent('log', { type: 'step', message: `  [${stepIdx + 1}] ${action}${selector ? ' → ' + selector : ''}` });
           },
@@ -2725,7 +2656,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
           const flowList = flows.map(f => `- ${f.name} (id: ${f.id})`).join('\n');
           const recentRuns = runs.slice(0, 10).map(r => {
             const f = flows.find(fl => fl.id === r.flowId);
-            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.createdAt}`;
+            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.startedAt}`;
           }).join('\n');
 
           const systemPrompt = `You are GhostRun's assistant. GhostRun is a browser automation CLI tool.
@@ -4807,11 +4738,6 @@ async function runInteractive() {
       await runChat();
     }
 
-    // ── APP ─────────────────────────────────────────────────
-    else if (action === 'app') {
-      await runDesktopApp();
-    }
-
     // ── STATUS ──────────────────────────────────────────────
     else if (action === 'status') {
       console.log();
@@ -4827,6 +4753,201 @@ function _pause(): Promise<void> {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question(chalk.gray('  Press Enter to continue...'), () => { rl.close(); resolve(); });
   });
+}
+
+// ============================================
+// COMMANDS — API Testing
+// ============================================
+
+async function runApiLearn() {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  API Flow Builder\n'));
+  console.log(chalk.gray('  Build HTTP test flows interactively.\n'));
+
+  const name = await askQuestion(chalk.cyan('  Flow name: '));
+  if (!name.trim()) { errorMsg('Name required'); process.exit(1); }
+
+  const nodes: Record<string, unknown>[] = [];
+  let stepIdx = 1;
+
+  console.log(chalk.gray('\n  Add steps. Available types:'));
+  console.log(chalk.gray('  http      — HTTP request (GET/POST/PUT/DELETE/PATCH)'));
+  console.log(chalk.gray('  assert    — Assert response (status/body/header/time)'));
+  console.log(chalk.gray('  extract   — Extract JSON value to variable'));
+  console.log(chalk.gray('  set       — Set variable'));
+  console.log(chalk.gray('  done      — Finish and save\n'));
+
+  while (true) {
+    const type = (await askQuestion(chalk.cyan(`  Step ${stepIdx} type [http/assert/extract/set/done]: `))).trim().toLowerCase();
+    if (type === 'done' || type === '') break;
+
+    if (type === 'http') {
+      const method = ((await askQuestion('    Method [GET]: ')).trim().toUpperCase()) || 'GET';
+      const url = (await askQuestion('    URL: ')).trim();
+      if (!url) { warn('URL required, skipping.'); continue; }
+      const label = (await askQuestion(`    Label [${method} ${url.split('/').slice(-1)[0] || url}]: `)).trim()
+        || `${method} ${url.split('/').slice(-1)[0] || url}`;
+      const headersStr = (await askQuestion('    Headers (key:value, comma-sep, or blank): ')).trim();
+      const headers: Record<string, string> = {};
+      if (headersStr) {
+        for (const h of headersStr.split(',')) {
+          const [k, ...v] = h.split(':');
+          if (k && v.length) headers[k.trim()] = v.join(':').trim();
+        }
+      }
+      const bodyStr = (await askQuestion('    Body JSON (or blank): ')).trim();
+      const extractStr = (await askQuestion('    Extract vars (varName=$.path, comma-sep, or blank): ')).trim();
+      const extract: Record<string, string> = {};
+      if (extractStr) {
+        for (const e of extractStr.split(',')) {
+          const [k, v] = e.split('=');
+          if (k && v) extract[k.trim()] = v.trim();
+        }
+      }
+      nodes.push({
+        id: uuidv4(), type: 'action', action: 'http:request',
+        method, url, label, headers: Object.keys(headers).length ? headers : undefined,
+        body: bodyStr ? JSON.parse(bodyStr) : undefined,
+        extract: Object.keys(extract).length ? extract : undefined,
+      });
+    } else if (type === 'assert') {
+      const assertType = (await askQuestion('    Assert type [status/body:contains/json:path/time]: ')).trim() || 'status';
+      let node: Record<string, unknown> = { id: uuidv4(), type: 'action', action: 'assert:response', assert: assertType, label: `Assert ${assertType}` };
+      if (assertType === 'status') {
+        const exp = (await askQuestion('    Expected status [200]: ')).trim() || '200';
+        node = { ...node, expected: Number(exp), label: `Assert status ${exp}` };
+      } else if (assertType === 'body:contains') {
+        const exp = (await askQuestion('    Body must contain: ')).trim();
+        node = { ...node, expected: exp, label: `Assert body contains "${exp}"` };
+      } else if (assertType === 'json:path') {
+        const p = (await askQuestion('    JSON path (e.g. $.user.id): ')).trim();
+        const exp = (await askQuestion('    Expected value: ')).trim();
+        node = { ...node, path: p, expected: exp, label: `Assert ${p} = ${exp}` };
+      } else if (assertType === 'time') {
+        const maxMs = (await askQuestion('    Max response time ms [2000]: ')).trim() || '2000';
+        node = { ...node, expected: Number(maxMs), label: `Assert response < ${maxMs}ms` };
+      }
+      nodes.push(node);
+    } else if (type === 'extract') {
+      const varName = (await askQuestion('    Variable name: ')).trim();
+      const p = (await askQuestion('    JSON path (e.g. $.id): ')).trim();
+      nodes.push({ id: uuidv4(), type: 'action', action: 'extract:json', variable: varName, path: p, label: `Extract ${varName} from ${p}` });
+    } else if (type === 'set') {
+      const varName = (await askQuestion('    Variable name: ')).trim();
+      const val = (await askQuestion('    Value: ')).trim();
+      nodes.push({ id: uuidv4(), type: 'action', action: 'set:variable', variable: varName, value: val, label: `Set ${varName} = ${val}` });
+    } else {
+      warn(`Unknown type "${type}". Try: http, assert, extract, set, done`);
+      continue;
+    }
+    stepIdx++;
+  }
+
+  if (!nodes.length) { warn('No steps added. Flow not saved.'); return; }
+
+  const flow = db.createFlow({ name, description: `API flow with ${nodes.length} step(s)`, createdBy: 'human', graph: { nodes, edges: [], appUrl: undefined } });
+  success(`API flow created: ${chalk.white(flow.name)} (${chalk.gray(flow.id.slice(0, 8))})`);
+  console.log(chalk.gray(`  ${nodes.length} step(s). Run with: ghostrun run "${name}"`));
+  console.log();
+}
+
+async function runEnvCreate(name: string, extraArgs: string[]) {
+  printLogo(); divider();
+  let baseUrl = extraArgs[0] || '';
+  if (!baseUrl) baseUrl = (await askQuestion(chalk.cyan('  Base URL (optional, press Enter to skip): '))).trim();
+  const env = db.createEnvironment({ name, baseUrl: baseUrl || undefined });
+  success(`Environment created: ${chalk.white(name)} (${chalk.gray(env.id.slice(0, 8))})`);
+  if (baseUrl) info(`Base URL: ${chalk.cyan(baseUrl)}`);
+  info(`Add variables: ghostrun env:set ${name} KEY value`);
+  console.log();
+}
+
+async function runEnvList() {
+  printLogo(); divider();
+  const envs = db.listEnvironments();
+  if (!envs.length) { warn('No environments. Create one: ghostrun env:create <name>'); return; }
+  console.log(chalk.bold('\n  Environments\n'));
+  for (const e of envs) {
+    const active = e.isActive ? chalk.green(' ● active') : '';
+    const varCount = Object.keys(e.variables).length;
+    console.log(`  ${chalk.white(e.name.padEnd(20))}${active}  ${chalk.gray(varCount + ' vars')}${e.baseUrl ? '  ' + chalk.cyan(e.baseUrl) : ''}`);
+  }
+  console.log();
+}
+
+async function runEnvSet(envName: string, key: string, value: string) {
+  let env = db.findEnvironmentByName(envName);
+  if (!env) {
+    // Auto-create if doesn't exist
+    env = db.createEnvironment({ name: envName });
+    info(`Created environment: ${envName}`);
+  }
+  const vars = { ...env.variables, [key]: value };
+  db.updateEnvironment(env.id, { variables: vars });
+  success(`Set ${chalk.white(key)} = ${chalk.cyan(value)} in environment ${chalk.white(envName)}`);
+  console.log();
+}
+
+async function runEnvUse(envName: string) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) { errorMsg(`Environment "${envName}" not found. Create it: ghostrun env:create ${envName}`); process.exit(1); }
+  db.setActiveEnvironment(env.id);
+  success(`Active environment: ${chalk.white(envName)}`);
+  if (env.baseUrl) info(`Base URL: ${chalk.cyan(env.baseUrl)}`);
+  const varCount = Object.keys(env.variables).length;
+  if (varCount) info(`${varCount} variables loaded`);
+  console.log();
+}
+
+async function runEnvShow(envName: string) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) { errorMsg(`Environment "${envName}" not found`); process.exit(1); }
+  printLogo(); divider();
+  console.log(chalk.bold(`\n  Environment: ${env.name}`) + (env.isActive ? chalk.green(' ● active') : ''));
+  if (env.baseUrl) console.log(`  Base URL: ${chalk.cyan(env.baseUrl)}`);
+  const vars = env.variables;
+  if (Object.keys(vars).length === 0) {
+    console.log(chalk.gray('  No variables set.'));
+  } else {
+    console.log(chalk.bold('\n  Variables:'));
+    for (const [k, v] of Object.entries(vars)) {
+      const masked = k.toLowerCase().includes('secret') || k.toLowerCase().includes('password') || k.toLowerCase().includes('token')
+        ? '*'.repeat(Math.min(v.length, 8)) : v;
+      console.log(`    ${chalk.white(k.padEnd(24))} ${chalk.cyan(masked)}`);
+    }
+  }
+  console.log();
+}
+
+async function runEnvDelete(envName: string) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) { errorMsg(`Environment "${envName}" not found`); process.exit(1); }
+  db.deleteEnvironment(env.id);
+  success(`Deleted environment: ${envName}`);
+  console.log();
+}
+
+async function runVarDump(runId: string) {
+  let run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) { errorMsg('Run not found: ' + runId); process.exit(1); }
+  printLogo(); divider();
+  const data = db.getRunData(run.id);
+  const apiResps = db.getApiResponses(run.id);
+  console.log(chalk.bold(`\n  Variables from run ${chalk.gray(run.id.slice(0, 8))}\n`));
+  if (!data.length) { console.log(chalk.gray('  No variables extracted in this run.')); }
+  else {
+    for (const d of data) {
+      console.log(`  Step ${d.stepNumber.toString().padStart(2)}  ${chalk.white(d.variableName.padEnd(24))} ${chalk.cyan(d.variableValue.slice(0, 80))}`);
+    }
+  }
+  if (apiResps.length) {
+    console.log(chalk.bold('\n  API Calls:\n'));
+    for (const r of apiResps) {
+      const statusColor = r.statusCode && r.statusCode < 400 ? chalk.green : chalk.red;
+      console.log(`  Step ${r.stepNumber.toString().padStart(2)}  ${chalk.white((r.method || '???').padEnd(7))} ${chalk.gray(r.url.slice(0, 60))}  ${r.statusCode ? statusColor(String(r.statusCode)) : chalk.red('ERR')}  ${r.responseTimeMs ? chalk.gray(r.responseTimeMs + 'ms') : ''}`);
+    }
+  }
+  console.log();
 }
 
 // ============================================
@@ -4906,6 +5027,16 @@ async function main() {
     console.log(`  ${C('monitor <id|name>')}${G('Run flow + show extracted data changes')}`);
     console.log(`  ${C('monitor <id> --output json')}${G('Monitor with JSON output')}`);
     console.log(chalk.gray(`  ${'  Flow actions: extract, scroll:bottom, scroll:load, next:page'.padEnd(52)}`));
+    console.log();
+
+    H('API Testing');
+    console.log(`  ${C('api:learn')}${G('Build HTTP API test flow interactively')}`);
+    console.log(`  ${C('env:create <name>')}${G('Create environment (dev/staging/prod)')}`);
+    console.log(`  ${C('env:list')}${G('List all environments')}`);
+    console.log(`  ${C('env:set <env> <key> <val>')}${G('Set variable in environment')}`);
+    console.log(`  ${C('env:use <name>')}${G('Activate environment for runs')}`);
+    console.log(`  ${C('env:show <name>')}${G('Show environment variables')}`);
+    console.log(`  ${C('var:dump <run-id>')}${G('Show extracted variables + API calls from run')}`);
     console.log();
 
     H('Chat & Setup');
@@ -5016,6 +5147,26 @@ async function main() {
     case 'store:install':
       if (!args[1]) { errorMsg('Template name required. Run store:list to see options.'); process.exit(1); }
       await runStoreInstall(args[1]); break;
+    case 'api:learn':         await runApiLearn(); break;
+    case 'env:create':
+      if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
+      await runEnvCreate(args[1], args.slice(2)); break;
+    case 'env:list':          await runEnvList(); break;
+    case 'env:set':
+      if (!args[1] || !args[2] || !args[3]) { errorMsg('Usage: env:set <env-name> <key> <value>'); process.exit(1); }
+      await runEnvSet(args[1], args[2], args[3]); break;
+    case 'env:use':
+      if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
+      await runEnvUse(args[1]); break;
+    case 'env:show':
+      if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
+      await runEnvShow(args[1]); break;
+    case 'env:delete':
+      if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
+      await runEnvDelete(args[1]); break;
+    case 'var:dump':
+      if (!args[1]) { errorMsg('Run ID required'); process.exit(1); }
+      await runVarDump(args[1]); break;
     default:
       errorMsg('Unknown command: ' + cmd);
       console.log('  Run without args for help.');

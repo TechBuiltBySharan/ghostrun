@@ -3,3 +3,4 @@
  */
 
 export * from './database.js';
+export { DatabaseManager, DATA_PATH } from './manager';

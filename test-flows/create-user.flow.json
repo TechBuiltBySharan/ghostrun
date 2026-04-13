@@ -1,0 +1,79 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "",
+  "flow": {
+    "name": "Create User Flow",
+    "description": "POST a new user, verify it was created, fetch it back",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "set:variable",
+          "variable": "newUserName",
+          "value": "Charlie",
+          "label": "Set newUserName = Charlie"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "http:request",
+          "method": "POST",
+          "url": "http://localhost:7777/users",
+          "body": {
+            "name": "{{newUserName}}",
+            "email": "charlie@example.com"
+          },
+          "extract": {
+            "newUserId": "$.id"
+          },
+          "label": "POST /users (create Charlie)"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 201,
+          "label": "Assert 201 Created"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.name",
+          "expected": "Charlie",
+          "label": "Assert name = Charlie"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "http://localhost:7777/users/{{newUserId}}",
+          "label": "GET /users/{{newUserId}} (fetch created)"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert 200"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.email",
+          "expected": "charlie@example.com",
+          "label": "Assert email matches"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

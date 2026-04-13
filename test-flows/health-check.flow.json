@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "",
+  "flow": {
+    "name": "API Health Check",
+    "description": "Verify the test API server is up",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "http://localhost:7777/health",
+          "label": "GET /health"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert status 200"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.status",
+          "expected": "ok",
+          "label": "Assert $.status = ok"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "extract:json",
+          "variable": "serverUptime",
+          "path": "$.uptime",
+          "label": "Extract server uptime"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

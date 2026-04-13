@@ -1,0 +1,86 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "",
+  "flow": {
+    "name": "Auth + User List",
+    "description": "Login, extract token, use it to fetch users",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "POST",
+          "url": "http://localhost:7777/auth/login",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "username": "admin",
+            "password": "secret"
+          },
+          "extract": {
+            "authToken": "$.token",
+            "userId": "$.userId"
+          },
+          "label": "POST /auth/login"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert login 200"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:exists",
+          "path": "$.token",
+          "label": "Assert token exists"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "http://localhost:7777/users",
+          "auth": {
+            "type": "bearer",
+            "token": "{{authToken}}"
+          },
+          "label": "GET /users (authenticated)"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert users 200"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.count",
+          "expected": "2",
+          "label": "Assert 2 users returned"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "time",
+          "expected": 2000,
+          "label": "Assert response < 2000ms"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

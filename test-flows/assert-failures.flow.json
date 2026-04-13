@@ -1,0 +1,58 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "",
+  "flow": {
+    "name": "Assert Failure Cases",
+    "description": "Tests that wrong credentials \u2192 401 and bad path \u2192 404",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "POST",
+          "url": "http://localhost:7777/auth/login",
+          "body": {
+            "username": "wrong",
+            "password": "bad"
+          },
+          "label": "POST /auth/login (bad creds)"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 401,
+          "label": "Assert 401 Unauthorized"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "body:contains",
+          "expected": "Invalid credentials",
+          "label": "Assert error message"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "http://localhost:7777/users/999",
+          "label": "GET /users/999 (not found)"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 404,
+          "label": "Assert 404 Not Found"
+        }
+      ],
+      "edges": []
+    }
+  }
+}
