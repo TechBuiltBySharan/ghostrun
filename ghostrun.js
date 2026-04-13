@@ -3631,10 +3631,15 @@ var require_node_cron = __commonJS({
 // ghostrun.ts
 var import_playwright = require("playwright");
 var import_chalk = __toESM(require("chalk"));
-var fs = __toESM(require("fs"));
-var path = __toESM(require("path"));
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
 var readline = __toESM(require("readline"));
-var import_better_sqlite3 = __toESM(require("better-sqlite3"));
+var import_uuid2 = require("uuid");
+
+// packages/database/src/manager.ts
+var fs = __toESM(require("fs"), 1);
+var path = __toESM(require("path"), 1);
+var import_better_sqlite3 = __toESM(require("better-sqlite3"), 1);
 var import_uuid = require("uuid");
 var HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
 var DATA_PATH = path.join(HOME_DIR, ".ghostrun");
@@ -3715,6 +3720,48 @@ var DatabaseManager = class {
         step_number INTEGER NOT NULL,
         UNIQUE(run_id, variable_name),
         FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        base_url TEXT,
+        variables TEXT NOT NULL DEFAULT '{}',
+        is_active INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS api_responses (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        step_number INTEGER NOT NULL,
+        method TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status_code INTEGER,
+        response_time_ms INTEGER,
+        response_headers TEXT,
+        response_body TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS perf_runs (
+        id TEXT PRIMARY KEY,
+        flow_id TEXT NOT NULL,
+        flow_name TEXT NOT NULL,
+        config TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        total_requests INTEGER,
+        success_requests INTEGER,
+        failed_requests INTEGER,
+        avg_rps REAL,
+        p50_ms INTEGER,
+        p95_ms INTEGER,
+        p99_ms INTEGER,
+        min_ms INTEGER,
+        max_ms INTEGER,
+        per_step_stats TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT,
+        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
       );
     `);
   }
@@ -3952,6 +3999,18 @@ var DatabaseManager = class {
       this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))");
     } catch {
     }
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS environments (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, base_url TEXT, variables TEXT NOT NULL DEFAULT '{}', is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    } catch {
+    }
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS api_responses (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_number INTEGER NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL, status_code INTEGER, response_time_ms INTEGER, response_headers TEXT, response_body TEXT, error_message TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    } catch {
+    }
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS perf_runs (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_name TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', total_requests INTEGER, success_requests INTEGER, failed_requests INTEGER, avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER, min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT, started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT)`);
+    } catch {
+    }
   }
   // ---- Suites ----
   createSuite(data) {
@@ -4072,7 +4131,190 @@ var DatabaseManager = class {
       lastRunAt: r?.last_run_at || null
     };
   }
+  // ---- Environments ----
+  createEnvironment(data) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare(`INSERT INTO environments (id, name, base_url, variables) VALUES (?, ?, ?, ?)`).run(id, data.name, data.baseUrl || null, JSON.stringify(data.variables || {}));
+    return this.getEnvironment(id);
+  }
+  getEnvironment(id) {
+    const r = this.db.prepare("SELECT * FROM environments WHERE id = ?").get(id);
+    return r ? this.mapEnvironment(r) : null;
+  }
+  findEnvironmentByName(name) {
+    const r = this.db.prepare("SELECT * FROM environments WHERE LOWER(name) = ?").get(name.toLowerCase());
+    return r ? this.mapEnvironment(r) : null;
+  }
+  listEnvironments() {
+    return this.db.prepare("SELECT * FROM environments ORDER BY name").all().map((r) => this.mapEnvironment(r));
+  }
+  updateEnvironment(id, data) {
+    const updates = [];
+    const values = [];
+    if (data.name !== void 0) {
+      updates.push("name = ?");
+      values.push(data.name);
+    }
+    if (data.baseUrl !== void 0) {
+      updates.push("base_url = ?");
+      values.push(data.baseUrl);
+    }
+    if (data.variables !== void 0) {
+      updates.push("variables = ?");
+      values.push(JSON.stringify(data.variables));
+    }
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE environments SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getEnvironment(id);
+  }
+  deleteEnvironment(id) {
+    return this.db.prepare("DELETE FROM environments WHERE id = ?").run(id).changes > 0;
+  }
+  setActiveEnvironment(id) {
+    this.db.prepare("UPDATE environments SET is_active = 0").run();
+    this.db.prepare("UPDATE environments SET is_active = 1 WHERE id = ?").run(id);
+  }
+  getActiveEnvironment() {
+    const r = this.db.prepare("SELECT * FROM environments WHERE is_active = 1 LIMIT 1").get();
+    return r ? this.mapEnvironment(r) : null;
+  }
+  mapEnvironment(r) {
+    return {
+      id: r.id,
+      name: r.name,
+      baseUrl: r.base_url,
+      variables: JSON.parse(r.variables || "{}"),
+      isActive: Boolean(r.is_active),
+      createdAt: new Date(r.created_at)
+    };
+  }
+  // ---- API Responses ----
+  saveApiResponse(data) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare(`INSERT INTO api_responses (id, run_id, step_number, method, url, status_code, response_time_ms, response_headers, response_body, error_message) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      id,
+      data.runId,
+      data.stepNumber,
+      data.method,
+      data.url,
+      data.statusCode ?? null,
+      data.responseTimeMs ?? null,
+      data.responseHeaders ? JSON.stringify(data.responseHeaders) : null,
+      data.responseBody ?? null,
+      data.errorMessage ?? null
+    );
+    return id;
+  }
+  getApiResponses(runId) {
+    return this.db.prepare("SELECT * FROM api_responses WHERE run_id = ? ORDER BY step_number").all(runId).map((r) => ({
+      id: r.id,
+      runId: r.run_id,
+      stepNumber: r.step_number,
+      method: r.method,
+      url: r.url,
+      statusCode: r.status_code,
+      responseTimeMs: r.response_time_ms,
+      responseHeaders: r.response_headers ? JSON.parse(r.response_headers) : null,
+      responseBody: r.response_body,
+      errorMessage: r.error_message
+    }));
+  }
+  // ---- Perf Runs ----
+  createPerfRun(data) {
+    const id = (0, import_uuid.v4)();
+    this.db.prepare(`INSERT INTO perf_runs (id, flow_id, flow_name, config, status) VALUES (?, ?, ?, ?, 'running')`).run(id, data.flowId, data.flowName, JSON.stringify(data.config));
+    return id;
+  }
+  updatePerfRun(id, data) {
+    const updates = [];
+    const values = [];
+    if (data.status !== void 0) {
+      updates.push("status = ?");
+      values.push(data.status);
+    }
+    if (data.totalRequests !== void 0) {
+      updates.push("total_requests = ?");
+      values.push(data.totalRequests);
+    }
+    if (data.successRequests !== void 0) {
+      updates.push("success_requests = ?");
+      values.push(data.successRequests);
+    }
+    if (data.failedRequests !== void 0) {
+      updates.push("failed_requests = ?");
+      values.push(data.failedRequests);
+    }
+    if (data.avgRps !== void 0) {
+      updates.push("avg_rps = ?");
+      values.push(data.avgRps);
+    }
+    if (data.p50 !== void 0) {
+      updates.push("p50_ms = ?");
+      values.push(data.p50);
+    }
+    if (data.p95 !== void 0) {
+      updates.push("p95_ms = ?");
+      values.push(data.p95);
+    }
+    if (data.p99 !== void 0) {
+      updates.push("p99_ms = ?");
+      values.push(data.p99);
+    }
+    if (data.minMs !== void 0) {
+      updates.push("min_ms = ?");
+      values.push(data.minMs);
+    }
+    if (data.maxMs !== void 0) {
+      updates.push("max_ms = ?");
+      values.push(data.maxMs);
+    }
+    if (data.perStepStats !== void 0) {
+      updates.push("per_step_stats = ?");
+      values.push(JSON.stringify(data.perStepStats));
+    }
+    if (data.status === "done" || data.status === "failed") {
+      updates.push("completed_at = datetime('now')");
+    }
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE perf_runs SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+  }
+  getPerfRun(id) {
+    const r = this.db.prepare("SELECT * FROM perf_runs WHERE id = ?").get(id);
+    return r ? this.mapPerfRun(r) : null;
+  }
+  findPerfRunByPartialId(q) {
+    const rows = this.db.prepare("SELECT * FROM perf_runs WHERE id LIKE ?").all(q + "%");
+    return rows.length >= 1 ? this.mapPerfRun(rows[0]) : null;
+  }
+  listPerfRuns(limit = 20) {
+    return this.db.prepare("SELECT * FROM perf_runs ORDER BY started_at DESC LIMIT ?").all(limit).map((r) => this.mapPerfRun(r));
+  }
+  mapPerfRun(r) {
+    return {
+      id: r.id,
+      flowId: r.flow_id,
+      flowName: r.flow_name,
+      config: JSON.parse(r.config),
+      status: r.status,
+      totalRequests: r.total_requests,
+      successRequests: r.success_requests,
+      failedRequests: r.failed_requests,
+      avgRps: r.avg_rps,
+      p50: r.p50_ms,
+      p95: r.p95_ms,
+      p99: r.p99_ms,
+      minMs: r.min_ms,
+      maxMs: r.max_ms,
+      perStepStats: r.per_step_stats ? JSON.parse(r.per_step_stats) : null,
+      startedAt: new Date(r.started_at),
+      completedAt: r.completed_at ? new Date(r.completed_at) : null
+    };
+  }
 };
+
+// ghostrun.ts
+var HOME_DIR2 = process.env.HOME || process.env.USERPROFILE || ".";
+var DATA_PATH2 = path2.join(HOME_DIR2, ".ghostrun");
 function sanitizePII(text) {
   if (!text) return text;
   text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, "[EMAIL]");
@@ -4083,6 +4325,571 @@ function sanitizePII(text) {
   text = text.replace(/\b(?:password|passwd|pwd)\s*[:=]\s*\S+/gi, "password=[REDACTED]");
   text = text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN]");
   return text;
+}
+function resolveVarsDeep(value, ctx) {
+  if (typeof value === "string") {
+    return value.replace(/\{\{(\w+)\}\}/g, (_, k) => ctx.variables[k] ?? "");
+  }
+  if (Array.isArray(value)) return value.map((v) => resolveVarsDeep(v, ctx));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = resolveVarsDeep(v, ctx);
+    return out;
+  }
+  return value;
+}
+function getJsonPath(obj, path3) {
+  const parts = path3.replace(/^\$\.?/, "").split(/\.|\[(\d+)\]/).filter((p) => p !== void 0 && p !== "");
+  let cur = obj;
+  for (const part of parts) {
+    if (cur === null || cur === void 0) return void 0;
+    if (typeof cur === "object") cur = cur[part];
+    else return void 0;
+  }
+  return cur;
+}
+async function executeHttpRequest(node, ctx, runId, stepNumber) {
+  const method = (node.method || "GET").toUpperCase();
+  const url = resolveVarsDeep(node.url, ctx);
+  if (!url) throw new Error("http:request requires a url");
+  const rawHeaders = node.headers || {};
+  const headers = {};
+  for (const [k, v] of Object.entries(rawHeaders)) {
+    headers[k] = resolveVarsDeep(v, ctx);
+  }
+  const auth = node.auth;
+  if (auth?.type === "bearer" && auth.token) {
+    headers["Authorization"] = `Bearer ${resolveVarsDeep(auth.token, ctx)}`;
+  } else if (auth?.type === "basic" && auth.username) {
+    const creds = Buffer.from(`${resolveVarsDeep(auth.username, ctx)}:${resolveVarsDeep(auth.password || "", ctx)}`).toString("base64");
+    headers["Authorization"] = `Basic ${creds}`;
+  } else if (auth?.type === "apikey" && auth.key) {
+    const headerName = auth.header || "X-API-Key";
+    headers[headerName] = resolveVarsDeep(auth.key, ctx);
+  }
+  let body;
+  if (node.body && ["POST", "PUT", "PATCH"].includes(method)) {
+    const resolvedBody = resolveVarsDeep(node.body, ctx);
+    body = typeof resolvedBody === "string" ? resolvedBody : JSON.stringify(resolvedBody);
+    if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  }
+  const start = Date.now();
+  let response;
+  try {
+    response = await fetch(url, { method, headers, body });
+  } catch (e) {
+    db.saveApiResponse({ runId, stepNumber, method, url, errorMessage: String(e) });
+    throw new Error(`HTTP request failed: ${e}`);
+  }
+  const responseTimeMs = Date.now() - start;
+  const responseHeaders = {};
+  response.headers.forEach((v, k) => {
+    responseHeaders[k] = v;
+  });
+  let bodyText = "";
+  let bodyJson = null;
+  try {
+    bodyText = await response.text();
+  } catch {
+  }
+  try {
+    bodyJson = JSON.parse(bodyText);
+  } catch {
+  }
+  ctx.lastResponse = {
+    status: response.status,
+    headers: responseHeaders,
+    body: bodyJson ?? bodyText,
+    bodyText,
+    responseTimeMs,
+    url,
+    method
+  };
+  db.saveApiResponse({
+    runId,
+    stepNumber,
+    method,
+    url,
+    statusCode: response.status,
+    responseTimeMs,
+    responseHeaders,
+    responseBody: bodyText.slice(0, 1e4)
+  });
+  const extract = node.extract;
+  if (extract && bodyJson) {
+    for (const [varName, jsonPath] of Object.entries(extract)) {
+      const val = getJsonPath(bodyJson, jsonPath);
+      if (val !== void 0) {
+        ctx.variables[varName] = String(val);
+        db.saveRunData(runId, stepNumber, varName, String(val));
+      }
+    }
+  }
+}
+async function executeApiAssert(node, ctx) {
+  const lastResp = ctx.lastResponse;
+  if (!lastResp) throw new Error("assert:response \u2014 no HTTP response in context (run http:request first)");
+  const assertType = node.assert || "status";
+  const expected = node.expected !== void 0 ? resolveVarsDeep(node.expected, ctx) : void 0;
+  switch (assertType) {
+    case "status": {
+      const exp = Number(expected ?? 200);
+      if (lastResp.status !== exp) {
+        throw new Error(`Expected status ${exp}, got ${lastResp.status} \u2014 ${lastResp.url}`);
+      }
+      break;
+    }
+    case "status:range": {
+      const min = Number(node.min ?? 200), max = Number(node.max ?? 299);
+      if (lastResp.status < min || lastResp.status > max) {
+        throw new Error(`Status ${lastResp.status} outside range [${min}-${max}]`);
+      }
+      break;
+    }
+    case "body:contains": {
+      const needle = String(expected ?? "");
+      if (!lastResp.bodyText.includes(needle)) {
+        throw new Error(`Response body does not contain "${needle}"`);
+      }
+      break;
+    }
+    case "body:equals": {
+      const expStr = typeof expected === "object" ? JSON.stringify(expected) : String(expected ?? "");
+      const gotStr = typeof lastResp.body === "object" ? JSON.stringify(lastResp.body) : lastResp.bodyText;
+      if (gotStr !== expStr) {
+        throw new Error(`Response body mismatch.
+Expected: ${expStr.slice(0, 200)}
+Got:      ${gotStr.slice(0, 200)}`);
+      }
+      break;
+    }
+    case "json:path": {
+      const jpath = node.path || "";
+      const val = getJsonPath(lastResp.body, jpath);
+      const exp = resolveVarsDeep(node.expected, ctx);
+      if (String(val) !== String(exp)) {
+        throw new Error(`JSON path "${jpath}": expected "${exp}", got "${val}"`);
+      }
+      break;
+    }
+    case "json:exists": {
+      const jpath = node.path || "";
+      const val = getJsonPath(lastResp.body, jpath);
+      if (val === void 0 || val === null) {
+        throw new Error(`JSON path "${jpath}" does not exist in response`);
+      }
+      break;
+    }
+    case "header": {
+      const headerName = (node.header || "").toLowerCase();
+      const headerVal = lastResp.headers[headerName];
+      if (expected !== void 0 && String(headerVal) !== String(expected)) {
+        throw new Error(`Header "${headerName}": expected "${expected}", got "${headerVal}"`);
+      } else if (!headerVal) {
+        throw new Error(`Header "${headerName}" not present in response`);
+      }
+      break;
+    }
+    case "time": {
+      const maxMs = Number(expected ?? 2e3);
+      if (lastResp.responseTimeMs > maxMs) {
+        throw new Error(`Response took ${lastResp.responseTimeMs}ms, expected < ${maxMs}ms`);
+      }
+      break;
+    }
+    default:
+      throw new Error(`Unknown assert type: "${assertType}"`);
+  }
+}
+function executeSetVariable(node, ctx, runId, stepNumber) {
+  const varName = node.variable;
+  const value = resolveVarsDeep(node.value, ctx);
+  if (!varName) throw new Error("set:variable requires a variable name");
+  ctx.variables[varName] = String(value ?? "");
+  db.saveRunData(runId, stepNumber, varName, String(value ?? ""));
+}
+function executeExtractJson(node, ctx, runId, stepNumber) {
+  const varName = node.variable;
+  const jsonPath = node.path;
+  if (!varName || !jsonPath) throw new Error("extract:json requires variable and path");
+  if (!ctx.lastResponse) throw new Error("extract:json \u2014 no HTTP response in context");
+  const val = getJsonPath(ctx.lastResponse.body, jsonPath);
+  if (val === void 0) throw new Error(`JSON path "${jsonPath}" not found in response`);
+  ctx.variables[varName] = String(val);
+  db.saveRunData(runId, stepNumber, varName, String(val));
+}
+function calcPercentile(sortedMs, pct) {
+  if (!sortedMs.length) return 0;
+  const idx = Math.ceil(pct / 100 * sortedMs.length) - 1;
+  return sortedMs[Math.max(0, Math.min(idx, sortedMs.length - 1))];
+}
+function calcStats(samples, durationMs) {
+  const httpSamples = samples.filter((s) => s.isHttp);
+  const total = httpSamples.length;
+  const success2 = httpSamples.filter((s) => s.success).length;
+  const failed = total - success2;
+  const durations = httpSamples.map((s) => s.duration).sort((a, b) => a - b);
+  return {
+    total,
+    success: success2,
+    failed,
+    errorRate: total > 0 ? parseFloat((failed / total * 100).toFixed(1)) : 0,
+    avgRps: parseFloat((total / (durationMs / 1e3)).toFixed(1)),
+    p50: calcPercentile(durations, 50),
+    p95: calcPercentile(durations, 95),
+    p99: calcPercentile(durations, 99),
+    min: durations[0] ?? 0,
+    max: durations[durations.length - 1] ?? 0
+  };
+}
+async function runApiStepDirect(node, action, ctx, timeoutMs) {
+  const API_ONLY_ACTIONS = /* @__PURE__ */ new Set([
+    "http:request",
+    "assert:response",
+    "assert:status",
+    "assert:body",
+    "assert:header",
+    "assert:time",
+    "set:variable",
+    "extract:json",
+    "env:switch"
+  ]);
+  if (!API_ONLY_ACTIONS.has(action)) return;
+  if (action === "http:request") {
+    const method = (node.method || "GET").toUpperCase();
+    const url = resolveVarsDeep(node.url, ctx);
+    const rawHeaders = node.headers || {};
+    const headers = {};
+    for (const [k, v] of Object.entries(rawHeaders)) headers[k] = resolveVarsDeep(v, ctx);
+    const auth = node.auth;
+    if (auth?.type === "bearer" && auth.token) {
+      headers["Authorization"] = `Bearer ${resolveVarsDeep(auth.token, ctx)}`;
+    } else if (auth?.type === "basic" && auth.username) {
+      const creds = Buffer.from(`${resolveVarsDeep(auth.username, ctx)}:${resolveVarsDeep(auth.password || "", ctx)}`).toString("base64");
+      headers["Authorization"] = `Basic ${creds}`;
+    } else if (auth?.type === "apikey" && auth.key) {
+      headers[auth.header || "X-API-Key"] = resolveVarsDeep(auth.key, ctx);
+    }
+    let body;
+    if (node.body && ["POST", "PUT", "PATCH"].includes(method)) {
+      const resolved = resolveVarsDeep(node.body, ctx);
+      body = typeof resolved === "string" ? resolved : JSON.stringify(resolved);
+      if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const t = Date.now();
+    let response;
+    try {
+      response = await fetch(url, { method, headers, body, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    const responseTimeMs = Date.now() - t;
+    let bodyText = "";
+    let bodyJson = null;
+    try {
+      bodyText = await response.text();
+    } catch {
+    }
+    try {
+      bodyJson = JSON.parse(bodyText);
+    } catch {
+    }
+    ctx.lastResponse = {
+      status: response.status,
+      headers: {},
+      body: bodyJson ?? bodyText,
+      bodyText,
+      responseTimeMs,
+      url,
+      method
+    };
+    const extract = node.extract;
+    if (extract && bodyJson) {
+      for (const [varName, jp] of Object.entries(extract)) {
+        const val = getJsonPath(bodyJson, jp);
+        if (val !== void 0) ctx.variables[varName] = String(val);
+      }
+    }
+  } else if (action.startsWith("assert:")) {
+    await executeApiAssert(node, ctx);
+  } else if (action === "set:variable") {
+    const varName = node.variable;
+    if (varName) ctx.variables[varName] = String(resolveVarsDeep(node.value, ctx) ?? "");
+  } else if (action === "extract:json") {
+    const varName = node.variable;
+    const jp = node.path;
+    if (varName && jp && ctx.lastResponse) {
+      const val = getJsonPath(ctx.lastResponse.body, jp);
+      if (val !== void 0) ctx.variables[varName] = String(val);
+    }
+  }
+}
+async function runVU(vuId, actionNodes, baseVars, endTime, samples, timeoutMs) {
+  while (Date.now() < endTime) {
+    const ctx = { variables: { ...baseVars } };
+    for (const node of actionNodes) {
+      if (Date.now() >= endTime) return;
+      const action = node.action;
+      const label = node.label || action;
+      const t = Date.now();
+      try {
+        const resolvedNode = {
+          ...node,
+          url: node.url ? resolveVarsDeep(node.url, ctx) : node.url,
+          value: node.value ? resolveVarsDeep(node.value, ctx) : node.value
+        };
+        await runApiStepDirect(resolvedNode, action, ctx, timeoutMs);
+        const isHttp = action === "http:request";
+        samples.push({ label, duration: Date.now() - t, success: true, vuId, isHttp });
+      } catch {
+        const isHttp = action === "http:request";
+        samples.push({ label, duration: Date.now() - t, success: false, vuId, isHttp });
+        break;
+      }
+    }
+  }
+}
+async function runPerfTest(flowId, config) {
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) throw new Error("Flow not found: " + flowId);
+  const graph = JSON.parse(flow.graph);
+  const API_ONLY = /* @__PURE__ */ new Set([
+    "http:request",
+    "assert:response",
+    "assert:status",
+    "assert:body",
+    "assert:header",
+    "assert:time",
+    "set:variable",
+    "extract:json",
+    "env:switch"
+  ]);
+  const actionNodes = (graph.nodes || []).filter((n) => n.type === "action");
+  const apiNodes = actionNodes.filter((n) => API_ONLY.has(n.action));
+  if (!apiNodes.length) throw new Error("No API steps found in this flow. perf:run only supports API flows.");
+  const baseVars = {};
+  const activeEnv = db.getActiveEnvironment();
+  if (activeEnv) Object.assign(baseVars, activeEnv.variables);
+  const perfRunId = db.createPerfRun({ flowId: flow.id, flowName: flow.name, config });
+  const samples = [];
+  const testStart = Date.now();
+  const endTime = testStart + config.duration;
+  const vuPromises = [];
+  const rampDelay = config.vus > 1 ? config.rampUp / (config.vus - 1) : 0;
+  for (let i = 0; i < config.vus; i++) {
+    const delay = Math.round(i * rampDelay);
+    vuPromises.push(
+      new Promise((resolve) => setTimeout(resolve, delay)).then(
+        () => runVU(i, apiNodes, baseVars, endTime, samples, config.timeout)
+      )
+    );
+  }
+  await Promise.all(vuPromises);
+  const actualDuration = Date.now() - testStart;
+  const stats = calcStats(samples, actualDuration);
+  const perStep = {};
+  const stepLabels = [...new Set(samples.map((s) => s.label))];
+  for (const label of stepLabels) {
+    const stepSamples = samples.filter((s) => s.label === label);
+    const isHttpStep = stepSamples.some((s) => s.isHttp);
+    if (isHttpStep) {
+      perStep[label] = calcStats(stepSamples, actualDuration);
+    } else {
+      const total = stepSamples.length;
+      const success2 = stepSamples.filter((s) => s.success).length;
+      const failed = total - success2;
+      const durations = stepSamples.map((s) => s.duration).sort((a, b) => a - b);
+      perStep[label] = {
+        total,
+        success: success2,
+        failed,
+        errorRate: total > 0 ? parseFloat((failed / total * 100).toFixed(1)) : 0,
+        avgRps: parseFloat((total / (actualDuration / 1e3)).toFixed(1)),
+        p50: calcPercentile(durations, 50),
+        p95: calcPercentile(durations, 95),
+        p99: calcPercentile(durations, 99),
+        min: durations[0] ?? 0,
+        max: durations[durations.length - 1] ?? 0
+      };
+    }
+  }
+  db.updatePerfRun(perfRunId, {
+    status: "done",
+    totalRequests: stats.total,
+    successRequests: stats.success,
+    failedRequests: stats.failed,
+    avgRps: stats.avgRps,
+    p50: stats.p50,
+    p95: stats.p95,
+    p99: stats.p99,
+    minMs: stats.min,
+    maxMs: stats.max,
+    perStepStats: perStep
+  });
+  const checkSamples = samples.filter((s) => !s.isHttp);
+  const checksTotal = checkSamples.length;
+  const checksFailed = checkSamples.filter((s) => !s.success).length;
+  return { stats, checksTotal, checksFailed, perStep, perfRunId };
+}
+function generateK6Script(flowName, actionNodes, config) {
+  const lines = [];
+  const durationSec = Math.round(config.duration / 1e3);
+  lines.push(`import http from 'k6/http';`);
+  lines.push(`import { check, sleep } from 'k6';`);
+  lines.push(`import { Trend } from 'k6/metrics';`);
+  lines.push(``);
+  lines.push(`// Generated by GhostRun from flow: "${flowName}"`);
+  lines.push(`// Run with: k6 run <this-file>`);
+  lines.push(``);
+  lines.push(`export const options = {`);
+  lines.push(`  stages: [`);
+  lines.push(`    { duration: '${Math.max(5, Math.round(durationSec * 0.2))}s', target: ${config.vus} },`);
+  lines.push(`    { duration: '${Math.max(10, Math.round(durationSec * 0.6))}s', target: ${config.vus} },`);
+  lines.push(`    { duration: '${Math.max(5, Math.round(durationSec * 0.2))}s', target: 0 },`);
+  lines.push(`  ],`);
+  lines.push(`  thresholds: {`);
+  lines.push(`    http_req_duration: ['p(95)<${config.p95threshold}'],`);
+  lines.push(`    http_req_failed: ['rate<${(config.errorThreshold / 100).toFixed(2)}'],`);
+  lines.push(`  },`);
+  lines.push(`};`);
+  lines.push(``);
+  const httpSteps = actionNodes.filter((n) => n.action === "http:request");
+  for (const node of httpSteps) {
+    const varName = k6VarName(node.label || "request");
+    lines.push(`const ${varName}Duration = new Trend('${varName}_duration');`);
+  }
+  if (httpSteps.length) lines.push(``);
+  lines.push(`export default function () {`);
+  lines.push(`  let res;`);
+  const declaredVars = /* @__PURE__ */ new Set();
+  let lastHttpVarName = "res";
+  let lastHttpNodeLabel = "";
+  for (const node of actionNodes) {
+    const action = node.action;
+    if (action === "set:variable") {
+      const varName = node.variable;
+      const val = toK6Value(node.value);
+      if (!declaredVars.has(varName)) {
+        lines.push(`  let ${varName} = ${val};`);
+        declaredVars.add(varName);
+      } else {
+        lines.push(`  ${varName} = ${val};`);
+      }
+    } else if (action === "http:request") {
+      const method = (node.method || "GET").toUpperCase();
+      const url = toK6Value(node.url);
+      const metricVar = k6VarName(node.label || "request") + "Duration";
+      lastHttpNodeLabel = node.label || "";
+      lastHttpVarName = `r${httpSteps.indexOf(node) + 1}`;
+      const paramParts = [];
+      const headerEntries = [];
+      const rawHeaders = node.headers || {};
+      for (const [k, v] of Object.entries(rawHeaders)) {
+        headerEntries.push(`'${k}': ${toK6Value(v)}`);
+      }
+      const auth = node.auth;
+      if (auth?.type === "bearer") {
+        headerEntries.push(`'Authorization': \`Bearer \${${toK6Var(auth.token || "")}}\``);
+      } else if (auth?.type === "basic") {
+        headerEntries.push(`'Authorization': 'Basic ' + btoa(\`\${${toK6Var(auth.username || "")}}:\${${toK6Var(auth.password || "")}}\`)`);
+      } else if (auth?.type === "apikey") {
+        headerEntries.push(`'${auth.header || "X-API-Key"}': ${toK6Value(auth.key || "")}`);
+      }
+      if (headerEntries.length) {
+        paramParts.push(`headers: { ${headerEntries.join(", ")} }`);
+      }
+      const paramStr = paramParts.length ? `, { ${paramParts.join(", ")} }` : "";
+      if (["GET", "DELETE", "HEAD"].includes(method)) {
+        lines.push(`  const ${lastHttpVarName} = http.${method.toLowerCase()}(${url}${paramStr});`);
+      } else {
+        const bodyVal = node.body ? toK6Value(node.body) : "null";
+        const hasContentType = headerEntries.some((h) => h.includes("Content-Type"));
+        const ctHeader = hasContentType ? "" : `, headers: { 'Content-Type': 'application/json' }`;
+        const bodyStr = `JSON.stringify(${bodyVal})`;
+        const pStr = paramParts.length ? `, { ${paramParts.join(", ")}${ctHeader} }` : `, { headers: { 'Content-Type': 'application/json' } }`;
+        lines.push(`  const ${lastHttpVarName} = http.${method.toLowerCase()}(${url}, ${bodyStr}${pStr});`);
+      }
+      lines.push(`  ${metricVar}.add(${lastHttpVarName}.timings.duration);`);
+      const extract = node.extract;
+      if (extract) {
+        for (const [varName, jp] of Object.entries(extract)) {
+          const jsonKey = jp.replace(/^\$\.?/, "");
+          if (!declaredVars.has(varName)) {
+            lines.push(`  let ${varName} = ${lastHttpVarName}.json('${jsonKey}');`);
+            declaredVars.add(varName);
+          } else {
+            lines.push(`  ${varName} = ${lastHttpVarName}.json('${jsonKey}');`);
+          }
+        }
+      }
+    } else if (action === "assert:response" || action.startsWith("assert:")) {
+      const assertType = node.assert || "status";
+      const checkLabel = node.label || `assert ${assertType}`;
+      let checkFn = "";
+      switch (assertType) {
+        case "status":
+          checkFn = `(r) => r.status === ${node.expected ?? 200}`;
+          break;
+        case "body:contains":
+          checkFn = `(r) => r.body.includes(${JSON.stringify(node.expected ?? "")})`;
+          break;
+        case "json:path": {
+          const jp = (node.path || "").replace(/^\$\.?/, "");
+          checkFn = `(r) => String(r.json('${jp}')) === ${JSON.stringify(String(node.expected ?? ""))}`;
+          break;
+        }
+        case "json:exists": {
+          const jp = (node.path || "").replace(/^\$\.?/, "");
+          checkFn = `(r) => r.json('${jp}') !== null`;
+          break;
+        }
+        case "header":
+          checkFn = `(r) => r.headers['${node.header ?? ""}'] !== undefined`;
+          break;
+        case "time":
+          checkFn = `(r) => r.timings.duration < ${node.expected ?? 2e3}`;
+          break;
+        default:
+          checkFn = `() => true /* ${assertType} */`;
+      }
+      lines.push(`  check(${lastHttpVarName}, { ${JSON.stringify(checkLabel)}: ${checkFn} });`);
+    } else if (action === "extract:json") {
+      const varName = node.variable;
+      const jp = (node.path || "").replace(/^\$\.?/, "");
+      if (!declaredVars.has(varName)) {
+        lines.push(`  let ${varName} = ${lastHttpVarName}.json('${jp}');`);
+        declaredVars.add(varName);
+      } else {
+        lines.push(`  ${varName} = ${lastHttpVarName}.json('${jp}');`);
+      }
+    }
+  }
+  lines.push(`  sleep(0.1);`);
+  lines.push(`}`);
+  return lines.join("\n");
+}
+function k6VarName(label) {
+  return label.replace(/[^a-zA-Z0-9]/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_").toLowerCase() || "step";
+}
+function toK6Value(val) {
+  if (typeof val === "string") {
+    if (val.includes("{{")) {
+      const converted = val.replace(/\{\{(\w+)\}\}/g, (_, k) => `\${${k}}`);
+      return `\`${converted}\``;
+    }
+    return JSON.stringify(val);
+  }
+  if (typeof val === "object" && val !== null) {
+    const entries = Object.entries(val).map(([k, v]) => `${JSON.stringify(k)}: ${toK6Value(v)}`).join(", ");
+    return `{ ${entries} }`;
+  }
+  return JSON.stringify(val);
+}
+function toK6Var(val) {
+  if (val.match(/^\{\{(\w+)\}\}$/)) return val.replace(/^\{\{(\w+)\}\}$/, "$1");
+  return JSON.stringify(val);
 }
 async function isOllamaRunning() {
   const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || "http://localhost:11434";
@@ -4319,9 +5126,9 @@ function parseVars(argv) {
       i++;
     }
   }
-  const envFile = path.join(process.cwd(), ".ghostrun.env");
-  if (fs.existsSync(envFile)) {
-    const lines = fs.readFileSync(envFile, "utf8").split("\n");
+  const envFile = path2.join(process.cwd(), ".ghostrun.env");
+  if (fs2.existsSync(envFile)) {
+    const lines = fs2.readFileSync(envFile, "utf8").split("\n");
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
@@ -4339,16 +5146,16 @@ function resolveVars(text, vars) {
   return text.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] !== void 0 ? vars[k] : `{{${k}}}`);
 }
 async function loadSession(context, name) {
-  const sessionPath = path.join(DATA_PATH, "sessions", `${name}.json`);
-  if (!fs.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
-  const cookies = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
+  const sessionPath = path2.join(DATA_PATH2, "sessions", `${name}.json`);
+  if (!fs2.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
+  const cookies = JSON.parse(fs2.readFileSync(sessionPath, "utf-8"));
   await context.addCookies(cookies);
   return cookies.length;
 }
 async function saveSession(context, name) {
   const cookies = await context.cookies();
-  const sessionPath = path.join(DATA_PATH, "sessions", `${name}.json`);
-  fs.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
+  const sessionPath = path2.join(DATA_PATH2, "sessions", `${name}.json`);
+  fs2.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
   return cookies.length;
 }
 async function runLearn(url, nameOverride) {
@@ -4542,23 +5349,36 @@ async function executeFlow(flowId, vars, opts) {
   }
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
-  const browser = await import_playwright.chromium.launch({ headless: !opts?.visible });
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  if (opts?.sessionLoad) {
-    try {
-      const count = await loadSession(context, opts.sessionLoad);
-      if (!opts?.quiet) info(`Session: ${import_chalk.default.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
-    } catch (e) {
-      warn(String(e));
-    }
-  }
-  if (startUrl) await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15e3 });
   const actionNodes = graph.nodes.filter((n) => n.type === "action");
   let stepNum = 1, failed = false;
   let failedStepInfo = null;
   const runStart = Date.now();
   const runVars = { ...vars || {} };
+  const activeEnv = db.getActiveEnvironment();
+  if (activeEnv) {
+    Object.assign(runVars, activeEnv.variables);
+    if (activeEnv.baseUrl && !runVars["__baseUrl"]) runVars["__baseUrl"] = activeEnv.baseUrl;
+  }
+  const ctx = { variables: runVars, environmentName: activeEnv?.name };
+  const API_ONLY_ACTIONS = /* @__PURE__ */ new Set(["http:request", "assert:response", "assert:status", "assert:body", "assert:header", "assert:time", "set:variable", "extract:json", "env:switch"]);
+  const hasBrowserActions = actionNodes.some((n) => !API_ONLY_ACTIONS.has(n.action));
+  let browser = null;
+  let browserCtx = null;
+  let page = null;
+  if (hasBrowserActions) {
+    browser = await import_playwright.chromium.launch({ headless: !opts?.visible });
+    browserCtx = await browser.newContext();
+    page = await browserCtx.newPage();
+    if (opts?.sessionLoad) {
+      try {
+        const count = await loadSession(browserCtx, opts.sessionLoad);
+        if (!opts?.quiet) info(`Session: ${import_chalk.default.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+      } catch (e) {
+        warn(String(e));
+      }
+    }
+    if (startUrl) await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15e3 });
+  }
   let PNG = null;
   let pixelmatch2 = null;
   try {
@@ -4582,35 +5402,40 @@ async function executeFlow(flowId, vars, opts) {
         value: node.value ? resolveVars(node.value, runVars) : node.value,
         selector: node.selector ? resolveVars(node.selector, runVars) : node.selector
       };
-      await executeAction(page, action, resolvedNode);
-      if (action === "click") {
+      await executeAction(page, action, resolvedNode, ctx, run.id, stepNum);
+      if (action === "click" && page) {
         await page.waitForLoadState("domcontentloaded", { timeout: 3e3 }).catch(() => {
         });
       }
       const duration = Date.now() - t;
-      const screenshot = await page.screenshot();
-      const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
-      fs.writeFileSync(sp, screenshot);
-      let diffPercent;
-      const baseline = db.getBaseline(flow.id, stepNum);
-      if (baseline && PNG && pixelmatch2 && fs.existsSync(baseline.screenshot_path)) {
-        try {
-          const img1 = PNG.sync.read(fs.readFileSync(baseline.screenshot_path));
-          const img2 = PNG.sync.read(screenshot);
-          const w = Math.min(img1.width, img2.width);
-          const h = Math.min(img1.height, img2.height);
-          const diff = new PNG({ width: w, height: h });
-          const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
-          diffPercent = parseFloat((numDiff / (w * h) * 100).toFixed(1));
-          if (diffPercent > 5) {
-            log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}%`));
+      const isApiAction = API_ONLY_ACTIONS.has(action);
+      if (!isApiAction && page) {
+        const screenshot = await page.screenshot();
+        const sp = path2.join(screenshotsDir, `step-${stepNum}.png`);
+        fs2.writeFileSync(sp, screenshot);
+        let diffPercent;
+        const baseline = db.getBaseline(flow.id, stepNum);
+        if (baseline && PNG && pixelmatch2 && fs2.existsSync(baseline.screenshot_path)) {
+          try {
+            const img1 = PNG.sync.read(fs2.readFileSync(baseline.screenshot_path));
+            const img2 = PNG.sync.read(screenshot);
+            const w = Math.min(img1.width, img2.width);
+            const h = Math.min(img1.height, img2.height);
+            const diff = new PNG({ width: w, height: h });
+            const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
+            diffPercent = parseFloat((numDiff / (w * h) * 100).toFixed(1));
+            if (diffPercent > 5) {
+              log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}%`));
+            }
+          } catch {
           }
-        } catch {
         }
-      }
-      db.updateStep(step.id, { status: "passed", duration, screenshotPath: sp, ...diffPercent !== void 0 ? { diffPercent } : {} });
-      if (diffPercent !== void 0 && diffPercent > 5) {
-        db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
+        db.updateStep(step.id, { status: "passed", duration, screenshotPath: sp, ...diffPercent !== void 0 ? { diffPercent } : {} });
+        if (diffPercent !== void 0 && diffPercent > 5) {
+          db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
+        }
+      } else {
+        db.updateStep(step.id, { status: "passed", duration });
       }
       log(import_chalk.default.green(`      \u2713 passed`) + import_chalk.default.gray(` (${duration}ms)`));
       if (action === "extract" && resolvedNode.__extracted) {
@@ -4622,18 +5447,18 @@ async function executeFlow(flowId, vars, opts) {
     } catch (err) {
       const duration = Date.now() - t;
       let errorMessage = err instanceof Error ? err.message.split("\n")[0] : String(err);
-      if (["click", "fill", "select"].includes(action)) {
+      if (["click", "fill", "select"].includes(action) && page) {
         const healed = await attemptHeal(page, label, node.selector, action);
         if (healed) {
           try {
             const healedNode = { ...node, selector: healed };
-            await executeAction(page, action, healedNode);
+            await executeAction(page, action, healedNode, ctx, run.id, stepNum);
             if (action === "click") await page.waitForLoadState("domcontentloaded", { timeout: 3e3 }).catch(() => {
             });
             const healDuration = Date.now() - t;
             const screenshot = await page.screenshot();
-            const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
-            fs.writeFileSync(sp, screenshot);
+            const sp = path2.join(screenshotsDir, `step-${stepNum}.png`);
+            fs2.writeFileSync(sp, screenshot);
             log(import_chalk.default.yellow(`      ~ healed selector: ${healed}`));
             db.updateStep(step.id, { status: "passed", duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
             log(import_chalk.default.green(`      \u2713 passed after heal (${healDuration}ms)`));
@@ -4644,10 +5469,14 @@ async function executeFlow(flowId, vars, opts) {
         }
       }
       try {
-        const screenshot = await page.screenshot();
-        const sp = path.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
-        fs.writeFileSync(sp, screenshot);
-        db.updateStep(step.id, { status: "failed", duration, errorMessage, screenshotPath: sp });
+        if (page) {
+          const screenshot = await page.screenshot();
+          const sp = path2.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
+          fs2.writeFileSync(sp, screenshot);
+          db.updateStep(step.id, { status: "failed", duration, errorMessage, screenshotPath: sp });
+        } else {
+          db.updateStep(step.id, { status: "failed", duration, errorMessage });
+        }
       } catch {
         db.updateStep(step.id, { status: "failed", duration, errorMessage });
       }
@@ -4660,15 +5489,15 @@ async function executeFlow(flowId, vars, opts) {
     }
     stepNum++;
   }
-  if (opts?.sessionSave) {
+  if (opts?.sessionSave && browserCtx) {
     try {
-      const count = await saveSession(context, opts.sessionSave);
+      const count = await saveSession(browserCtx, opts.sessionSave);
       if (!opts?.quiet) success(`Session saved: ${import_chalk.default.cyan(opts.sessionSave)} (${count} cookies)`);
     } catch (e) {
       warn(`Could not save session: ${e}`);
     }
   }
-  await browser.close();
+  if (browser) await browser.close();
   const totalDuration = Date.now() - runStart;
   let summary = null;
   if (failed && failedStepInfo) {
@@ -4732,52 +5561,53 @@ async function executeFlow(flowId, vars, opts) {
   console.log();
   return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
 }
-async function executeAction(page, action, node) {
+async function executeAction(page, action, node, ctx, runId, stepNumber) {
+  const p = page;
   switch (action) {
     case "navigate":
-      await page.goto(node.url || node.value, { waitUntil: "domcontentloaded", timeout: 15e3 });
+      await p.goto(node.url || node.value, { waitUntil: "domcontentloaded", timeout: 15e3 });
       break;
     case "click":
-      await page.click(node.selector, { timeout: 1e4 });
+      await p.click(node.selector, { timeout: 1e4 });
       break;
     case "fill":
-      await page.fill(node.selector, sanitizePII(node.value || ""), { timeout: 1e4 });
+      await p.fill(node.selector, sanitizePII(node.value || ""), { timeout: 1e4 });
       break;
     case "select":
-      await page.selectOption(node.selector, node.value || "", { timeout: 1e4 });
+      await p.selectOption(node.selector, node.value || "", { timeout: 1e4 });
       break;
     case "check":
-      if (node.value === "true") await page.check(node.selector, { timeout: 1e4 });
-      else await page.uncheck(node.selector, { timeout: 1e4 });
+      if (node.value === "true") await p.check(node.selector, { timeout: 1e4 });
+      else await p.uncheck(node.selector, { timeout: 1e4 });
       break;
     case "wait":
-      await page.waitForSelector(node.selector, { timeout: 1e4 });
+      await p.waitForSelector(node.selector, { timeout: 1e4 });
       break;
     case "press":
-      await page.press(node.selector, node.value || "Enter");
+      await p.press(node.selector, node.value || "Enter");
       break;
     case "assert:text": {
       const val = node.value;
-      const count = await page.getByText(val, { exact: false }).count();
-      const visible = count > 0 ? await page.getByText(val, { exact: false }).first().isVisible({ timeout: 5e3 }).catch(() => false) : false;
+      const count = await p.getByText(val, { exact: false }).count();
+      const visible = count > 0 ? await p.getByText(val, { exact: false }).first().isVisible({ timeout: 5e3 }).catch(() => false) : false;
       if (!visible) {
-        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+        const bodyText = await p.evaluate(() => document.body.innerText).catch(() => "");
         if (!bodyText.includes(val)) throw new Error(`assert:text failed \u2014 "${val}" not visible on page`);
       }
       break;
     }
     case "assert:url": {
-      const currentUrl = page.url();
+      const currentUrl = p.url();
       if (!currentUrl.includes(node.value)) throw new Error(`assert:url failed \u2014 URL "${currentUrl}" does not contain "${node.value}"`);
       break;
     }
     case "assert:element": {
-      const count = await page.locator(node.selector).count();
+      const count = await p.locator(node.selector).count();
       if (count === 0) throw new Error(`assert:element failed \u2014 selector "${node.selector}" not found`);
       break;
     }
     case "assert:title": {
-      const title = await page.title();
+      const title = await p.title();
       if (!title.toLowerCase().includes(node.value.toLowerCase())) throw new Error(`assert:title failed \u2014 title "${title}" does not contain "${node.value}"`);
       break;
     }
@@ -4790,99 +5620,99 @@ async function executeAction(page, action, node) {
       let extractedValue = "";
       if (selector) {
         try {
-          extractedValue = await page.locator(selector).first().innerText({ timeout: 1e4 });
+          extractedValue = await p.locator(selector).first().innerText({ timeout: 1e4 });
         } catch {
-          extractedValue = await page.locator(selector).first().getAttribute("value") || "";
+          extractedValue = await p.locator(selector).first().getAttribute("value") || "";
         }
       } else if (node.attribute && node.selector) {
-        extractedValue = await page.locator(node.selector).first().getAttribute(node.attribute) || "";
+        extractedValue = await p.locator(node.selector).first().getAttribute(node.attribute) || "";
       }
       node.__extracted = { variable, value: extractedValue.trim() };
       break;
     }
     case "scroll:bottom":
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await new Promise((r) => setTimeout(r, 1500));
       break;
     case "scroll:up":
-      await page.evaluate(() => window.scrollTo(0, 0));
+      await p.evaluate(() => window.scrollTo(0, 0));
       break;
     case "scroll:load": {
       const times = parseInt(node.value || "5", 10);
       for (let i = 0; i < times; i++) {
-        const prevHeight = await page.evaluate(() => document.body.scrollHeight);
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        const prevHeight = await p.evaluate(() => document.body.scrollHeight);
+        await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await new Promise((r) => setTimeout(r, 2e3));
-        const newHeight = await page.evaluate(() => document.body.scrollHeight);
+        const newHeight = await p.evaluate(() => document.body.scrollHeight);
         if (newHeight === prevHeight) break;
       }
       break;
     }
     case "next:page": {
       const nextSel = node.selector || 'a[rel="next"], [aria-label="Next page"], [aria-label="Next"], button:has-text("Next"), .next-page, .pagination-next';
-      await page.click(nextSel, { timeout: 1e4 });
-      await page.waitForLoadState("domcontentloaded", { timeout: 15e3 });
+      await p.click(nextSel, { timeout: 1e4 });
+      await p.waitForLoadState("domcontentloaded", { timeout: 15e3 });
       break;
     }
     case "hover":
-      await page.hover(node.selector, { timeout: 1e4 });
+      await p.hover(node.selector, { timeout: 1e4 });
       break;
     case "screenshot":
       break;
     // ── Additional interactions ────────────────────────────────────────
     case "dblclick":
-      await page.dblclick(node.selector, { timeout: 1e4 });
+      await p.dblclick(node.selector, { timeout: 1e4 });
       break;
     case "type": {
       const delay = parseInt(node.delay || "50", 10);
-      await page.type(node.selector, sanitizePII(node.value || ""), { delay });
+      await p.type(node.selector, sanitizePII(node.value || ""), { delay });
       break;
     }
     case "clear":
-      await page.fill(node.selector, "", { timeout: 1e4 });
+      await p.fill(node.selector, "", { timeout: 1e4 });
       break;
     case "upload": {
       const files = (node.value || "").split(",").map((s) => s.trim()).filter(Boolean);
       if (files.length === 0) throw new Error("upload: no file paths specified in value");
-      await page.setInputFiles(node.selector, files, { timeout: 1e4 });
+      await p.setInputFiles(node.selector, files, { timeout: 1e4 });
       break;
     }
     case "focus":
-      await page.focus(node.selector, { timeout: 1e4 });
+      await p.focus(node.selector, { timeout: 1e4 });
       break;
     case "drag": {
       const target = node.value;
       if (!target) throw new Error("drag: value must be the target selector");
-      const source = await page.locator(node.selector).first().boundingBox();
-      const dest = await page.locator(target).first().boundingBox();
+      const source = await p.locator(node.selector).first().boundingBox();
+      const dest = await p.locator(target).first().boundingBox();
       if (!source || !dest) throw new Error("drag: source or target element not found");
-      await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(dest.x + dest.width / 2, dest.y + dest.height / 2, { steps: 10 });
-      await page.mouse.up();
+      await p.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+      await p.mouse.down();
+      await p.mouse.move(dest.x + dest.width / 2, dest.y + dest.height / 2, { steps: 10 });
+      await p.mouse.up();
       break;
     }
     case "keyboard": {
       const key = node.value || "Enter";
       if (node.selector) {
-        await page.press(node.selector, key);
+        await p.press(node.selector, key);
       } else {
-        await page.keyboard.press(key);
+        await p.keyboard.press(key);
       }
       break;
     }
     case "reload":
-      await page.reload({ waitUntil: "domcontentloaded", timeout: 15e3 });
+      await p.reload({ waitUntil: "domcontentloaded", timeout: 15e3 });
       break;
     case "back":
-      await page.goBack({ waitUntil: "domcontentloaded", timeout: 15e3 });
+      await p.goBack({ waitUntil: "domcontentloaded", timeout: 15e3 });
       break;
     case "forward":
-      await page.goForward({ waitUntil: "domcontentloaded", timeout: 15e3 });
+      await p.goForward({ waitUntil: "domcontentloaded", timeout: 15e3 });
       break;
     case "wait:text": {
       const waitVal = node.value;
-      await page.waitForFunction(
+      await p.waitForFunction(
         (text) => document.body.innerText.includes(text),
         waitVal,
         { timeout: 15e3 }
@@ -4891,7 +5721,7 @@ async function executeAction(page, action, node) {
     }
     case "wait:url": {
       const urlPattern = node.value;
-      await page.waitForURL((url) => url.toString().includes(urlPattern), { timeout: 15e3 });
+      await p.waitForURL((url) => url.toString().includes(urlPattern), { timeout: 15e3 });
       break;
     }
     case "wait:ms": {
@@ -4900,48 +5730,48 @@ async function executeAction(page, action, node) {
       break;
     }
     case "scroll:element": {
-      await page.locator(node.selector).first().scrollIntoViewIfNeeded({ timeout: 1e4 });
+      await p.locator(node.selector).first().scrollIntoViewIfNeeded({ timeout: 1e4 });
       break;
     }
     case "eval": {
       const script = node.value;
       if (!script) throw new Error("eval: value must be a JavaScript expression");
-      await page.evaluate(new Function(script));
+      await p.evaluate(new Function(script));
       break;
     }
     case "iframe:enter": {
-      const frame = page.frameLocator(node.selector);
-      page.__activeFrame = frame;
+      const frame = p.frameLocator(node.selector);
+      p.__activeFrame = frame;
       break;
     }
     case "iframe:exit":
-      page.__activeFrame = null;
+      p.__activeFrame = null;
       break;
     case "assert:visible": {
-      const isVisible = await page.locator(node.selector).first().isVisible({ timeout: 1e4 }).catch(() => false);
+      const isVisible = await p.locator(node.selector).first().isVisible({ timeout: 1e4 }).catch(() => false);
       if (!isVisible) throw new Error(`assert:visible failed \u2014 "${node.selector}" is not visible`);
       break;
     }
     case "assert:hidden": {
-      const isHidden = await page.locator(node.selector).first().isHidden({ timeout: 5e3 }).catch(() => true);
+      const isHidden = await p.locator(node.selector).first().isHidden({ timeout: 5e3 }).catch(() => true);
       if (!isHidden) throw new Error(`assert:hidden failed \u2014 "${node.selector}" is visible but expected hidden`);
       break;
     }
     case "assert:value": {
-      const inputVal = await page.inputValue(node.selector, { timeout: 1e4 });
+      const inputVal = await p.inputValue(node.selector, { timeout: 1e4 });
       if (!inputVal.includes(node.value)) throw new Error(`assert:value failed \u2014 input value "${inputVal}" does not contain "${node.value}"`);
       break;
     }
     case "assert:count": {
       const expected = parseInt(node.value, 10);
-      const actual = await page.locator(node.selector).count();
+      const actual = await p.locator(node.selector).count();
       if (actual !== expected) throw new Error(`assert:count failed \u2014 found ${actual} elements, expected ${expected}`);
       break;
     }
     case "assert:attr": {
       const [attrName, ...rest] = (node.value || "").split("=");
       const expected = rest.join("=");
-      const actual = await page.locator(node.selector).first().getAttribute(attrName, { timeout: 1e4 });
+      const actual = await p.locator(node.selector).first().getAttribute(attrName, { timeout: 1e4 });
       if (actual === null) throw new Error(`assert:attr failed \u2014 attribute "${attrName}" not found on "${node.selector}"`);
       if (!actual.includes(expected)) throw new Error(`assert:attr failed \u2014 "${attrName}" is "${actual}", expected to contain "${expected}"`);
       break;
@@ -4949,24 +5779,56 @@ async function executeAction(page, action, node) {
     case "cookie:set": {
       const parts = (node.value || "").split(";");
       const [cookieName, cookieVal] = parts[0].split("=");
-      const domain = parts.find((p) => p.trim().startsWith("domain="))?.split("=")[1] || new URL(page.url()).hostname;
-      await page.context().addCookies([{ name: cookieName.trim(), value: cookieVal?.trim() || "", domain, path: "/" }]);
+      const domain = parts.find((cp) => cp.trim().startsWith("domain="))?.split("=")[1] || new URL(p.url()).hostname;
+      await p.context().addCookies([{ name: cookieName.trim(), value: cookieVal?.trim() || "", domain, path: "/" }]);
       break;
     }
     case "cookie:clear":
-      await page.context().clearCookies();
+      await p.context().clearCookies();
       break;
     case "storage:set": {
       const eqIdx = (node.value || "").indexOf("=");
       if (eqIdx === -1) throw new Error('storage:set: value must be "key=value"');
       const key = node.value.slice(0, eqIdx);
       const val = node.value.slice(eqIdx + 1);
-      await page.evaluate(([k, v]) => localStorage.setItem(k, v), [key, val]);
+      await p.evaluate(([k, v]) => localStorage.setItem(k, v), [key, val]);
       break;
     }
     case "assert:not-text": {
-      const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+      const bodyText = await p.evaluate(() => document.body.innerText).catch(() => "");
       if (bodyText.includes(node.value)) throw new Error(`assert:not-text failed \u2014 "${node.value}" IS present on page (expected absent)`);
+      break;
+    }
+    case "http:request":
+      if (!ctx) throw new Error("http:request requires execution context");
+      await executeHttpRequest(node, ctx, runId, stepNumber);
+      break;
+    case "assert:response":
+    case "assert:status":
+    case "assert:body":
+    case "assert:header":
+    case "assert:time":
+      if (!ctx) throw new Error("assert actions require execution context");
+      await executeApiAssert(node, ctx);
+      break;
+    case "set:variable":
+      if (!ctx) throw new Error("set:variable requires execution context");
+      executeSetVariable(node, ctx, runId, stepNumber);
+      break;
+    case "extract:json":
+      if (!ctx) throw new Error("extract:json requires execution context");
+      executeExtractJson(node, ctx, runId, stepNumber);
+      break;
+    case "env:switch": {
+      const envName = resolveVarsDeep(node.environment, ctx);
+      const env = db.findEnvironmentByName(envName);
+      if (!env) throw new Error(`Environment "${envName}" not found`);
+      db.setActiveEnvironment(env.id);
+      if (ctx) {
+        ctx.environmentName = env.name;
+        for (const [k, v] of Object.entries(env.variables)) ctx.variables[k] = v;
+        if (env.baseUrl) ctx.variables["__baseUrl"] = env.baseUrl;
+      }
       break;
     }
   }
@@ -5041,7 +5903,8 @@ async function runFlow(id, vars) {
     process.exit(1);
   }
   if (!jsonOutput) console.log(import_chalk.default.bold("\n  Running: ") + import_chalk.default.white(flow.name) + (visible ? import_chalk.default.yellow(" [visible]") : "") + "\n");
-  await executeFlow(id, vars, { visible, jsonOutput });
+  const result = await executeFlow(id, vars, { visible, jsonOutput });
+  return result?.runId || null;
 }
 async function runFixFlow(id) {
   printLogo();
@@ -5196,8 +6059,8 @@ async function runDiff(runId1, runId2) {
     process.exit(1);
     return;
   }
-  const diffDir = path.join(DATA_PATH, "diffs", `${run1.id.slice(0, 8)}_vs_${run2.id.slice(0, 8)}`);
-  fs.mkdirSync(diffDir, { recursive: true });
+  const diffDir = path2.join(DATA_PATH2, "diffs", `${run1.id.slice(0, 8)}_vs_${run2.id.slice(0, 8)}`);
+  fs2.mkdirSync(diffDir, { recursive: true });
   const maxSteps = Math.max(steps1.length, steps2.length);
   let changed = 0, same = 0, missing = 0;
   console.log(import_chalk.default.gray("  Step  Status    Diff %  Screenshot"));
@@ -5208,21 +6071,21 @@ async function runDiff(runId1, runId2) {
     const name = (s1?.name || s2?.name || `Step ${i}`).slice(0, 30);
     const p1 = s1?.screenshotPath;
     const p2 = s2?.screenshotPath;
-    if (!p1 || !p2 || !fs.existsSync(p1) || !fs.existsSync(p2)) {
+    if (!p1 || !p2 || !fs2.existsSync(p1) || !fs2.existsSync(p2)) {
       console.log(`  ${import_chalk.default.gray(String(i).padStart(4))}  ${import_chalk.default.yellow("missing  ")}  ${import_chalk.default.gray("N/A    ")}  ${import_chalk.default.gray(name)}`);
       missing++;
       continue;
     }
     try {
-      const img1 = PNG.sync.read(fs.readFileSync(p1));
-      const img2 = PNG.sync.read(fs.readFileSync(p2));
+      const img1 = PNG.sync.read(fs2.readFileSync(p1));
+      const img2 = PNG.sync.read(fs2.readFileSync(p2));
       const w = Math.min(img1.width, img2.width);
       const h = Math.min(img1.height, img2.height);
       const diff = new PNG({ width: w, height: h });
       const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
       const pct = (numDiff / (w * h) * 100).toFixed(1);
-      const diffPath = path.join(diffDir, `step-${i}-diff.png`);
-      fs.writeFileSync(diffPath, PNG.sync.write(diff));
+      const diffPath = path2.join(diffDir, `step-${i}-diff.png`);
+      fs2.writeFileSync(diffPath, PNG.sync.write(diff));
       const isChanged = parseFloat(pct) > 0.5;
       if (isChanged) changed++;
       else same++;
@@ -5299,18 +6162,18 @@ async function runExportFlow(id) {
     process.exit(1);
   }
   const filename = `${flow.name.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.flow.json`;
-  fs.writeFileSync(filename, JSON.stringify({ version: "1.0.0", exportedAt: (/* @__PURE__ */ new Date()).toISOString(), flow: { name: flow.name, description: flow.description, appUrl: flow.appUrl, graph: JSON.parse(flow.graph) } }, null, 2));
+  fs2.writeFileSync(filename, JSON.stringify({ version: "1.0.0", exportedAt: (/* @__PURE__ */ new Date()).toISOString(), flow: { name: flow.name, description: flow.description, appUrl: flow.appUrl, graph: JSON.parse(flow.graph) } }, null, 2));
   success(`Exported to ${import_chalk.default.cyan(filename)}`);
   console.log();
 }
 async function runImportFlow(filepath) {
-  if (!fs.existsSync(filepath)) {
+  if (!fs2.existsSync(filepath)) {
     errorMsg("File not found: " + filepath);
     process.exit(1);
   }
   let data;
   try {
-    data = JSON.parse(fs.readFileSync(filepath, "utf8"));
+    data = JSON.parse(fs2.readFileSync(filepath, "utf8"));
   } catch {
     errorMsg("Invalid JSON");
     process.exit(1);
@@ -5319,6 +6182,364 @@ async function runImportFlow(filepath) {
   const created = db.createFlow({ name: data.flow.name, description: data.flow.description, appUrl: data.flow.appUrl, graph: data.flow.graph });
   success(`Imported: ${import_chalk.default.white(data.flow.name)}`);
   info("ID: " + import_chalk.default.gray(created.id.slice(0, 8)));
+  console.log();
+}
+async function runRenameFlow(id, newName) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) {
+    errorMsg("Flow not found: " + id);
+    process.exit(1);
+  }
+  db.updateFlow(flow.id, { name: newName });
+  success(`Renamed "${import_chalk.default.gray(flow.name)}" \u2192 "${import_chalk.default.white(newName)}"`);
+  console.log();
+}
+async function runCloneFlow(id) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) {
+    errorMsg("Flow not found: " + id);
+    process.exit(1);
+  }
+  const newName = flow.name + " (copy)";
+  const created = db.createFlow({ name: newName, description: flow.description ?? void 0, appUrl: flow.appUrl ?? void 0, graph: JSON.parse(flow.graph) });
+  success(`Cloned "${import_chalk.default.gray(flow.name)}" \u2192 "${import_chalk.default.white(newName)}"`);
+  info("New ID: " + import_chalk.default.gray(created.id.slice(0, 8)));
+  console.log();
+}
+function parseCurlTokens(input) {
+  const tokens = [];
+  let cur = "";
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if ((ch === " " || ch === "\n" || ch === "	") && !inSingle && !inDouble) {
+      if (cur) {
+        tokens.push(cur);
+        cur = "";
+      }
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      i++;
+      if (i < input.length) cur += input[i];
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) tokens.push(cur);
+  return tokens;
+}
+async function runFlowFromCurl(curlStr) {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  Import from curl\n"));
+  let input = curlStr || "";
+  if (!input.trim()) {
+    console.log(import_chalk.default.gray("  Paste your curl command (multi-line OK, end with empty line):\n"));
+    const lines = [];
+    while (true) {
+      const line = await askQuestion("  > ");
+      if (!line.trim()) break;
+      lines.push(line.replace(/\\$/, "").trim());
+    }
+    input = lines.join(" ");
+  }
+  input = input.replace(/^curl\s+/, "").trim();
+  if (!input) {
+    errorMsg("No curl command provided");
+    process.exit(1);
+  }
+  const tokens = parseCurlTokens(input);
+  let method = "GET";
+  let url = "";
+  const headers = {};
+  let body;
+  let bearerToken = "";
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "-X" || t === "--request") {
+      method = tokens[++i]?.toUpperCase() || "GET";
+      continue;
+    }
+    if (t === "-H" || t === "--header") {
+      const h = tokens[++i] || "";
+      const colon = h.indexOf(":");
+      if (colon > 0) {
+        const k = h.slice(0, colon).trim();
+        const v = h.slice(colon + 1).trim();
+        if (k.toLowerCase() === "authorization" && v.toLowerCase().startsWith("bearer ")) {
+          bearerToken = v.slice(7).trim();
+        } else {
+          headers[k] = v;
+        }
+      }
+      continue;
+    }
+    if (t === "-d" || t === "--data" || t === "--data-raw" || t === "--data-binary") {
+      const raw = tokens[++i] || "";
+      if (method === "GET") method = "POST";
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = raw;
+      }
+      continue;
+    }
+    if (t === "-u" || t === "--user") {
+      const creds = tokens[++i] || "";
+      const encoded = Buffer.from(creds).toString("base64");
+      headers["Authorization"] = `Basic ${encoded}`;
+      continue;
+    }
+    if (t === "--url") {
+      url = tokens[++i] || "";
+      continue;
+    }
+    if (t === "-s" || t === "--silent" || t === "-v" || t === "--verbose" || t === "-i" || t === "--include" || t === "-L" || t === "--location" || t === "--compressed") continue;
+    if (t === "-o" || t === "--output" || t === "--max-time" || t === "--connect-timeout" || t === "--proxy") {
+      i++;
+      continue;
+    }
+    if (!t.startsWith("-") && !url) url = t;
+  }
+  if (!url) {
+    errorMsg("Could not find URL in curl command");
+    process.exit(1);
+  }
+  const urlPath = (() => {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url;
+    }
+  })();
+  const defaultName = `${method} ${urlPath.split("/").filter(Boolean).slice(-1)[0] || urlPath}`;
+  const name = await askQuestion(import_chalk.default.cyan(`
+  Flow name [${defaultName}]: `));
+  const flowName = name.trim() || defaultName;
+  const nodes = [];
+  const nodeId = () => (0, import_uuid2.v4)();
+  const httpNode = {
+    id: nodeId(),
+    type: "action",
+    action: "http:request",
+    method,
+    url,
+    label: `${method} ${urlPath}`
+  };
+  if (Object.keys(headers).length) httpNode.headers = headers;
+  if (body !== void 0) httpNode.body = body;
+  if (bearerToken) httpNode.auth = { type: "bearer", token: bearerToken };
+  nodes.push(httpNode);
+  nodes.push({ id: nodeId(), type: "action", action: "assert:response", assert: "status", expected: 200, label: "Assert status 200" });
+  const isJson = headers["Content-Type"]?.includes("json") || headers["content-type"]?.includes("json") || typeof body === "object";
+  if (isJson || !body && method === "GET") {
+    nodes.push({ id: nodeId(), type: "action", action: "assert:response", assert: "time", expected: 2e3, label: "Assert response < 2000ms" });
+  }
+  const graph = { nodes, edges: [] };
+  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, appUrl: null, graph });
+  console.log();
+  success(`Flow created: ${import_chalk.default.white(flowName)}`);
+  info(`ID: ${import_chalk.default.gray(created.id.slice(0, 8))}`);
+  console.log(import_chalk.default.gray(`
+  Nodes created:`));
+  for (const n of nodes) console.log(import_chalk.default.gray(`    ${n.label}`));
+  console.log(import_chalk.default.gray(`
+  Run with: ghostrun run "${flowName}"`));
+  console.log(import_chalk.default.gray(`  Add more steps: ghostrun api:learn`));
+  console.log();
+}
+function parseYamlValue(s) {
+  if (s === "true") return true;
+  if (s === "false") return false;
+  if (s === "null" || s === "~") return null;
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
+  return s.replace(/^["']|["']$/g, "");
+}
+function parseSimpleYaml(text) {
+  const lines = text.split("\n");
+  const root = {};
+  const stack = [{ obj: root, indent: -1 }];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.search(/\S/);
+    const trimmed = line.trim();
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const parent = stack[stack.length - 1].obj;
+    if (trimmed.startsWith("- ")) {
+      const val = trimmed.slice(2).trim();
+      if (Array.isArray(parent)) {
+        const parsed = parseYamlValue(val);
+        parent.push(parsed);
+      }
+      continue;
+    }
+    const colonIdx = trimmed.indexOf(":");
+    if (colonIdx < 0) continue;
+    const key = trimmed.slice(0, colonIdx).trim().replace(/^["']|["']$/g, "");
+    const rest = trimmed.slice(colonIdx + 1).trim();
+    if (!Array.isArray(parent)) {
+      if (rest === "" || rest === "|" || rest === ">") {
+        const child = {};
+        parent[key] = child;
+        stack.push({ obj: child, indent });
+      } else if (rest === "-" || rest.startsWith("- ")) {
+        const arr = [];
+        parent[key] = arr;
+        stack.push({ obj: arr, indent });
+      } else {
+        parent[key] = parseYamlValue(rest);
+      }
+    }
+  }
+  return root;
+}
+async function runFlowFromSpec(filepath) {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  Import from OpenAPI Spec\n"));
+  if (!fs2.existsSync(filepath)) {
+    errorMsg("File not found: " + filepath);
+    process.exit(1);
+  }
+  let spec;
+  const raw = fs2.readFileSync(filepath, "utf8").trim();
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      spec = JSON.parse(raw);
+    } catch {
+      errorMsg("Invalid JSON");
+      process.exit(1);
+      return;
+    }
+  } else {
+    spec = parseSimpleYaml(raw);
+  }
+  const version = spec.openapi || spec.swagger || "2";
+  const specInfo = spec.info || {};
+  const title = specInfo.title || path2.basename(filepath, path2.extname(filepath));
+  const servers = spec.servers || [];
+  const baseUrl = servers[0]?.url || (spec.host ? `https://${spec.host}${spec.basePath || ""}` : "");
+  const paths = spec.paths || {};
+  console.log(import_chalk.default.gray(`  Spec: ${title} (OpenAPI ${version})`));
+  console.log(import_chalk.default.gray(`  Base URL: ${baseUrl || "(not set \u2014 use environment variables)"}`));
+  console.log(import_chalk.default.gray(`  Paths: ${Object.keys(paths).length}
+`));
+  if (Object.keys(paths).length === 0) {
+    errorMsg("No paths found in spec");
+    process.exit(1);
+  }
+  const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
+  const tagGroups = {};
+  for (const [pathKey, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op) continue;
+      const tags2 = op.tags || ["default"];
+      const tag = tags2[0] || "default";
+      if (!tagGroups[tag]) tagGroups[tag] = [];
+      tagGroups[tag].push({ path: pathKey, method, op });
+    }
+  }
+  const tags = Object.keys(tagGroups);
+  console.log(import_chalk.default.gray(`  Tags found: ${tags.join(", ")}`));
+  console.log(import_chalk.default.cyan("\n  Options:"));
+  console.log(import_chalk.default.gray("  1 \u2014 One flow per tag group (recommended)"));
+  console.log(import_chalk.default.gray("  2 \u2014 One flow per endpoint"));
+  console.log(import_chalk.default.gray("  3 \u2014 Single flow with all endpoints"));
+  const choice = (await askQuestion("\n  Choice [1]: ")).trim() || "1";
+  const flowsToCreate = [];
+  const nodeId = () => (0, import_uuid2.v4)();
+  function makeHttpNode(method, pathKey, op, bUrl) {
+    const resolvedUrl = bUrl ? `${bUrl.replace(/\/$/, "")}${pathKey}` : pathKey;
+    const summary = op.summary || `${method.toUpperCase()} ${pathKey}`;
+    const node = {
+      id: nodeId(),
+      type: "action",
+      action: "http:request",
+      method: method.toUpperCase(),
+      url: resolvedUrl,
+      label: summary
+    };
+    const requestBody = op.requestBody;
+    if (requestBody) {
+      const content = requestBody.content;
+      if (content?.["application/json"]) {
+        const schema = content["application/json"]?.schema;
+        if (schema?.example) node.body = schema.example;
+        else if (schema?.properties) {
+          const body = {};
+          for (const prop of Object.keys(schema.properties)) body[prop] = `{{${prop}}}`;
+          node.body = body;
+        }
+        node.headers = { "Content-Type": "application/json" };
+      }
+    }
+    const pathParams = (op.parameters || []).filter((p) => p.in === "path");
+    if (pathParams.length) {
+      let urlStr = node.url;
+      for (const p of pathParams) {
+        urlStr = urlStr.replace(`{${p.name}}`, `{{${p.name}}}`);
+      }
+      node.url = urlStr;
+    }
+    return node;
+  }
+  function makeAssertNode(successCode = 200) {
+    return { id: nodeId(), type: "action", action: "assert:response", assert: "status", expected: successCode, label: `Assert status ${successCode}` };
+  }
+  if (choice === "1") {
+    for (const [tag, ops] of Object.entries(tagGroups)) {
+      const nodes = [];
+      for (const { path: pathKey, method, op } of ops) {
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        const responses = op.responses || {};
+        const successCode = Object.keys(responses).find((c) => Number(c) >= 200 && Number(c) < 300);
+        nodes.push(makeAssertNode(successCode ? Number(successCode) : 200));
+      }
+      flowsToCreate.push({ name: `${title} \u2014 ${tag}`, description: `Auto-generated from OpenAPI spec: ${title}`, nodes });
+    }
+  } else if (choice === "2") {
+    for (const [tag, ops] of Object.entries(tagGroups)) {
+      for (const { path: pathKey, method, op } of ops) {
+        const summary = op.summary || `${method.toUpperCase()} ${pathKey}`;
+        const nodes = [];
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        const responses = op.responses || {};
+        const successCode = Object.keys(responses).find((c) => Number(c) >= 200 && Number(c) < 300);
+        nodes.push(makeAssertNode(successCode ? Number(successCode) : 200));
+        flowsToCreate.push({ name: summary, description: `${tag}: ${method.toUpperCase()} ${pathKey}`, nodes });
+      }
+    }
+  } else {
+    const nodes = [];
+    for (const [, ops] of Object.entries(tagGroups)) {
+      for (const { path: pathKey, method, op } of ops) {
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        nodes.push(makeAssertNode(200));
+      }
+    }
+    flowsToCreate.push({ name: title, description: `Auto-generated from OpenAPI spec: ${filepath}`, nodes });
+  }
+  console.log();
+  for (const f of flowsToCreate) {
+    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || null, graph: { nodes: f.nodes, edges: [] } });
+    success(`Created: ${import_chalk.default.white(f.name)} ${import_chalk.default.gray("(" + f.nodes.length + " steps, id: " + created.id.slice(0, 8) + ")")}`);
+  }
+  console.log(import_chalk.default.gray(`
+  ${flowsToCreate.length} flow(s) created. Run with: ghostrun run "<name>"`));
+  if (baseUrl) console.log(import_chalk.default.gray(`  Base URL: ${baseUrl}`));
+  else console.log(import_chalk.default.gray(`  Tip: set base URL with: ghostrun env:create dev <base-url>`));
   console.log();
 }
 async function runListRuns() {
@@ -5404,6 +6625,78 @@ async function runShowRun(id) {
     }
   }
   console.log();
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+async function generateRunReport(runId, outFile) {
+  const run = db.findRunByPartialId(runId);
+  if (!run) return;
+  const flow = db.getFlow(run.flowId);
+  const steps = db.listSteps(run.id);
+  const apiResps = db.getApiResponses ? db.getApiResponses(run.id) : [];
+  const statusColor = run.status === "passed" ? "#56d364" : "#f85149";
+  const durStr = run.duration ? run.duration >= 1e3 ? (run.duration / 1e3).toFixed(2) + "s" : run.duration + "ms" : "\u2014";
+  const stepsHtml = steps.map((step, i) => {
+    const icon = step.status === "passed" ? "\u2713" : step.status === "failed" ? "\u2717" : "\u25CB";
+    const color = step.status === "passed" ? "#56d364" : step.status === "failed" ? "#f85149" : "#e3b341";
+    const dur = step.duration ? step.duration >= 1e3 ? (step.duration / 1e3).toFixed(2) + "s" : step.duration + "ms" : "\u2014";
+    const errHtml = step.errorMessage ? `<div class="step-error">${escapeHtml(step.errorMessage)}</div>` : "";
+    const screenshotHtml = step.screenshotPath && fs2.existsSync(step.screenshotPath) ? `<img class="step-screenshot" src="file://${step.screenshotPath}" loading="lazy" />` : "";
+    return `<div class="step ${step.status}">
+      <div class="step-header">
+        <span class="step-icon" style="color:${color}">${icon}</span>
+        <span class="step-num">${i + 1}</span>
+        <span class="step-action">${escapeHtml(step.action || "")}</span>
+        <span class="step-label">${escapeHtml(step.name || "")}</span>
+        <span class="step-dur">${dur}</span>
+      </div>
+      ${errHtml}${screenshotHtml}
+    </div>`;
+  }).join("\n");
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GhostRun Report \u2014 ${escapeHtml(flow?.name || runId)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
+h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
+.meta{color:#768390;font-size:13px;margin-bottom:32px}
+.summary{display:flex;gap:24px;margin-bottom:32px;flex-wrap:wrap}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 24px}
+.stat-val{font-size:26px;font-weight:600;color:${statusColor}}
+.stat-label{font-size:12px;color:#768390;text-transform:uppercase;letter-spacing:.05em}
+.steps{display:flex;flex-direction:column;gap:8px}
+.step{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.step.failed{border-color:#f85149}
+.step.passed{border-color:#21262d}
+.step-header{display:flex;align-items:center;gap:10px;padding:12px 16px;font-family:monospace;font-size:13px}
+.step-icon{font-size:16px;min-width:20px}
+.step-num{color:#768390;min-width:24px}
+.step-action{color:#39d0d8;min-width:140px}
+.step-label{color:#f0f6fc;flex:1}
+.step-dur{color:#768390;font-size:12px;text-align:right}
+.step-error{padding:10px 16px 12px 50px;color:#f85149;font-size:13px;font-family:monospace;background:#160b0b;border-top:1px solid #30363d}
+.step-screenshot{width:100%;max-height:400px;object-fit:contain;display:block;border-top:1px solid #30363d;background:#000}
+footer{margin-top:48px;color:#768390;font-size:12px}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(flow?.name || runId)}</h1>
+<div class="meta">Run ID: ${run.id.slice(0, 8)} &nbsp;\xB7&nbsp; ${new Date(run.startedAt).toLocaleString()}</div>
+<div class="summary">
+  <div class="stat"><div class="stat-val" style="color:${statusColor}">${run.status.toUpperCase()}</div><div class="stat-label">Status</div></div>
+  <div class="stat"><div class="stat-val">${durStr}</div><div class="stat-label">Duration</div></div>
+  <div class="stat"><div class="stat-val">${steps.filter((s) => s.status === "passed").length}</div><div class="stat-label">Passed</div></div>
+  <div class="stat"><div class="stat-val" style="color:${run.status === "failed" ? "#f85149" : "#56d364"}">${steps.filter((s) => s.status === "failed").length}</div><div class="stat-label">Failed</div></div>
+</div>
+<div class="steps">${stepsHtml}</div>
+<footer>Generated by GhostRun \xB7 ${(/* @__PURE__ */ new Date()).toISOString()}</footer>
+</body></html>`;
+  fs2.writeFileSync(outFile, html);
+  success(`HTML report: ${import_chalk.default.cyan(outFile)}`);
 }
 async function runAnalyzeRun(id) {
   const run = db.findRunByPartialId(id);
@@ -6202,14 +7495,14 @@ setInterval(loadFlows, 10000); // refresh every 10s
 </html>`;
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
-    const path2 = url.pathname;
+    const path3 = url.pathname;
     res.setHeader("Access-Control-Allow-Origin", "*");
-    if (req.method === "GET" && path2 === "/") {
+    if (req.method === "GET" && path3 === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(DASHBOARD_HTML);
       return;
     }
-    if (req.method === "GET" && path2 === "/api/flows") {
+    if (req.method === "GET" && path3 === "/api/flows") {
       const flows = db.listFlows();
       const runs = db.listRuns(void 0, 500);
       const lastRunMap = {};
@@ -6220,7 +7513,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
         const lastRun = lastRunMap[f.id];
         const steps = (() => {
           try {
-            return JSON.parse(f.nodes || "[]").length;
+            return JSON.parse(f.graph || "{}").nodes?.length ?? 0;
           } catch {
             return 0;
           }
@@ -6243,8 +7536,8 @@ setInterval(loadFlows, 10000); // refresh every 10s
       }));
       return;
     }
-    if (req.method === "DELETE" && path2.startsWith("/api/flows/")) {
-      const id = path2.replace("/api/flows/", "");
+    if (req.method === "DELETE" && path3.startsWith("/api/flows/")) {
+      const id = path3.replace("/api/flows/", "");
       try {
         db.deleteFlow(id);
         res.writeHead(200);
@@ -6255,7 +7548,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       }
       return;
     }
-    if (req.method === "GET" && path2 === "/api/runs") {
+    if (req.method === "GET" && path3 === "/api/runs") {
       const flows = db.listFlows();
       const flowMap = {};
       flows.forEach((f) => {
@@ -6267,7 +7560,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       res.end(JSON.stringify(runsWithName));
       return;
     }
-    if (req.method === "GET" && path2 === "/api/run") {
+    if (req.method === "GET" && path3 === "/api/run") {
       let sendEvent = function(event, data) {
         res.write(`event: ${event}
 data: ${JSON.stringify(data)}
@@ -6293,9 +7586,10 @@ data: ${JSON.stringify(data)}
       }
       const startTime = Date.now();
       try {
-        const nodes = JSON.parse(flow.nodes || "[]");
+        const parsedGraph = JSON.parse(flow.graph || "{}");
+        const nodes = parsedGraph.nodes || [];
         sendEvent("log", { type: "info", message: `Flow: ${flow.name} (${nodes.length} steps)` });
-        const result = await executeFlow(flowId, {
+        const result = await executeFlow(flowId, void 0, {
           onStep: (stepIdx, action, selector) => {
             sendEvent("log", { type: "step", message: `  [${stepIdx + 1}] ${action}${selector ? " \u2192 " + selector : ""}` });
           },
@@ -6310,7 +7604,7 @@ data: ${JSON.stringify(data)}
       res.end();
       return;
     }
-    if (req.method === "POST" && path2 === "/api/chat") {
+    if (req.method === "POST" && path3 === "/api/chat") {
       let body = "";
       req.on("data", (chunk) => {
         body += chunk.toString();
@@ -6342,7 +7636,7 @@ data: ${JSON.stringify(data)}
           const flowList = flows.map((f) => `- ${f.name} (id: ${f.id})`).join("\n");
           const recentRuns = runs.slice(0, 10).map((r) => {
             const f = flows.find((fl) => fl.id === r.flowId);
-            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.createdAt}`;
+            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.startedAt}`;
           }).join("\n");
           const systemPrompt = `You are GhostRun's assistant. GhostRun is a browser automation CLI tool.
 Current flows:
@@ -6442,7 +7736,7 @@ async function runStatus() {
     console.log("  " + import_chalk.default.gray("Last 10 runs: ") + spark);
   }
   console.log();
-  console.log("  " + import_chalk.default.gray("Data Path:    ") + import_chalk.default.white(DATA_PATH));
+  console.log("  " + import_chalk.default.gray("Data Path:    ") + import_chalk.default.white(DATA_PATH2));
   const ollamaModel = await isOllamaRunning();
   if (ollamaModel) {
     console.log("  " + import_chalk.default.gray("AI Provider:  ") + import_chalk.default.green(`Ollama (${ollamaModel})`));
@@ -6599,10 +7893,10 @@ async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
         });
         return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8) };
       }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [] }));
-      const ssPath = path.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
+      const ssPath = path2.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
       await page.screenshot({ path: ssPath, type: "jpeg", quality: 60 }).catch(() => {
       });
-      const ssExists = fs.existsSync(ssPath);
+      const ssExists = fs2.existsSync(ssPath);
       pages.push({ url: page.url(), title, headings, links: sameHostLinks, screenshotPath: ssExists ? ssPath : null, interactives });
       for (const link of sameHostLinks) {
         const norm = normalize(link);
@@ -6760,8 +8054,8 @@ Reply with ONLY this JSON, nothing else: {"name": "...", "description": "..."}`;
 function generateExploreHtml(report, pages, candidates) {
   const thumbs = pages.map((p, i) => {
     let imgTag = '<div class="no-screenshot">No screenshot</div>';
-    if (p.screenshotPath && fs.existsSync(p.screenshotPath)) {
-      const b64 = fs.readFileSync(p.screenshotPath).toString("base64");
+    if (p.screenshotPath && fs2.existsSync(p.screenshotPath)) {
+      const b64 = fs2.readFileSync(p.screenshotPath).toString("base64");
       imgTag = `<img src="data:image/jpeg;base64,${b64}" alt="${p.title}" loading="lazy">`;
     }
     return `
@@ -6915,9 +8209,6 @@ function generateExploreHtml(report, pages, candidates) {
 </body>
 </html>`;
 }
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
 async function runExplore(url) {
   const clack = await import("@clack/prompts");
   const { intro, select, text, password, confirm, spinner, isCancel, outro, note } = clack;
@@ -6966,8 +8257,8 @@ async function runExplore(url) {
   }
   const maxPages = Math.min(parseInt(maxPagesStr, 10), 100);
   const report = db.createExploreReport(url, env);
-  const exploreDir = path.join(DATA_PATH, "explore", report.id);
-  fs.mkdirSync(exploreDir, { recursive: true });
+  const exploreDir = path2.join(DATA_PATH2, "explore", report.id);
+  fs2.mkdirSync(exploreDir, { recursive: true });
   let cookiesJson = null;
   if (loginCreds) {
     note("A browser will open. Log in, then come back and press Enter.", "Login Required");
@@ -7063,8 +8354,8 @@ async function runExplore(url) {
   const s3 = spinner();
   s3.start("Generating report...");
   const reportHtml = generateExploreHtml(report, pages, candidates);
-  const reportPath = path.join(exploreDir, "report.html");
-  fs.writeFileSync(reportPath, reportHtml, "utf-8");
+  const reportPath = path2.join(exploreDir, "report.html");
+  fs2.writeFileSync(reportPath, reportHtml, "utf-8");
   db.updateExploreReport(report.id, { status: "complete", reportPath });
   s3.stop("Report generated");
   console.log();
@@ -7274,12 +8565,12 @@ async function runBaselineSet(id) {
   }
   const steps = db.listSteps(result.runId);
   let count = 0;
-  const baselinesDir = path.join(DATA_PATH, "baselines", flow.id);
-  fs.mkdirSync(baselinesDir, { recursive: true });
+  const baselinesDir = path2.join(DATA_PATH2, "baselines", flow.id);
+  fs2.mkdirSync(baselinesDir, { recursive: true });
   for (const step of steps) {
-    if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
-      const dest = path.join(baselinesDir, `step-${step.stepNumber}.png`);
-      fs.copyFileSync(step.screenshotPath, dest);
+    if (step.screenshotPath && fs2.existsSync(step.screenshotPath)) {
+      const dest = path2.join(baselinesDir, `step-${step.stepNumber}.png`);
+      fs2.copyFileSync(step.screenshotPath, dest);
       db.setBaseline(flow.id, step.stepNumber, dest);
       count++;
     }
@@ -7410,17 +8701,17 @@ Rules:
 async function runCodeScan(dir) {
   printLogo();
   divider();
-  if (!fs.existsSync(dir)) {
+  if (!fs2.existsSync(dir)) {
     errorMsg("Directory not found: " + dir);
     process.exit(1);
   }
   info(`Scanning: ${import_chalk.default.cyan(dir)}`);
   let framework = "Generic";
-  if (fs.existsSync(path.join(dir, "next.config.js")) || fs.existsSync(path.join(dir, "next.config.ts"))) {
+  if (fs2.existsSync(path2.join(dir, "next.config.js")) || fs2.existsSync(path2.join(dir, "next.config.ts"))) {
     framework = "Next.js";
-  } else if (fs.existsSync(path.join(dir, "package.json"))) {
+  } else if (fs2.existsSync(path2.join(dir, "package.json"))) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+      const pkg = JSON.parse(fs2.readFileSync(path2.join(dir, "package.json"), "utf8"));
       if (pkg.dependencies?.express || pkg.devDependencies?.express) framework = "Express";
     } catch {
     }
@@ -7428,19 +8719,19 @@ async function runCodeScan(dir) {
   info(`Framework: ${import_chalk.default.cyan(framework)}`);
   const routes = [];
   if (framework === "Next.js") {
-    const appDir = path.join(dir, "app");
-    const pagesDir = path.join(dir, "pages");
-    const rootDir = fs.existsSync(appDir) ? appDir : fs.existsSync(pagesDir) ? pagesDir : null;
+    const appDir = path2.join(dir, "app");
+    const pagesDir = path2.join(dir, "pages");
+    const rootDir = fs2.existsSync(appDir) ? appDir : fs2.existsSync(pagesDir) ? pagesDir : null;
     if (rootDir) {
       const walkDir = (d, base) => {
-        for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-          const full = path.join(d, entry.name);
+        for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
+          const full = path2.join(d, entry.name);
           if (entry.isDirectory()) {
             walkDir(full, base);
             continue;
           }
           if (/^(page|route)\.(tsx?|jsx?)$/.test(entry.name)) {
-            const rel = path.dirname(full).replace(base, "").replace(/\\/g, "/") || "/";
+            const rel = path2.dirname(full).replace(base, "").replace(/\\/g, "/") || "/";
             const route = rel || "/";
             if (!routes.includes(route)) routes.push(route);
           }
@@ -7451,8 +8742,8 @@ async function runCodeScan(dir) {
   } else if (framework === "Express") {
     const walkFiles = (d) => {
       const files = [];
-      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-        const full = path.join(d, entry.name);
+      for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
+        const full = path2.join(d, entry.name);
         if (entry.isDirectory() && !["node_modules", ".git", "dist", "build"].includes(entry.name)) {
           files.push(...walkFiles(full));
         } else if (entry.isFile() && /\.(js|ts)$/.test(entry.name)) files.push(full);
@@ -7461,7 +8752,7 @@ async function runCodeScan(dir) {
     };
     for (const file of walkFiles(dir)) {
       try {
-        const content = fs.readFileSync(file, "utf8");
+        const content = fs2.readFileSync(file, "utf8");
         const matches = content.matchAll(/(?:app|router)\.\w+\(['"]([/][^'"]*)['"]/g);
         for (const m of matches) {
           if (!routes.includes(m[1])) routes.push(m[1]);
@@ -7472,8 +8763,8 @@ async function runCodeScan(dir) {
   } else {
     const walkFiles = (d) => {
       const files = [];
-      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-        const full = path.join(d, entry.name);
+      for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
+        const full = path2.join(d, entry.name);
         if (entry.isDirectory() && !["node_modules", ".git", "dist", "build"].includes(entry.name)) {
           files.push(...walkFiles(full));
         } else if (entry.isFile() && /\.(js|ts|tsx|jsx)$/.test(entry.name)) files.push(full);
@@ -7482,7 +8773,7 @@ async function runCodeScan(dir) {
     };
     for (const file of walkFiles(dir)) {
       try {
-        const content = fs.readFileSync(file, "utf8");
+        const content = fs2.readFileSync(file, "utf8");
         const matches = content.matchAll(/['"]([/][a-z][a-z0-9\-/]*)['"]/gi);
         for (const m of matches) {
           if (!routes.includes(m[1])) routes.push(m[1]);
@@ -7529,21 +8820,21 @@ async function runCodeScan(dir) {
 }
 function getTemplatesDir() {
   const candidates = [
-    path.join(__dirname, "templates"),
-    path.join(process.cwd(), "templates")
+    path2.join(__dirname, "templates"),
+    path2.join(process.cwd(), "templates")
   ];
   for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+    if (fs2.existsSync(c)) return c;
   }
   return candidates[0];
 }
 async function runStoreList() {
   const dir = getTemplatesDir();
-  if (!fs.existsSync(dir)) {
+  if (!fs2.existsSync(dir)) {
     errorMsg("Templates directory not found at " + dir);
     return;
   }
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".flow.json"));
+  const files = fs2.readdirSync(dir).filter((f) => f.endsWith(".flow.json"));
   if (files.length === 0) {
     warn("No templates found.");
     return;
@@ -7553,7 +8844,7 @@ async function runStoreList() {
   console.log(import_chalk.default.gray("  " + "\u2500".repeat(72)));
   for (const file of files) {
     try {
-      const t = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      const t = JSON.parse(fs2.readFileSync(path2.join(dir, file), "utf8"));
       const slug = file.replace(".flow.json", "");
       const tags = (t.tags || []).slice(0, 3).map((g) => import_chalk.default.cyan(g)).join(import_chalk.default.gray(", "));
       const vars = (t.variables || []).map((v) => import_chalk.default.yellow(`{{${v}}}`)).join(import_chalk.default.gray(", "));
@@ -7569,15 +8860,15 @@ async function runStoreList() {
 }
 async function runStoreInstall(slug) {
   const dir = getTemplatesDir();
-  const file = path.join(dir, slug.endsWith(".flow.json") ? slug : slug + ".flow.json");
-  if (!fs.existsSync(file)) {
+  const file = path2.join(dir, slug.endsWith(".flow.json") ? slug : slug + ".flow.json");
+  if (!fs2.existsSync(file)) {
     errorMsg(`Template not found: ${slug}`);
     info("Available templates: " + import_chalk.default.cyan("ghostrun store list"));
     process.exit(1);
   }
   let t;
   try {
-    t = JSON.parse(fs.readFileSync(file, "utf8"));
+    t = JSON.parse(fs2.readFileSync(file, "utf8"));
   } catch {
     errorMsg("Invalid template file");
     process.exit(1);
@@ -7619,10 +8910,10 @@ async function runInit() {
   printLogo();
   divider();
   console.log(import_chalk.default.bold("\n  GhostRun Setup Wizard\n"));
-  fs.mkdirSync(path.join(DATA_PATH, "data"), { recursive: true });
-  fs.mkdirSync(path.join(DATA_PATH, "screenshots"), { recursive: true });
-  fs.mkdirSync(path.join(DATA_PATH, "sessions"), { recursive: true });
-  success("Data directory ready: " + import_chalk.default.cyan(DATA_PATH));
+  fs2.mkdirSync(path2.join(DATA_PATH2, "data"), { recursive: true });
+  fs2.mkdirSync(path2.join(DATA_PATH2, "screenshots"), { recursive: true });
+  fs2.mkdirSync(path2.join(DATA_PATH2, "sessions"), { recursive: true });
+  success("Data directory ready: " + import_chalk.default.cyan(DATA_PATH2));
   const { execSync } = require("child_process");
   let chromiumOk = false;
   try {
@@ -7687,9 +8978,9 @@ async function runInit() {
     }
   }
   console.log();
-  const envFile = path.join(process.cwd(), ".ghostrun.env");
-  if (!fs.existsSync(envFile)) {
-    fs.writeFileSync(envFile, [
+  const envFile = path2.join(process.cwd(), ".ghostrun.env");
+  if (!fs2.existsSync(envFile)) {
+    fs2.writeFileSync(envFile, [
       "# GhostRun variables \u2014 used as {{VARIABLE}} in flows",
       "# BASE_URL=https://your-app.com",
       "# EMAIL=test@example.com",
@@ -8150,8 +9441,6 @@ async function runInteractive() {
     } else if (action === "chat") {
       console.log();
       await runChat();
-    } else if (action === "app") {
-      await runDesktopApp();
     } else if (action === "status") {
       console.log();
       await runStatus();
@@ -8168,6 +9457,548 @@ function _pause() {
       resolve();
     });
   });
+}
+async function runApiLearn() {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  API Flow Builder\n"));
+  console.log(import_chalk.default.gray("  Build HTTP test flows interactively.\n"));
+  const name = await askQuestion(import_chalk.default.cyan("  Flow name: "));
+  if (!name.trim()) {
+    errorMsg("Name required");
+    process.exit(1);
+  }
+  const nodes = [];
+  let stepIdx = 1;
+  console.log(import_chalk.default.gray("\n  Add steps. Available types:"));
+  console.log(import_chalk.default.gray("  http      \u2014 HTTP request (GET/POST/PUT/DELETE/PATCH)"));
+  console.log(import_chalk.default.gray("  assert    \u2014 Assert response (status/body/header/time)"));
+  console.log(import_chalk.default.gray("  extract   \u2014 Extract JSON value to variable"));
+  console.log(import_chalk.default.gray("  set       \u2014 Set variable"));
+  console.log(import_chalk.default.gray("  done      \u2014 Finish and save\n"));
+  while (true) {
+    const type = (await askQuestion(import_chalk.default.cyan(`  Step ${stepIdx} type [http/assert/extract/set/done]: `))).trim().toLowerCase();
+    if (type === "done" || type === "") break;
+    if (type === "http") {
+      const method = (await askQuestion("    Method [GET]: ")).trim().toUpperCase() || "GET";
+      const url = (await askQuestion("    URL: ")).trim();
+      if (!url) {
+        warn("URL required, skipping.");
+        continue;
+      }
+      const label = (await askQuestion(`    Label [${method} ${url.split("/").slice(-1)[0] || url}]: `)).trim() || `${method} ${url.split("/").slice(-1)[0] || url}`;
+      const headersStr = (await askQuestion("    Headers (key:value, comma-sep, or blank): ")).trim();
+      const headers = {};
+      if (headersStr) {
+        for (const h of headersStr.split(",")) {
+          const [k, ...v] = h.split(":");
+          if (k && v.length) headers[k.trim()] = v.join(":").trim();
+        }
+      }
+      const bodyStr = (await askQuestion("    Body JSON (or blank): ")).trim();
+      const extractStr = (await askQuestion("    Extract vars (varName=$.path, comma-sep, or blank): ")).trim();
+      const extract = {};
+      if (extractStr) {
+        for (const e of extractStr.split(",")) {
+          const [k, v] = e.split("=");
+          if (k && v) extract[k.trim()] = v.trim();
+        }
+      }
+      nodes.push({
+        id: (0, import_uuid2.v4)(),
+        type: "action",
+        action: "http:request",
+        method,
+        url,
+        label,
+        headers: Object.keys(headers).length ? headers : void 0,
+        body: bodyStr ? JSON.parse(bodyStr) : void 0,
+        extract: Object.keys(extract).length ? extract : void 0
+      });
+    } else if (type === "assert") {
+      const assertType = (await askQuestion("    Assert type [status/body:contains/json:path/time]: ")).trim() || "status";
+      let node = { id: (0, import_uuid2.v4)(), type: "action", action: "assert:response", assert: assertType, label: `Assert ${assertType}` };
+      if (assertType === "status") {
+        const exp = (await askQuestion("    Expected status [200]: ")).trim() || "200";
+        node = { ...node, expected: Number(exp), label: `Assert status ${exp}` };
+      } else if (assertType === "body:contains") {
+        const exp = (await askQuestion("    Body must contain: ")).trim();
+        node = { ...node, expected: exp, label: `Assert body contains "${exp}"` };
+      } else if (assertType === "json:path") {
+        const p = (await askQuestion("    JSON path (e.g. $.user.id): ")).trim();
+        const exp = (await askQuestion("    Expected value: ")).trim();
+        node = { ...node, path: p, expected: exp, label: `Assert ${p} = ${exp}` };
+      } else if (assertType === "time") {
+        const maxMs = (await askQuestion("    Max response time ms [2000]: ")).trim() || "2000";
+        node = { ...node, expected: Number(maxMs), label: `Assert response < ${maxMs}ms` };
+      }
+      nodes.push(node);
+    } else if (type === "extract") {
+      const varName = (await askQuestion("    Variable name: ")).trim();
+      const p = (await askQuestion("    JSON path (e.g. $.id): ")).trim();
+      nodes.push({ id: (0, import_uuid2.v4)(), type: "action", action: "extract:json", variable: varName, path: p, label: `Extract ${varName} from ${p}` });
+    } else if (type === "set") {
+      const varName = (await askQuestion("    Variable name: ")).trim();
+      const val = (await askQuestion("    Value: ")).trim();
+      nodes.push({ id: (0, import_uuid2.v4)(), type: "action", action: "set:variable", variable: varName, value: val, label: `Set ${varName} = ${val}` });
+    } else {
+      warn(`Unknown type "${type}". Try: http, assert, extract, set, done`);
+      continue;
+    }
+    stepIdx++;
+  }
+  if (!nodes.length) {
+    warn("No steps added. Flow not saved.");
+    return;
+  }
+  const flow = db.createFlow({ name, description: `API flow with ${nodes.length} step(s)`, createdBy: "human", graph: { nodes, edges: [], appUrl: void 0 } });
+  success(`API flow created: ${import_chalk.default.white(flow.name)} (${import_chalk.default.gray(flow.id.slice(0, 8))})`);
+  console.log(import_chalk.default.gray(`  ${nodes.length} step(s). Run with: ghostrun run "${name}"`));
+  console.log();
+}
+async function runEnvCreate(name, extraArgs) {
+  printLogo();
+  divider();
+  let baseUrl = extraArgs[0] || "";
+  if (!baseUrl) baseUrl = (await askQuestion(import_chalk.default.cyan("  Base URL (optional, press Enter to skip): "))).trim();
+  const env = db.createEnvironment({ name, baseUrl: baseUrl || void 0 });
+  success(`Environment created: ${import_chalk.default.white(name)} (${import_chalk.default.gray(env.id.slice(0, 8))})`);
+  if (baseUrl) info(`Base URL: ${import_chalk.default.cyan(baseUrl)}`);
+  info(`Add variables: ghostrun env:set ${name} KEY value`);
+  console.log();
+}
+async function runEnvList() {
+  printLogo();
+  divider();
+  const envs = db.listEnvironments();
+  if (!envs.length) {
+    warn("No environments. Create one: ghostrun env:create <name>");
+    return;
+  }
+  console.log(import_chalk.default.bold("\n  Environments\n"));
+  for (const e of envs) {
+    const active = e.isActive ? import_chalk.default.green(" \u25CF active") : "";
+    const varCount = Object.keys(e.variables).length;
+    console.log(`  ${import_chalk.default.white(e.name.padEnd(20))}${active}  ${import_chalk.default.gray(varCount + " vars")}${e.baseUrl ? "  " + import_chalk.default.cyan(e.baseUrl) : ""}`);
+  }
+  console.log();
+}
+async function runEnvSet(envName, key, value) {
+  let env = db.findEnvironmentByName(envName);
+  if (!env) {
+    env = db.createEnvironment({ name: envName });
+    info(`Created environment: ${envName}`);
+  }
+  const vars = { ...env.variables, [key]: value };
+  db.updateEnvironment(env.id, { variables: vars });
+  success(`Set ${import_chalk.default.white(key)} = ${import_chalk.default.cyan(value)} in environment ${import_chalk.default.white(envName)}`);
+  console.log();
+}
+async function runEnvUse(envName) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) {
+    errorMsg(`Environment "${envName}" not found. Create it: ghostrun env:create ${envName}`);
+    process.exit(1);
+  }
+  db.setActiveEnvironment(env.id);
+  success(`Active environment: ${import_chalk.default.white(envName)}`);
+  if (env.baseUrl) info(`Base URL: ${import_chalk.default.cyan(env.baseUrl)}`);
+  const varCount = Object.keys(env.variables).length;
+  if (varCount) info(`${varCount} variables loaded`);
+  console.log();
+}
+async function runEnvShow(envName) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) {
+    errorMsg(`Environment "${envName}" not found`);
+    process.exit(1);
+  }
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold(`
+  Environment: ${env.name}`) + (env.isActive ? import_chalk.default.green(" \u25CF active") : ""));
+  if (env.baseUrl) console.log(`  Base URL: ${import_chalk.default.cyan(env.baseUrl)}`);
+  const vars = env.variables;
+  if (Object.keys(vars).length === 0) {
+    console.log(import_chalk.default.gray("  No variables set."));
+  } else {
+    console.log(import_chalk.default.bold("\n  Variables:"));
+    for (const [k, v] of Object.entries(vars)) {
+      const masked = k.toLowerCase().includes("secret") || k.toLowerCase().includes("password") || k.toLowerCase().includes("token") ? "*".repeat(Math.min(v.length, 8)) : v;
+      console.log(`    ${import_chalk.default.white(k.padEnd(24))} ${import_chalk.default.cyan(masked)}`);
+    }
+  }
+  console.log();
+}
+async function runEnvDelete(envName) {
+  const env = db.findEnvironmentByName(envName);
+  if (!env) {
+    errorMsg(`Environment "${envName}" not found`);
+    process.exit(1);
+  }
+  db.deleteEnvironment(env.id);
+  success(`Deleted environment: ${envName}`);
+  console.log();
+}
+async function runVarDump(runId) {
+  let run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) {
+    errorMsg("Run not found: " + runId);
+    process.exit(1);
+  }
+  printLogo();
+  divider();
+  const data = db.getRunData(run.id);
+  const apiResps = db.getApiResponses(run.id);
+  console.log(import_chalk.default.bold(`
+  Variables from run ${import_chalk.default.gray(run.id.slice(0, 8))}
+`));
+  if (!data.length) {
+    console.log(import_chalk.default.gray("  No variables extracted in this run."));
+  } else {
+    for (const d of data) {
+      console.log(`  Step ${d.stepNumber.toString().padStart(2)}  ${import_chalk.default.white(d.variableName.padEnd(24))} ${import_chalk.default.cyan(d.variableValue.slice(0, 80))}`);
+    }
+  }
+  if (apiResps.length) {
+    console.log(import_chalk.default.bold("\n  API Calls:\n"));
+    for (const r of apiResps) {
+      const statusColor = r.statusCode && r.statusCode < 400 ? import_chalk.default.green : import_chalk.default.red;
+      console.log(`  Step ${r.stepNumber.toString().padStart(2)}  ${import_chalk.default.white((r.method || "???").padEnd(7))} ${import_chalk.default.gray(r.url.slice(0, 60))}  ${r.statusCode ? statusColor(String(r.statusCode)) : import_chalk.default.red("ERR")}  ${r.responseTimeMs ? import_chalk.default.gray(r.responseTimeMs + "ms") : ""}`);
+    }
+  }
+  console.log();
+}
+function parsePerfArgs(extraArgs) {
+  const get = (flag, def) => {
+    const idx = extraArgs.indexOf(flag);
+    if (idx === -1) return def;
+    const raw = extraArgs[idx + 1] || "";
+    return parseInt(raw.replace(/[^0-9]/g, "")) || def;
+  };
+  const getDurationMs = (flag, defSec) => {
+    const idx = extraArgs.indexOf(flag);
+    if (idx === -1) return defSec * 1e3;
+    const raw = extraArgs[idx + 1] || String(defSec);
+    const num = parseInt(raw.replace(/[^0-9]/g, "")) || defSec;
+    if (raw.endsWith("ms")) return num;
+    return num * 1e3;
+  };
+  return {
+    vus: get("--vus", 10),
+    duration: getDurationMs("--duration", 30),
+    rampUp: getDurationMs("--ramp-up", 5),
+    timeout: getDurationMs("--timeout", 10)
+  };
+}
+function renderPerfStats(stats, checksTotal, checksFailed, perStep, flowName, config) {
+  const errColor = stats.errorRate > 5 ? import_chalk.default.red : stats.errorRate > 1 ? import_chalk.default.yellow : import_chalk.default.green;
+  const p95Color = stats.p95 > 1e3 ? import_chalk.default.red : stats.p95 > 500 ? import_chalk.default.yellow : import_chalk.default.green;
+  const checkPassRate = checksTotal > 0 ? parseFloat(((checksTotal - checksFailed) / checksTotal * 100).toFixed(1)) : 100;
+  const checkColor = checksFailed > 0 ? import_chalk.default.red : import_chalk.default.green;
+  divider();
+  console.log(import_chalk.default.bold.white("\n  PERFORMANCE RESULTS") + import_chalk.default.gray(` \u2014 ${flowName}`));
+  console.log(import_chalk.default.gray(`  VUs: ${config.vus}  Duration: ${config.duration / 1e3}s  Ramp-up: ${config.rampUp / 1e3}s
+`));
+  const w = 46;
+  const line = (label, val) => `  \u2502  ${label.padEnd(22)}${val.padStart(w - 26)}  \u2502`;
+  console.log(`  \u250C${"\u2500".repeat(w)}\u2510`);
+  console.log(`  \u2502  ${"Summary".padEnd(w - 2)}\u2502`);
+  console.log(`  \u251C${"\u2500".repeat(w)}\u2524`);
+  console.log(line("HTTP Requests", import_chalk.default.white(stats.total.toLocaleString())));
+  console.log(line("Throughput", import_chalk.default.cyan(stats.avgRps + " req/s")));
+  console.log(line("HTTP Success", import_chalk.default.green(`${(100 - stats.errorRate).toFixed(1)}%  (${stats.success.toLocaleString()})`)));
+  console.log(line("HTTP Errors", errColor(`${stats.errorRate}%  (${stats.failed.toLocaleString()})`)));
+  if (checksTotal > 0) {
+    console.log(line("Checks Passed", checkColor(`${checkPassRate}%  (${(checksTotal - checksFailed).toLocaleString()} / ${checksTotal.toLocaleString()})`)));
+    if (checksFailed > 0) console.log(line("Checks Failed", import_chalk.default.red(`${checksFailed.toLocaleString()} assertion failures`)));
+  }
+  console.log(`  \u251C${"\u2500".repeat(w)}\u2524`);
+  console.log(`  \u2502  ${"Latency".padEnd(w - 2)}\u2502`);
+  console.log(`  \u251C${"\u2500".repeat(w)}\u2524`);
+  console.log(line("p50  (median)", import_chalk.default.green(stats.p50 + "ms")));
+  console.log(line("p95", p95Color(stats.p95 + "ms")));
+  console.log(line("p99", stats.p99 > 2e3 ? import_chalk.default.red(stats.p99 + "ms") : import_chalk.default.yellow(stats.p99 + "ms")));
+  console.log(line("min / max", import_chalk.default.gray(`${stats.min}ms / ${stats.max}ms`)));
+  console.log(`  \u2514${"\u2500".repeat(w)}\u2518`);
+  const stepNames = Object.keys(perStep);
+  if (stepNames.length > 1) {
+    console.log(import_chalk.default.bold("\n  Per Step:\n"));
+    console.log(import_chalk.default.gray(`  ${"Step".padEnd(38)} ${"Req".padStart(6)} ${"p50".padStart(7)} ${"p95".padStart(7)} ${"Err%".padStart(6)}`));
+    console.log(import_chalk.default.gray("  " + "\u2500".repeat(68)));
+    for (const [label, s] of Object.entries(perStep)) {
+      const errPct = s.errorRate;
+      const errStr = errPct > 0 ? import_chalk.default.red(errPct.toFixed(1) + "%") : import_chalk.default.green("0%");
+      const p95Str = s.p95 > 500 ? import_chalk.default.yellow(s.p95 + "ms") : import_chalk.default.green(s.p95 + "ms");
+      const truncLabel = label.length > 37 ? label.slice(0, 34) + "..." : label;
+      console.log(`  ${import_chalk.default.white(truncLabel.padEnd(38))} ${s.total.toString().padStart(6)} ${String(s.p50 + "ms").padStart(7)} ${p95Str.padStart(7)} ${errStr.padStart(6)}`);
+    }
+  }
+  console.log();
+}
+async function runPerfRun(flowId, extraArgs) {
+  const config = parsePerfArgs(extraArgs);
+  printLogo();
+  divider();
+  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) {
+    errorMsg("Flow not found: " + flowId);
+    process.exit(1);
+  }
+  console.log(import_chalk.default.bold(`
+  Load Test: ${import_chalk.default.white(flow.name)}`));
+  console.log(import_chalk.default.gray(`  VUs: ${config.vus}  Duration: ${config.duration / 1e3}s  Ramp-up: ${config.rampUp / 1e3}s  Timeout: ${config.timeout / 1e3}s
+`));
+  const startTime = Date.now();
+  const totalMs = config.duration;
+  const progressInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const pct = Math.min(100, Math.round(elapsed / totalMs * 100));
+    const filled = Math.round(pct / 5);
+    const bar = "\u2588".repeat(filled) + "\u2591".repeat(20 - filled);
+    process.stdout.write(`\r  [${bar}] ${pct}%  ${Math.round(elapsed / 1e3)}s / ${config.duration / 1e3}s  `);
+  }, 250);
+  let stats, checksTotal, checksFailed, perStep, perfRunId;
+  try {
+    ({ stats, checksTotal, checksFailed, perStep, perfRunId } = await runPerfTest(flowId, config));
+  } finally {
+    clearInterval(progressInterval);
+    process.stdout.write("\r" + " ".repeat(60) + "\r");
+  }
+  renderPerfStats(stats, checksTotal, checksFailed, perStep, flow.name, config);
+  info("Perf Run ID: " + import_chalk.default.gray(perfRunId.slice(0, 8)));
+  info("View details: " + import_chalk.default.cyan(`ghostrun perf:show ${perfRunId.slice(0, 8)}`));
+  console.log();
+}
+async function runPerfExport(flowId, extraArgs) {
+  const config = parsePerfArgs(extraArgs);
+  const p95 = parseInt((extraArgs[extraArgs.indexOf("--p95") + 1] || "").replace(/[^0-9]/g, "") || "500");
+  const errRate = parseFloat(extraArgs[extraArgs.indexOf("--max-errors") + 1] || "1");
+  const outputFlag = extraArgs.indexOf("--output");
+  const outputFile = outputFlag !== -1 ? extraArgs[outputFlag + 1] : "";
+  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) {
+    errorMsg("Flow not found: " + flowId);
+    process.exit(1);
+  }
+  const graph = JSON.parse(flow.graph);
+  const API_ONLY = /* @__PURE__ */ new Set([
+    "http:request",
+    "assert:response",
+    "assert:status",
+    "assert:body",
+    "assert:header",
+    "assert:time",
+    "set:variable",
+    "extract:json",
+    "env:switch"
+  ]);
+  const actionNodes = (graph.nodes || []).filter((n) => n.type === "action" && API_ONLY.has(n.action));
+  if (!actionNodes.length) {
+    errorMsg("No API steps found. perf:export only supports API flows.");
+    process.exit(1);
+  }
+  const script = generateK6Script(flow.name, actionNodes, {
+    vus: config.vus,
+    duration: config.duration,
+    p95threshold: p95,
+    errorThreshold: errRate
+  });
+  const filename = outputFile || `${flow.name.replace(/[^a-z0-9]/gi, "-").toLowerCase()}-k6.js`;
+  fs2.writeFileSync(filename, script, "utf8");
+  printLogo();
+  divider();
+  success(`k6 script exported: ${import_chalk.default.cyan(filename)}`);
+  console.log();
+  console.log(import_chalk.default.bold("  Thresholds:"));
+  info(`p95 response time < ${p95}ms`);
+  info(`error rate < ${errRate}%`);
+  console.log();
+  console.log(import_chalk.default.bold("  Run with k6:"));
+  console.log(import_chalk.default.gray(`    k6 run ${filename}`));
+  console.log(import_chalk.default.gray(`    k6 run --vus ${config.vus} --duration ${config.duration / 1e3}s ${filename}`));
+  console.log(import_chalk.default.gray(`    k6 run --out json=results.json ${filename}`));
+  console.log();
+  console.log(import_chalk.default.gray("  Install k6: https://grafana.com/docs/k6/latest/get-started/installation/"));
+  console.log();
+  console.log(import_chalk.default.bold("  Script preview:"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(56)));
+  script.split("\n").slice(0, 30).forEach((l) => console.log(import_chalk.default.gray("  ") + import_chalk.default.white(l)));
+  if (script.split("\n").length > 30) console.log(import_chalk.default.gray(`  ... (${script.split("\n").length - 30} more lines)`));
+  console.log();
+}
+async function runPerfList() {
+  printLogo();
+  divider();
+  const runs = db.listPerfRuns();
+  if (!runs.length) {
+    warn("No perf runs yet. Run: ghostrun perf:run <flow-name>");
+    return;
+  }
+  console.log(import_chalk.default.bold("\n  Performance Runs\n"));
+  console.log(import_chalk.default.gray(`  ${"ID".padEnd(10)} ${"Flow".padEnd(26)} ${"VUs".padStart(4)} ${"Duration".padStart(9)} ${"RPS".padStart(7)} ${"p95".padStart(7)} ${"Err%".padStart(6)}  When`));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(82)));
+  for (const r of runs) {
+    const cfg = r.config;
+    const errColor = (r.failedRequests ?? 0) / Math.max(r.totalRequests ?? 1, 1) > 0.05 ? import_chalk.default.red : import_chalk.default.green;
+    const errPct = r.totalRequests ? ((r.failedRequests ?? 0) / r.totalRequests * 100).toFixed(1) : "\u2014";
+    const p95Str = r.p95 != null ? r.p95 > 500 ? import_chalk.default.yellow(r.p95 + "ms") : import_chalk.default.green(r.p95 + "ms") : "\u2014";
+    console.log(
+      `  ${import_chalk.default.gray(r.id.slice(0, 8).padEnd(10))} ${import_chalk.default.white(r.flowName.slice(0, 25).padEnd(26))} ${String(cfg?.vus ?? "?").padStart(4)} ${String((cfg?.duration ?? 0) / 1e3 + "s").padStart(9)} ${import_chalk.default.cyan(String(r.avgRps ?? "\u2014").padStart(7))} ${p95Str.padStart(7)} ${errColor(errPct + "%").padStart(6)}  ${timeAgo(r.startedAt.toISOString())}`
+    );
+  }
+  console.log();
+}
+async function runPerfShow(runId) {
+  const run = db.findPerfRunByPartialId(runId);
+  if (!run) {
+    errorMsg("Perf run not found: " + runId);
+    process.exit(1);
+  }
+  const cfg = run.config;
+  if (run.p50 != null) {
+    const stats = {
+      total: run.totalRequests ?? 0,
+      success: run.successRequests ?? 0,
+      failed: run.failedRequests ?? 0,
+      errorRate: run.totalRequests ? parseFloat(((run.failedRequests ?? 0) / run.totalRequests * 100).toFixed(1)) : 0,
+      avgRps: run.avgRps ?? 0,
+      p50: run.p50 ?? 0,
+      p95: run.p95 ?? 0,
+      p99: run.p99 ?? 0,
+      min: run.minMs ?? 0,
+      max: run.maxMs ?? 0
+    };
+    renderPerfStats(stats, 0, 0, run.perStepStats || {}, run.flowName, cfg);
+  } else {
+    warn("Perf run has no stats (may have failed or is still running).");
+  }
+  info("Started: " + import_chalk.default.gray(run.startedAt.toISOString()));
+  if (run.completedAt) info("Completed: " + import_chalk.default.gray(run.completedAt.toISOString()));
+  console.log();
+}
+async function runPerfCompare(id1, id2) {
+  const r1 = db.findPerfRunByPartialId(id1);
+  const r2 = db.findPerfRunByPartialId(id2);
+  if (!r1) {
+    errorMsg("First perf run not found: " + id1);
+    process.exit(1);
+  }
+  if (!r2) {
+    errorMsg("Second perf run not found: " + id2);
+    process.exit(1);
+  }
+  const c1 = JSON.parse(r1.config ? JSON.stringify(r1.config) : "{}");
+  const c2 = JSON.parse(r2.config ? JSON.stringify(r2.config) : "{}");
+  divider();
+  console.log(import_chalk.default.bold("\n  Performance Comparison\n"));
+  console.log(`  ${import_chalk.default.cyan("A")} ${r1.id.slice(0, 8)}  ${import_chalk.default.gray(r1.flowName)}  ${import_chalk.default.gray(timeAgo(r1.startedAt.toISOString()))}  ${r1.config ? import_chalk.default.gray(`(${c1.vus}VU \xB7 ${c1.duration}s)`) : ""}`);
+  console.log(`  ${import_chalk.default.cyan("B")} ${r2.id.slice(0, 8)}  ${import_chalk.default.gray(r2.flowName)}  ${import_chalk.default.gray(timeAgo(r2.startedAt.toISOString()))}  ${r2.config ? import_chalk.default.gray(`(${c2.vus}VU \xB7 ${c2.duration}s)`) : ""}`);
+  console.log();
+  function delta(a, b, unit = "ms", lowerBetter = true) {
+    if (a == null || b == null) return import_chalk.default.gray("\u2014");
+    const diff = b - a;
+    const pct = a !== 0 ? (diff / a * 100).toFixed(1) : "\u2014";
+    const better = lowerBetter ? diff < 0 : diff > 0;
+    const color = diff === 0 ? import_chalk.default.gray : better ? import_chalk.default.green : import_chalk.default.red;
+    const sign = diff > 0 ? "+" : "";
+    return color(`${sign}${diff.toFixed(0)}${unit} (${sign}${pct}%)`);
+  }
+  const col = (s) => String(s).padEnd(14);
+  const hdr = (s) => import_chalk.default.bold.gray(String(s).padEnd(14));
+  console.log(`  ${import_chalk.default.gray("Metric".padEnd(20))} ${hdr("A")} ${hdr("B")} ${"Change".padEnd(20)}`);
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(72)));
+  const rows = [
+    ["Avg RPS", r1.avgRps, r2.avgRps, " req/s", false],
+    ["p50 latency", r1.p50, r2.p50, "ms", true],
+    ["p95 latency", r1.p95, r2.p95, "ms", true],
+    ["p99 latency", r1.p99, r2.p99, "ms", true],
+    ["Min latency", r1.minMs, r2.minMs, "ms", true],
+    ["Max latency", r1.maxMs, r2.maxMs, "ms", true]
+  ];
+  for (const [label, v1, v2, unit, lowerBetter] of rows) {
+    const a = v1 != null ? v1.toFixed(unit === " req/s" ? 1 : 0) + unit : "\u2014";
+    const b = v2 != null ? v2.toFixed(unit === " req/s" ? 1 : 0) + unit : "\u2014";
+    console.log(`  ${label.padEnd(20)} ${col(a)} ${col(b)} ${delta(v1 ?? null, v2 ?? null, unit, lowerBetter)}`);
+  }
+  const sr1 = r1.totalRequests ? ((r1.successRequests || 0) / r1.totalRequests * 100).toFixed(1) + "%" : "\u2014";
+  const sr2 = r2.totalRequests ? ((r2.successRequests || 0) / r2.totalRequests * 100).toFixed(1) + "%" : "\u2014";
+  const srGood = parseFloat(sr2) >= parseFloat(sr1);
+  console.log(`  ${"HTTP Success".padEnd(20)} ${col(sr1)} ${col(sr2)} ${sr1 === "\u2014" || sr2 === "\u2014" ? import_chalk.default.gray("\u2014") : srGood ? import_chalk.default.green("\u2265 A") : import_chalk.default.red("< A")}`);
+  console.log();
+  const p95Improved = r1.p95 && r2.p95 && r2.p95 < r1.p95;
+  const p95Worse = r1.p95 && r2.p95 && r2.p95 > r1.p95 * 1.1;
+  if (p95Improved) console.log(import_chalk.default.green("  \u2713 B is faster \u2014 p95 improved by " + Math.abs(r2.p95 - r1.p95).toFixed(0) + "ms"));
+  else if (p95Worse) console.log(import_chalk.default.red("  \u2717 B is slower \u2014 p95 degraded by " + Math.abs(r2.p95 - r1.p95).toFixed(0) + "ms"));
+  else console.log(import_chalk.default.gray("  ~ Performance roughly equivalent"));
+  console.log();
+}
+async function generatePerfReport(perfRunId, outFile) {
+  const pr = db.getPerfRun ? db.getPerfRun(perfRunId) : null;
+  if (!pr) return;
+  const config = pr.config ? typeof pr.config === "string" ? JSON.parse(pr.config) : pr.config : {};
+  const perStep = pr.perStepStats ? typeof pr.perStepStats === "string" ? Object.values(JSON.parse(pr.perStepStats)) : Object.values(pr.perStepStats) : [];
+  const stepsHtml = perStep.map((s) => {
+    const p95Color = Number(s.p95) > 500 ? "#f85149" : Number(s.p95) > 200 ? "#e3b341" : "#56d364";
+    return `<tr>
+      <td>${escapeHtml(String(s.label || ""))}</td>
+      <td>${String(s.total || s.count || 0)}</td>
+      <td>${Number(s.p50 || 0).toFixed(0)}ms</td>
+      <td style="color:${p95Color}">${Number(s.p95 || 0).toFixed(0)}ms</td>
+      <td>${Number(s.p99 || 0).toFixed(0)}ms</td>
+      <td>${Number(s.min || 0).toFixed(0)}ms</td>
+      <td>${Number(s.max || 0).toFixed(0)}ms</td>
+    </tr>`;
+  }).join("\n");
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GhostRun Perf \u2014 ${escapeHtml(pr.flowName)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
+h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
+.meta{color:#768390;font-size:13px;margin-bottom:32px}
+.summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px;margin-bottom:40px}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 20px}
+.stat-val{font-size:24px;font-weight:600;color:#f0f6fc}
+.stat-val.good{color:#56d364}.stat-val.warn{color:#e3b341}.stat-val.bad{color:#f85149}
+.stat-label{font-size:11px;color:#768390;text-transform:uppercase;letter-spacing:.07em;margin-top:4px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #21262d;font-size:13px}
+th{color:#768390;font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.07em}
+tr:last-child td{border-bottom:none}
+.section-title{font-size:16px;font-weight:600;color:#f0f6fc;margin:32px 0 12px}
+footer{margin-top:48px;color:#768390;font-size:12px}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(pr.flowName)}</h1>
+<div class="meta">
+  Perf Run ${pr.id.slice(0, 8)} &nbsp;\xB7&nbsp; ${config.vus || "?"} VUs \xB7 ${config.duration || "?"}s \xB7 ramp-up ${config.rampUp || 0}s
+  &nbsp;\xB7&nbsp; ${new Date(pr.startedAt).toLocaleString()}
+</div>
+<div class="summary">
+  <div class="stat"><div class="stat-val ${pr.status === "done" ? "good" : "bad"}">${(pr.status || "unknown").toUpperCase()}</div><div class="stat-label">Status</div></div>
+  <div class="stat"><div class="stat-val">${pr.totalRequests || 0}</div><div class="stat-label">HTTP Requests</div></div>
+  <div class="stat"><div class="stat-val ${pr.totalRequests && pr.successRequests === pr.totalRequests ? "good" : "warn"}">${pr.totalRequests ? ((pr.successRequests || 0) / pr.totalRequests * 100).toFixed(1) + "%" : "\u2014"}</div><div class="stat-label">Success Rate</div></div>
+  <div class="stat"><div class="stat-val">${pr.avgRps ? pr.avgRps.toFixed(1) : "\u2014"}</div><div class="stat-label">Avg RPS</div></div>
+  <div class="stat"><div class="stat-val">${pr.p50 != null ? pr.p50 + "ms" : "\u2014"}</div><div class="stat-label">p50</div></div>
+  <div class="stat"><div class="stat-val ${pr.p95 && pr.p95 > 500 ? "bad" : pr.p95 && pr.p95 > 200 ? "warn" : "good"}">${pr.p95 != null ? pr.p95 + "ms" : "\u2014"}</div><div class="stat-label">p95</div></div>
+  <div class="stat"><div class="stat-val">${pr.p99 != null ? pr.p99 + "ms" : "\u2014"}</div><div class="stat-label">p99</div></div>
+  <div class="stat"><div class="stat-val">${pr.minMs != null ? pr.minMs + "ms" : "\u2014"}</div><div class="stat-label">Min</div></div>
+  <div class="stat"><div class="stat-val">${pr.maxMs != null ? pr.maxMs + "ms" : "\u2014"}</div><div class="stat-label">Max</div></div>
+</div>
+<div class="section-title">Per-step breakdown</div>
+<table>
+  <thead><tr><th>Step</th><th>Count</th><th>p50</th><th>p95</th><th>p99</th><th>Min</th><th>Max</th></tr></thead>
+  <tbody>${stepsHtml}</tbody>
+</table>
+<footer>Generated by GhostRun \xB7 ${(/* @__PURE__ */ new Date()).toISOString()}</footer>
+</body></html>`;
+  fs2.writeFileSync(outFile, html);
+  success(`HTML report: ${import_chalk.default.cyan(outFile)}`);
 }
 var args = process.argv.slice(2);
 var cmd = args[0];
@@ -8194,6 +10025,7 @@ async function main() {
     console.log(`  ${C("run <id|name> [--var k=v]")}${G("Execute a flow headlessly")}`);
     console.log(`  ${C("run <id> --visible")}${G("Run with visible browser window")}`);
     console.log(`  ${C("run <id> --output json")}${G("JSON output with extracted data")}`);
+    console.log(`  ${C("run <id> --report html")}${G("Run flow + save HTML report")}`);
     console.log(`  ${C("create [description]")}${G("Generate flow from natural language  \u{1F916} AI")}`);
     console.log(`  ${C("code:scan <directory>")}${G("Scan codebase, create draft flows    \u{1F916} AI")}`);
     console.log();
@@ -8203,6 +10035,10 @@ async function main() {
     console.log(`  ${C("flow:delete <id|name>")}${G("Delete a flow")}`);
     console.log(`  ${C("flow:export <id|name>")}${G("Export flow to .flow.json")}`);
     console.log(`  ${C("flow:import <file>")}${G("Import flow from .flow.json")}`);
+    console.log(`  ${C("flow:rename <id|name> <new>")}${G("Rename a flow")}`);
+    console.log(`  ${C("flow:clone <id|name>")}${G("Duplicate a flow")}`);
+    console.log(`  ${C("flow:from-curl [cmd]")}${G("Parse curl command \u2192 create flow")}`);
+    console.log(`  ${C("flow:from-spec <file>")}${G("Import OpenAPI/Swagger JSON or YAML spec")}`);
     console.log();
     H("Scheduling");
     console.log(`  ${C('flow:schedule <id> "<cron>"')}${G('Schedule a flow  e.g. "0 9 * * *"')}`);
@@ -8237,6 +10073,24 @@ async function main() {
     console.log(`  ${C("monitor <id|name>")}${G("Run flow + show extracted data changes")}`);
     console.log(`  ${C("monitor <id> --output json")}${G("Monitor with JSON output")}`);
     console.log(import_chalk.default.gray(`  ${"  Flow actions: extract, scroll:bottom, scroll:load, next:page".padEnd(52)}`));
+    console.log();
+    H("API Testing");
+    console.log(`  ${C("api:learn")}${G("Build HTTP API test flow interactively")}`);
+    console.log(`  ${C("env:create <name>")}${G("Create environment (dev/staging/prod)")}`);
+    console.log(`  ${C("env:list")}${G("List all environments")}`);
+    console.log(`  ${C("env:set <env> <key> <val>")}${G("Set variable in environment")}`);
+    console.log(`  ${C("env:use <name>")}${G("Activate environment for runs")}`);
+    console.log(`  ${C("env:show <name>")}${G("Show environment variables")}`);
+    console.log(`  ${C("var:dump <run-id>")}${G("Show extracted variables + API calls from run")}`);
+    console.log();
+    H("Load & Performance Testing");
+    console.log(`  ${C("perf:run <flow> [opts]")}${G("Run load test  --vus 20 --duration 30s")}`);
+    console.log(`  ${C("perf:export <flow> [opts]")}${G("Export k6 script  --p95 500 --max-errors 1")}`);
+    console.log(`  ${C("perf:list")}${G("List past performance runs")}`);
+    console.log(`  ${C("perf:show <run-id>")}${G("Show detailed stats for a perf run")}`);
+    console.log(`  ${C("perf:compare <id-A> <id-B>")}${G("Side-by-side comparison of two perf runs")}`);
+    console.log(`  ${C("perf:run <flow> --report html")}${G("Run load test + save HTML report")}`);
+    console.log(import_chalk.default.gray(`  ${"  Options: --vus N  --duration Ns  --ramp-up Ns  --timeout Ns".padEnd(52)}`));
     console.log();
     H("Chat & Setup");
     console.log(`  ${C("chat")}${G("Ask GhostRun Bot \u2014 Q&A + run flows      \u{1F916} AI")}`);
@@ -8276,13 +10130,24 @@ async function main() {
       }
       await runLearn(args[1]);
       break;
-    case "run":
+    case "run": {
       if (!args[1]) {
         errorMsg("Flow ID or name required");
         process.exit(1);
       }
-      await runFlow(args[1], globalVars);
+      const reportFlag = args.indexOf("--report");
+      const reportFmt = reportFlag >= 0 ? args[reportFlag + 1] || "html" : null;
+      const reportOut = (() => {
+        const i = args.indexOf("--output");
+        return i >= 0 && args[i + 1] && !args[i + 1].startsWith("--") && args[i + 1] !== "json" ? args[i + 1] : null;
+      })();
+      const savedRunId = await runFlow(args[1], globalVars);
+      if (reportFmt && savedRunId) {
+        const outFile = reportOut || `ghostrun-report-${savedRunId.slice(0, 8)}.html`;
+        await generateRunReport(savedRunId, outFile);
+      }
       break;
+    }
     case "flow:list":
       await runListFlows();
       break;
@@ -8313,6 +10178,30 @@ async function main() {
         process.exit(1);
       }
       await runImportFlow(args[1]);
+      break;
+    case "flow:rename":
+      if (!args[1] || !args[2]) {
+        errorMsg("Usage: flow:rename <id|name> <new-name>");
+        process.exit(1);
+      }
+      await runRenameFlow(args[1], args.slice(2).join(" "));
+      break;
+    case "flow:clone":
+      if (!args[1]) {
+        errorMsg("Flow ID or name required");
+        process.exit(1);
+      }
+      await runCloneFlow(args[1]);
+      break;
+    case "flow:from-curl":
+      await runFlowFromCurl(args[1]);
+      break;
+    case "flow:from-spec":
+      if (!args[1]) {
+        errorMsg("File path required");
+        process.exit(1);
+      }
+      await runFlowFromSpec(args[1]);
       break;
     case "flow:schedule":
       if (!args[1] || !args[2]) {
@@ -8464,6 +10353,97 @@ async function main() {
         process.exit(1);
       }
       await runStoreInstall(args[1]);
+      break;
+    case "api:learn":
+      await runApiLearn();
+      break;
+    case "perf:run": {
+      if (!args[1]) {
+        errorMsg("Flow ID or name required");
+        process.exit(1);
+      }
+      const perfExtraArgs = args.slice(2);
+      await runPerfRun(args[1], perfExtraArgs);
+      const perfReportFlag = perfExtraArgs.indexOf("--report");
+      if (perfReportFlag >= 0) {
+        const perfRuns = db.listPerfRuns();
+        const latestPerfRun = perfRuns[0];
+        if (latestPerfRun) {
+          const perfOutIdx = perfExtraArgs.indexOf("--output");
+          const perfOutFile = perfOutIdx >= 0 && perfExtraArgs[perfOutIdx + 1] && !perfExtraArgs[perfOutIdx + 1].startsWith("--") ? perfExtraArgs[perfOutIdx + 1] : `ghostrun-perf-${latestPerfRun.id.slice(0, 8)}.html`;
+          await generatePerfReport(latestPerfRun.id, perfOutFile);
+        }
+      }
+      break;
+    }
+    case "perf:export":
+      if (!args[1]) {
+        errorMsg("Flow ID or name required");
+        process.exit(1);
+      }
+      await runPerfExport(args[1], args.slice(2));
+      break;
+    case "perf:list":
+      await runPerfList();
+      break;
+    case "perf:show":
+      if (!args[1]) {
+        errorMsg("Perf run ID required");
+        process.exit(1);
+      }
+      await runPerfShow(args[1]);
+      break;
+    case "perf:compare":
+      if (!args[1] || !args[2]) {
+        errorMsg("Usage: perf:compare <run-id-A> <run-id-B>");
+        process.exit(1);
+      }
+      await runPerfCompare(args[1], args[2]);
+      break;
+    case "env:create":
+      if (!args[1]) {
+        errorMsg("Environment name required");
+        process.exit(1);
+      }
+      await runEnvCreate(args[1], args.slice(2));
+      break;
+    case "env:list":
+      await runEnvList();
+      break;
+    case "env:set":
+      if (!args[1] || !args[2] || !args[3]) {
+        errorMsg("Usage: env:set <env-name> <key> <value>");
+        process.exit(1);
+      }
+      await runEnvSet(args[1], args[2], args[3]);
+      break;
+    case "env:use":
+      if (!args[1]) {
+        errorMsg("Environment name required");
+        process.exit(1);
+      }
+      await runEnvUse(args[1]);
+      break;
+    case "env:show":
+      if (!args[1]) {
+        errorMsg("Environment name required");
+        process.exit(1);
+      }
+      await runEnvShow(args[1]);
+      break;
+    case "env:delete":
+      if (!args[1]) {
+        errorMsg("Environment name required");
+        process.exit(1);
+      }
+      await runEnvDelete(args[1]);
+      break;
+    case "var:dump":
+      if (!args[1]) {
+        errorMsg("Run ID required");
+        process.exit(1);
+      }
+      await runVarDump(args[1]);
       break;
     default:
       errorMsg("Unknown command: " + cmd);

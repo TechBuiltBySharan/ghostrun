@@ -2,7 +2,7 @@
 
 Record once. Replay as a ghost.
 
-Memory-driven browser automation CLI — record real browser flows, replay them headlessly, detect failures with AI analysis, extract data, and chat with your test suite. Entirely local.
+Memory-driven browser automation and API testing CLI — record real browser flows, replay them headlessly, test REST APIs with assertions and variable extraction, run load tests, detect failures with AI analysis, and chat with your test suite. Entirely local.
 
 ![GhostRun Demo](demo/out/ghostrun-demo.gif)
 
@@ -30,8 +30,10 @@ node ghostrun.js init   # guided setup
 
 ```bash
 ghostrun init                          # setup wizard: installs Chromium, configures AI
-ghostrun learn https://yourapp.com     # record a flow in a real browser
-ghostrun run <flow-id>                 # replay headlessly
+ghostrun learn https://yourapp.com     # record a browser flow
+ghostrun api:learn                     # import a .flow.json with API actions
+ghostrun run <flow-id>                 # replay headlessly (browser or API)
+ghostrun perf:run <flow-id>            # load test an API flow (VU-based)
 ghostrun chat                          # AI chat: ask questions, run flows by name
 ghostrun serve --ui                    # web dashboard at http://localhost:3000
 ```
@@ -54,6 +56,10 @@ Every core feature works with zero AI. AI is an optional enhancement.
 | Monitor & diff extracted data | No | `ghostrun monitor <flow>` |
 | PII sanitization | No | Regex-based, local only |
 | Web dashboard | No | `ghostrun serve --ui` |
+| **API testing** | No | HTTP requests, assertions, variable extraction |
+| **Environment profiles** | No | Named env sets, injected at runtime |
+| **Load testing** | No | VU-based perf runs, p50/p95/p99 stats |
+| **k6 export** | No | `perf:export` generates a k6 script |
 | **Failure analysis** | Optional ✨ | Plain-English explanation of why it failed |
 | **Auto run summary** | Optional ✨ | Attached to every failed run automatically |
 | **Chat assistant** | Optional ✨ | Q&A + run flows by name via `ghostrun chat` |
@@ -83,7 +89,7 @@ node ghostrun.js status        # → AI Provider: Ollama (gemma3:4b)
 | `gemma2:9b` | 5.4 GB | Better quality, more RAM needed |
 | `llama3.2:3b` | 2.0 GB | Fastest, lighter quality |
 
-Override model: `export FLOWMIND_OLLAMA_MODEL=llama3.2:3b`
+Override model: `export GHOSTRUN_OLLAMA_MODEL=llama3.2:3b`
 
 ### Option 2 — Anthropic Cloud (Fallback)
 
@@ -101,9 +107,9 @@ run → try Ollama → if down → try Anthropic → if no key → skip AI silen
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FLOWMIND_AI_PROVIDER` | auto | `ollama`, `anthropic`, or auto |
-| `FLOWMIND_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `FLOWMIND_OLLAMA_MODEL` | auto-detected | Model to use |
+| `GHOSTRUN_AI_PROVIDER` | auto | `ollama`, `anthropic`, or auto |
+| `GHOSTRUN_OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
+| `GHOSTRUN_OLLAMA_MODEL` | auto-detected | Model to use |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (cloud fallback) |
 
 ---
@@ -215,6 +221,97 @@ ghostrun baseline:clear <flow-id>      # clear baselines
 ghostrun baseline:show <flow-id>       # list baselines
 ```
 
+### Importing Flows
+
+```bash
+ghostrun flow:from-curl                         # paste a curl command → instant flow
+ghostrun flow:from-curl "curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d '{\"name\":\"Alice\"}'"
+ghostrun flow:from-spec openapi.json            # import all endpoints from an OpenAPI spec
+ghostrun flow:from-spec swagger.yaml            # YAML supported too
+ghostrun flow:import <file>                     # import a .flow.json directly
+```
+
+`flow:from-curl` parses the curl command (method, headers, body, bearer auth) and creates a ready-to-run flow with a status assertion. `flow:from-spec` reads an OpenAPI/Swagger spec and lets you choose: one flow per tag group, one per endpoint, or one big flow.
+
+### Run Reports
+
+```bash
+ghostrun run <id> --report html                 # run + save HTML report
+ghostrun perf:run <id> --report html            # load test + save HTML report
+```
+
+Reports are dark-themed HTML files saved to the current directory — shareable, self-contained, screenshot-inclusive.
+
+### API Testing
+
+Import an API flow from a `.flow.json` file (no browser needed):
+
+```bash
+ghostrun api:learn                     # interactive: pick a .flow.json file to import
+ghostrun flow:import <file>            # import directly by path
+ghostrun run <id|name>                 # runs pure API flows without launching a browser
+```
+
+When all steps in a flow are API actions (`http:request`, `assert:response`, `set:variable`, `extract:json`, `env:switch`), GhostRun skips Playwright entirely — execution is ~30ms.
+
+### Environments
+
+Named variable sets injected at flow start. Great for dev / staging / prod:
+
+```bash
+ghostrun env:create <name> [base-url]  # create an environment profile
+ghostrun env:list                      # list all environments
+ghostrun env:show <name>               # show variables in an environment
+ghostrun env:set <name> <key=value>    # add or update a variable
+ghostrun env:use <name>                # set as active environment
+ghostrun env:delete <name>             # delete an environment
+```
+
+The active environment's variables are automatically injected before each flow run. Use `{{variableName}}` in any URL, header, or body field to reference them.
+
+### Variable Inspection
+
+```bash
+ghostrun var:dump <run-id>             # show all variables extracted during a run
+```
+
+### Load & Performance Testing
+
+```bash
+ghostrun perf:run <id|name>            # run a load test against an API flow
+ghostrun perf:run <id|name> --vus 20 --duration 30 --ramp-up 5
+ghostrun perf:export <id|name>         # generate a k6 script from the flow
+ghostrun perf:export <id|name> --output mytest.js
+ghostrun perf:list                     # list past perf runs
+ghostrun perf:show <perf-run-id>       # show stats for a specific perf run
+```
+
+**perf:run options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--vus <n>` | 10 | Number of virtual users |
+| `--duration <s>` | 30 | Test duration in seconds |
+| `--ramp-up <s>` | 5 | Ramp-up time (VUs staggered over this window) |
+| `--timeout <ms>` | 10000 | Per-request timeout in ms |
+
+Output includes: HTTP Requests, HTTP Success Rate, Avg RPS, p50/p95/p99 latency, min/max, per-step breakdown, and separate Checks Passed/Failed count.
+
+**perf:compare** — diff two runs side by side to see if a deploy made things faster or slower:
+
+```bash
+ghostrun perf:compare <run-A-id> <run-B-id>
+```
+
+Shows p50/p95/p99/RPS for both runs with color-coded deltas (green = better, red = worse).
+
+**perf:export** generates a valid k6 JavaScript file with:
+- VU stages matching your `--vus`/`--duration`/`--ramp-up` config
+- `http.get`/`http.post` calls with headers and JSON body
+- `check()` assertions mapped to your `assert:response` steps
+- `Trend` metrics per step for p95 thresholds
+- `{{variable}}` → template literal interpolation
+
 ### MCP Server
 
 ```bash
@@ -224,6 +321,69 @@ node mcp-server.js                     # start MCP server (Claude Desktop, Curso
 See [MCP-SETUP.md](MCP-SETUP.md) for connection setup.
 
 Tools exposed: `list_flows`, `get_flow`, `run_flow`, `get_run_result`, `list_runs`, `delete_flow`, `get_status`
+
+---
+
+## CI/CD Integration
+
+### GitHub Actions
+
+```yaml
+# .github/workflows/ghostrun.yml
+name: GhostRun Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install GhostRun
+        run: npm install -g ghostrun-cli
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Import test flows
+        run: |
+          ghostrun flow:import test-flows/health-check.flow.json
+          ghostrun flow:import test-flows/auth-and-users.flow.json
+
+      - name: Run flows
+        run: |
+          ghostrun run "API Health Check" --report html
+          ghostrun run "Auth + User List" --report html
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ghostrun-reports
+          path: ghostrun-report-*.html
+```
+
+### Exit Codes
+
+GhostRun exits with code `1` on failure and `0` on pass — standard CI behaviour, no extra flags needed.
+
+### API-only flows in CI
+
+API flows skip Playwright entirely — no `playwright install` step needed:
+
+```yaml
+      - name: Install GhostRun (API testing only)
+        run: npm install -g ghostrun-cli
+        # No playwright install needed for pure API flows
+
+      - name: Run API tests
+        run: ghostrun run "Auth + User List"
+```
 
 ---
 
@@ -338,9 +498,34 @@ All actions you can use in recorded or imported `.flow.json` files:
 | `iframe:enter` | `selector` | Enter an iframe context |
 | `iframe:exit` | — | Exit iframe context, return to main frame |
 
+### API — HTTP Requests
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `http:request` | `method`, `url`, `headers?`, `body?`, `auth?`, `extract?` | Make an HTTP request. `auth` supports `{ type: "bearer", token: "{{var}}" }`. `extract` is a map of `variableName → $.jsonPath`. |
+
+### API — Assertions
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `assert:response` | `assert: "status"`, `expected` | Assert HTTP status code |
+| `assert:response` | `assert: "json:path"`, `path`, `expected` | Assert JSONPath value equals expected |
+| `assert:response` | `assert: "json:exists"`, `path` | Assert JSONPath exists in response |
+| `assert:response` | `assert: "header"`, `header`, `expected` | Assert response header value |
+| `assert:response` | `assert: "body:contains"`, `expected` | Assert raw body contains string |
+| `assert:response` | `assert: "time"`, `expected` | Assert response time < expected ms |
+
+### API — Variables & Flow Control
+
+| Action | Fields | Description |
+|--------|--------|-------------|
+| `set:variable` | `variable`, `value` | Set a named variable (supports `{{interpolation}}`) |
+| `extract:json` | `variable`, `path` | Extract a value from the last response body via JSONPath |
+| `env:switch` | `value` | Switch active environment mid-flow |
+
 ### Variables
 
-Use `{{variableName}}` in any `value`, `url`, or `selector` field to inject variables:
+Use `{{variableName}}` in any `value`, `url`, `selector`, or `body` field to inject variables:
 
 ```json
 { "action": "fill", "selector": "#email", "value": "{{userEmail}}" }
@@ -388,7 +573,8 @@ All data is local in `~/.ghostrun/`:
 
 ```
 ~/.ghostrun/
-├── data/ghostrun.db       # SQLite: flows, runs, steps, schedules, extracted data
+├── data/ghostrun.db       # SQLite: flows, runs, steps, schedules, extracted data,
+│                          #         environments, api_responses, perf_runs
 ├── screenshots/           # PNG per step per run
 ├── baselines/             # Visual baseline reference screenshots
 └── diffs/                 # Screenshot diff images
@@ -408,6 +594,36 @@ PII is sanitized before storage — emails, phones, cards, JWTs, API keys, passw
 npm install
 npm run build    # compiles .ts → .js via esbuild
 ```
+
+---
+
+## Publishing to npm
+
+```bash
+# 1. Log in to npm
+npm login
+
+# 2. Make sure the build is fresh
+npm run build
+
+# 3. Dry-run to verify what gets published
+npm publish --dry-run
+
+# 4. Publish
+npm publish --access public
+```
+
+After publishing, users can install with:
+```bash
+npm install -g ghostrun-cli
+ghostrun init
+```
+
+---
+
+## Built with
+
+This project was built with the help of [Claude](https://claude.ai) and [Goose](https://goose-docs.ai).
 
 ---
 

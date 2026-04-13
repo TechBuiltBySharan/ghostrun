@@ -1791,7 +1791,7 @@ Return just the selector, like: a[href="/login"]`;
   return null;
 }
 
-async function runFlow(id: string, vars?: Record<string, string>) {
+async function runFlow(id: string, vars?: Record<string, string>): Promise<string | null> {
   const visible = process.argv.includes('--visible');
   const outputIdx = process.argv.indexOf('--output');
   const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === 'json';
@@ -1800,7 +1800,8 @@ async function runFlow(id: string, vars?: Record<string, string>) {
   let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
   if (!jsonOutput) console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + (visible ? chalk.yellow(' [visible]') : '') + '\n');
-  await executeFlow(id, vars, { visible, jsonOutput });
+  const result = await executeFlow(id, vars, { visible, jsonOutput });
+  return result?.runId || null;
 }
 
 // ============================================
@@ -2080,6 +2081,343 @@ async function runImportFlow(filepath: string) {
 }
 
 // ============================================
+// COMMANDS — flow:rename / flow:clone
+// ============================================
+
+async function runRenameFlow(id: string, newName: string) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
+  db.updateFlow(flow.id, { name: newName });
+  success(`Renamed "${chalk.gray(flow.name)}" → "${chalk.white(newName)}"`);
+  console.log();
+}
+
+async function runCloneFlow(id: string) {
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
+  const newName = flow.name + ' (copy)';
+  const created = db.createFlow({ name: newName, description: flow.description ?? undefined, appUrl: flow.appUrl ?? undefined, graph: JSON.parse(flow.graph) });
+  success(`Cloned "${chalk.gray(flow.name)}" → "${chalk.white(newName)}"`);
+  info('New ID: ' + chalk.gray(created.id.slice(0, 8)));
+  console.log();
+}
+
+// ============================================
+// COMMANDS — flow:from-curl / flow:from-spec
+// ============================================
+
+function parseCurlTokens(input: string): string[] {
+  const tokens: string[] = [];
+  let cur = '';
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+    if ((ch === ' ' || ch === '\n' || ch === '\t') && !inSingle && !inDouble) {
+      if (cur) { tokens.push(cur); cur = ''; }
+      continue;
+    }
+    if (ch === '\\' && !inSingle) { i++; if (i < input.length) cur += input[i]; continue; }
+    cur += ch;
+  }
+  if (cur) tokens.push(cur);
+  return tokens;
+}
+
+async function runFlowFromCurl(curlStr?: string) {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  Import from curl\n'));
+
+  let input = curlStr || '';
+  if (!input.trim()) {
+    console.log(chalk.gray('  Paste your curl command (multi-line OK, end with empty line):\n'));
+    const lines: string[] = [];
+    while (true) {
+      const line = await askQuestion('  > ');
+      if (!line.trim()) break;
+      lines.push(line.replace(/\\$/, '').trim());
+    }
+    input = lines.join(' ');
+  }
+
+  input = input.replace(/^curl\s+/, '').trim();
+  if (!input) { errorMsg('No curl command provided'); process.exit(1); }
+
+  const tokens = parseCurlTokens(input);
+
+  let method = 'GET';
+  let url = '';
+  const headers: Record<string, string> = {};
+  let body: unknown;
+  let bearerToken = '';
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '-X' || t === '--request') { method = tokens[++i]?.toUpperCase() || 'GET'; continue; }
+    if (t === '-H' || t === '--header') {
+      const h = tokens[++i] || '';
+      const colon = h.indexOf(':');
+      if (colon > 0) {
+        const k = h.slice(0, colon).trim();
+        const v = h.slice(colon + 1).trim();
+        if (k.toLowerCase() === 'authorization' && v.toLowerCase().startsWith('bearer ')) {
+          bearerToken = v.slice(7).trim();
+        } else {
+          headers[k] = v;
+        }
+      }
+      continue;
+    }
+    if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') {
+      const raw = tokens[++i] || '';
+      if (method === 'GET') method = 'POST';
+      try { body = JSON.parse(raw); } catch { body = raw; }
+      continue;
+    }
+    if (t === '-u' || t === '--user') {
+      const creds = tokens[++i] || '';
+      const encoded = Buffer.from(creds).toString('base64');
+      headers['Authorization'] = `Basic ${encoded}`;
+      continue;
+    }
+    if (t === '--url') { url = tokens[++i] || ''; continue; }
+    if (t === '-s' || t === '--silent' || t === '-v' || t === '--verbose' || t === '-i' || t === '--include' || t === '-L' || t === '--location' || t === '--compressed') continue;
+    if (t === '-o' || t === '--output' || t === '--max-time' || t === '--connect-timeout' || t === '--proxy') { i++; continue; }
+    if (!t.startsWith('-') && !url) url = t;
+  }
+
+  if (!url) { errorMsg('Could not find URL in curl command'); process.exit(1); }
+
+  const urlPath = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+  const defaultName = `${method} ${urlPath.split('/').filter(Boolean).slice(-1)[0] || urlPath}`;
+  const name = await askQuestion(chalk.cyan(`\n  Flow name [${defaultName}]: `));
+  const flowName = name.trim() || defaultName;
+
+  const nodes: Record<string, unknown>[] = [];
+  const nodeId = () => uuidv4();
+
+  const httpNode: Record<string, unknown> = {
+    id: nodeId(), type: 'action', action: 'http:request',
+    method, url, label: `${method} ${urlPath}`,
+  };
+  if (Object.keys(headers).length) httpNode.headers = headers;
+  if (body !== undefined) httpNode.body = body;
+  if (bearerToken) httpNode.auth = { type: 'bearer', token: bearerToken };
+  nodes.push(httpNode);
+
+  nodes.push({ id: nodeId(), type: 'action', action: 'assert:response', assert: 'status', expected: 200, label: 'Assert status 200' });
+
+  const isJson = headers['Content-Type']?.includes('json') || headers['content-type']?.includes('json') || typeof body === 'object';
+  if (isJson || (!body && method === 'GET')) {
+    nodes.push({ id: nodeId(), type: 'action', action: 'assert:response', assert: 'time', expected: 2000, label: 'Assert response < 2000ms' });
+  }
+
+  const graph = { nodes, edges: [] };
+  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, appUrl: null, graph });
+
+  console.log();
+  success(`Flow created: ${chalk.white(flowName)}`);
+  info(`ID: ${chalk.gray(created.id.slice(0, 8))}`);
+  console.log(chalk.gray(`\n  Nodes created:`));
+  for (const n of nodes) console.log(chalk.gray(`    ${n.label}`));
+  console.log(chalk.gray(`\n  Run with: ghostrun run "${flowName}"`));
+  console.log(chalk.gray(`  Add more steps: ghostrun api:learn`));
+  console.log();
+}
+
+function parseYamlValue(s: string): unknown {
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (s === 'null' || s === '~') return null;
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
+  return s.replace(/^["']|["']$/g, '');
+}
+
+function parseSimpleYaml(text: string): Record<string, unknown> {
+  const lines = text.split('\n');
+  const root: Record<string, unknown> = {};
+  const stack: Array<{ obj: Record<string, unknown> | unknown[]; indent: number }> = [{ obj: root, indent: -1 }];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const indent = line.search(/\S/);
+    const trimmed = line.trim();
+
+    // Pop stack to find parent
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+
+    const parent = stack[stack.length - 1].obj;
+
+    if (trimmed.startsWith('- ')) {
+      const val = trimmed.slice(2).trim();
+      if (Array.isArray(parent)) {
+        const parsed = parseYamlValue(val);
+        (parent as unknown[]).push(parsed);
+      }
+      continue;
+    }
+
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx < 0) continue;
+    const key = trimmed.slice(0, colonIdx).trim().replace(/^["']|["']$/g, '');
+    const rest = trimmed.slice(colonIdx + 1).trim();
+
+    if (!Array.isArray(parent)) {
+      if (rest === '' || rest === '|' || rest === '>') {
+        const child: Record<string, unknown> = {};
+        (parent as Record<string, unknown>)[key] = child;
+        stack.push({ obj: child, indent });
+      } else if (rest === '-' || rest.startsWith('- ')) {
+        const arr: unknown[] = [];
+        (parent as Record<string, unknown>)[key] = arr;
+        stack.push({ obj: arr, indent });
+      } else {
+        (parent as Record<string, unknown>)[key] = parseYamlValue(rest);
+      }
+    }
+  }
+  return root;
+}
+
+async function runFlowFromSpec(filepath: string) {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  Import from OpenAPI Spec\n'));
+
+  if (!fs.existsSync(filepath)) { errorMsg('File not found: ' + filepath); process.exit(1); }
+
+  let spec: Record<string, unknown>;
+  const raw = fs.readFileSync(filepath, 'utf8').trim();
+
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try { spec = JSON.parse(raw); } catch { errorMsg('Invalid JSON'); process.exit(1); return; }
+  } else {
+    spec = parseSimpleYaml(raw);
+  }
+
+  const version = (spec.openapi || spec.swagger || '2') as string;
+  const specInfo = spec.info as Record<string, unknown> || {};
+  const title = (specInfo.title as string) || path.basename(filepath, path.extname(filepath));
+  const servers = (spec.servers as Array<Record<string, unknown>>) || [];
+  const baseUrl = servers[0]?.url as string || (spec.host ? `https://${spec.host}${spec.basePath || ''}` : '');
+  const paths = spec.paths as Record<string, Record<string, unknown>> || {};
+
+  console.log(chalk.gray(`  Spec: ${title} (OpenAPI ${version})`));
+  console.log(chalk.gray(`  Base URL: ${baseUrl || '(not set — use environment variables)'}`));
+  console.log(chalk.gray(`  Paths: ${Object.keys(paths).length}\n`));
+
+  if (Object.keys(paths).length === 0) { errorMsg('No paths found in spec'); process.exit(1); }
+
+  const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options'];
+
+  const tagGroups: Record<string, Array<{ path: string; method: string; op: Record<string, unknown> }>> = {};
+
+  for (const [pathKey, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = (pathItem as Record<string, unknown>)[method] as Record<string, unknown>;
+      if (!op) continue;
+      const tags = op.tags as string[] || ['default'];
+      const tag = tags[0] || 'default';
+      if (!tagGroups[tag]) tagGroups[tag] = [];
+      tagGroups[tag].push({ path: pathKey, method, op });
+    }
+  }
+
+  const tags = Object.keys(tagGroups);
+  console.log(chalk.gray(`  Tags found: ${tags.join(', ')}`));
+  console.log(chalk.cyan('\n  Options:'));
+  console.log(chalk.gray('  1 — One flow per tag group (recommended)'));
+  console.log(chalk.gray('  2 — One flow per endpoint'));
+  console.log(chalk.gray('  3 — Single flow with all endpoints'));
+  const choice = ((await askQuestion('\n  Choice [1]: ')).trim()) || '1';
+
+  const flowsToCreate: Array<{ name: string; description: string; nodes: Record<string, unknown>[] }> = [];
+  const nodeId = () => uuidv4();
+
+  function makeHttpNode(method: string, pathKey: string, op: Record<string, unknown>, bUrl: string): Record<string, unknown> {
+    const resolvedUrl = bUrl ? `${bUrl.replace(/\/$/, '')}${pathKey}` : pathKey;
+    const summary = (op.summary as string) || `${method.toUpperCase()} ${pathKey}`;
+    const node: Record<string, unknown> = {
+      id: nodeId(), type: 'action', action: 'http:request',
+      method: method.toUpperCase(), url: resolvedUrl, label: summary,
+    };
+    const requestBody = op.requestBody as Record<string, unknown>;
+    if (requestBody) {
+      const content = requestBody.content as Record<string, unknown>;
+      if (content?.['application/json']) {
+        const schema = (content['application/json'] as Record<string, unknown>)?.schema as Record<string, unknown>;
+        if (schema?.example) node.body = schema.example;
+        else if (schema?.properties) {
+          const body: Record<string, string> = {};
+          for (const prop of Object.keys(schema.properties as object)) body[prop] = `{{${prop}}}`;
+          node.body = body;
+        }
+        node.headers = { 'Content-Type': 'application/json' };
+      }
+    }
+    const pathParams = (op.parameters as Array<Record<string, unknown>> || []).filter(p => p.in === 'path');
+    if (pathParams.length) {
+      let urlStr = node.url as string;
+      for (const p of pathParams) {
+        urlStr = urlStr.replace(`{${p.name}}`, `{{${p.name}}}`);
+      }
+      node.url = urlStr;
+    }
+    return node;
+  }
+
+  function makeAssertNode(successCode = 200): Record<string, unknown> {
+    return { id: nodeId(), type: 'action', action: 'assert:response', assert: 'status', expected: successCode, label: `Assert status ${successCode}` };
+  }
+
+  if (choice === '1') {
+    for (const [tag, ops] of Object.entries(tagGroups)) {
+      const nodes: Record<string, unknown>[] = [];
+      for (const { path: pathKey, method, op } of ops) {
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        const responses = op.responses as Record<string, unknown> || {};
+        const successCode = Object.keys(responses).find(c => Number(c) >= 200 && Number(c) < 300);
+        nodes.push(makeAssertNode(successCode ? Number(successCode) : 200));
+      }
+      flowsToCreate.push({ name: `${title} — ${tag}`, description: `Auto-generated from OpenAPI spec: ${title}`, nodes });
+    }
+  } else if (choice === '2') {
+    for (const [tag, ops] of Object.entries(tagGroups)) {
+      for (const { path: pathKey, method, op } of ops) {
+        const summary = (op.summary as string) || `${method.toUpperCase()} ${pathKey}`;
+        const nodes: Record<string, unknown>[] = [];
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        const responses = op.responses as Record<string, unknown> || {};
+        const successCode = Object.keys(responses).find(c => Number(c) >= 200 && Number(c) < 300);
+        nodes.push(makeAssertNode(successCode ? Number(successCode) : 200));
+        flowsToCreate.push({ name: summary, description: `${tag}: ${method.toUpperCase()} ${pathKey}`, nodes });
+      }
+    }
+  } else {
+    const nodes: Record<string, unknown>[] = [];
+    for (const [, ops] of Object.entries(tagGroups)) {
+      for (const { path: pathKey, method, op } of ops) {
+        nodes.push(makeHttpNode(method, pathKey, op, baseUrl));
+        nodes.push(makeAssertNode(200));
+      }
+    }
+    flowsToCreate.push({ name: title, description: `Auto-generated from OpenAPI spec: ${filepath}`, nodes });
+  }
+
+  console.log();
+  for (const f of flowsToCreate) {
+    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || null, graph: { nodes: f.nodes, edges: [] } });
+    success(`Created: ${chalk.white(f.name)} ${chalk.gray('(' + f.nodes.length + ' steps, id: ' + created.id.slice(0, 8) + ')')}`);
+  }
+  console.log(chalk.gray(`\n  ${flowsToCreate.length} flow(s) created. Run with: ghostrun run "<name>"`));
+  if (baseUrl) console.log(chalk.gray(`  Base URL: ${baseUrl}`));
+  else console.log(chalk.gray(`  Tip: set base URL with: ghostrun env:create dev <base-url>`));
+  console.log();
+}
+
+// ============================================
 // COMMANDS — run management
 // ============================================
 
@@ -2160,6 +2498,86 @@ async function runShowRun(id: string) {
     }
   }
   console.log();
+}
+
+function escapeHtml(s: string): string {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function generateRunReport(runId: string, outFile: string) {
+  const run = db.findRunByPartialId(runId);
+  if (!run) return;
+  const flow = db.getFlow(run.flowId);
+  const steps = db.listSteps(run.id);
+  const apiResps = db.getApiResponses ? db.getApiResponses(run.id) : [];
+
+  const statusColor = run.status === 'passed' ? '#56d364' : '#f85149';
+  const durStr = run.duration ? (run.duration >= 1000 ? (run.duration / 1000).toFixed(2) + 's' : run.duration + 'ms') : '—';
+
+  const stepsHtml = steps.map((step, i) => {
+    const icon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '○';
+    const color = step.status === 'passed' ? '#56d364' : step.status === 'failed' ? '#f85149' : '#e3b341';
+    const dur = step.duration ? (step.duration >= 1000 ? (step.duration/1000).toFixed(2)+'s' : step.duration+'ms') : '—';
+    const errHtml = step.errorMessage ? `<div class="step-error">${escapeHtml(step.errorMessage)}</div>` : '';
+    const screenshotHtml = step.screenshotPath && fs.existsSync(step.screenshotPath)
+      ? `<img class="step-screenshot" src="file://${step.screenshotPath}" loading="lazy" />`
+      : '';
+    return `<div class="step ${step.status}">
+      <div class="step-header">
+        <span class="step-icon" style="color:${color}">${icon}</span>
+        <span class="step-num">${i+1}</span>
+        <span class="step-action">${escapeHtml(step.action || '')}</span>
+        <span class="step-label">${escapeHtml(step.name || '')}</span>
+        <span class="step-dur">${dur}</span>
+      </div>
+      ${errHtml}${screenshotHtml}
+    </div>`;
+  }).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GhostRun Report — ${escapeHtml(flow?.name || runId)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
+h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
+.meta{color:#768390;font-size:13px;margin-bottom:32px}
+.summary{display:flex;gap:24px;margin-bottom:32px;flex-wrap:wrap}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 24px}
+.stat-val{font-size:26px;font-weight:600;color:${statusColor}}
+.stat-label{font-size:12px;color:#768390;text-transform:uppercase;letter-spacing:.05em}
+.steps{display:flex;flex-direction:column;gap:8px}
+.step{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.step.failed{border-color:#f85149}
+.step.passed{border-color:#21262d}
+.step-header{display:flex;align-items:center;gap:10px;padding:12px 16px;font-family:monospace;font-size:13px}
+.step-icon{font-size:16px;min-width:20px}
+.step-num{color:#768390;min-width:24px}
+.step-action{color:#39d0d8;min-width:140px}
+.step-label{color:#f0f6fc;flex:1}
+.step-dur{color:#768390;font-size:12px;text-align:right}
+.step-error{padding:10px 16px 12px 50px;color:#f85149;font-size:13px;font-family:monospace;background:#160b0b;border-top:1px solid #30363d}
+.step-screenshot{width:100%;max-height:400px;object-fit:contain;display:block;border-top:1px solid #30363d;background:#000}
+footer{margin-top:48px;color:#768390;font-size:12px}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(flow?.name || runId)}</h1>
+<div class="meta">Run ID: ${run.id.slice(0,8)} &nbsp;·&nbsp; ${new Date(run.startedAt).toLocaleString()}</div>
+<div class="summary">
+  <div class="stat"><div class="stat-val" style="color:${statusColor}">${run.status.toUpperCase()}</div><div class="stat-label">Status</div></div>
+  <div class="stat"><div class="stat-val">${durStr}</div><div class="stat-label">Duration</div></div>
+  <div class="stat"><div class="stat-val">${steps.filter(s => s.status === 'passed').length}</div><div class="stat-label">Passed</div></div>
+  <div class="stat"><div class="stat-val" style="color:${run.status==='failed'?'#f85149':'#56d364'}">${steps.filter(s => s.status === 'failed').length}</div><div class="stat-label">Failed</div></div>
+</div>
+<div class="steps">${stepsHtml}</div>
+<footer>Generated by GhostRun · ${new Date().toISOString()}</footer>
+</body></html>`;
+
+  fs.writeFileSync(outFile, html);
+  success(`HTML report: ${chalk.cyan(outFile)}`);
 }
 
 async function runAnalyzeRun(id: string) {
@@ -3831,10 +4249,6 @@ function generateExploreHtml(report: { id: string; url: string; environment: str
 </script>
 </body>
 </html>`;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 async function runExplore(url: string) {
@@ -5592,6 +6006,140 @@ async function runPerfShow(runId: string): Promise<void> {
   console.log();
 }
 
+async function runPerfCompare(id1: string, id2: string) {
+  const r1 = db.findPerfRunByPartialId(id1);
+  const r2 = db.findPerfRunByPartialId(id2);
+  if (!r1) { errorMsg('First perf run not found: ' + id1); process.exit(1); }
+  if (!r2) { errorMsg('Second perf run not found: ' + id2); process.exit(1); }
+
+  const c1 = JSON.parse(r1.config ? JSON.stringify(r1.config) : '{}') as Record<string, unknown>;
+  const c2 = JSON.parse(r2.config ? JSON.stringify(r2.config) : '{}') as Record<string, unknown>;
+
+  divider();
+  console.log(chalk.bold('\n  Performance Comparison\n'));
+  console.log(`  ${chalk.cyan('A')} ${r1.id.slice(0,8)}  ${chalk.gray(r1.flowName)}  ${chalk.gray(timeAgo(r1.startedAt.toISOString()))}  ${r1.config ? chalk.gray(`(${(c1 as any).vus}VU · ${(c1 as any).duration}s)`) : ''}`);
+  console.log(`  ${chalk.cyan('B')} ${r2.id.slice(0,8)}  ${chalk.gray(r2.flowName)}  ${chalk.gray(timeAgo(r2.startedAt.toISOString()))}  ${r2.config ? chalk.gray(`(${(c2 as any).vus}VU · ${(c2 as any).duration}s)`) : ''}`);
+  console.log();
+
+  function delta(a: number | null | undefined, b: number | null | undefined, unit = 'ms', lowerBetter = true): string {
+    if (a == null || b == null) return chalk.gray('—');
+    const diff = b - a;
+    const pct = a !== 0 ? ((diff / a) * 100).toFixed(1) : '—';
+    const better = lowerBetter ? diff < 0 : diff > 0;
+    const color = diff === 0 ? chalk.gray : better ? chalk.green : chalk.red;
+    const sign = diff > 0 ? '+' : '';
+    return color(`${sign}${diff.toFixed(0)}${unit} (${sign}${pct}%)`);
+  }
+
+  const col = (s: string) => String(s).padEnd(14);
+  const hdr = (s: string) => chalk.bold.gray(String(s).padEnd(14));
+
+  console.log(`  ${chalk.gray('Metric'.padEnd(20))} ${hdr('A')} ${hdr('B')} ${'Change'.padEnd(20)}`);
+  console.log(chalk.gray('  ' + '─'.repeat(72)));
+
+  const rows: Array<[string, number|null|undefined, number|null|undefined, string, boolean]> = [
+    ['Avg RPS',       r1.avgRps,   r2.avgRps,   ' req/s', false],
+    ['p50 latency',   r1.p50,      r2.p50,      'ms', true],
+    ['p95 latency',   r1.p95,      r2.p95,      'ms', true],
+    ['p99 latency',   r1.p99,      r2.p99,      'ms', true],
+    ['Min latency',   r1.minMs,    r2.minMs,    'ms', true],
+    ['Max latency',   r1.maxMs,    r2.maxMs,    'ms', true],
+  ];
+
+  for (const [label, v1, v2, unit, lowerBetter] of rows) {
+    const a = v1 != null ? v1.toFixed(unit === ' req/s' ? 1 : 0) + unit : '—';
+    const b = v2 != null ? v2.toFixed(unit === ' req/s' ? 1 : 0) + unit : '—';
+    console.log(`  ${label.padEnd(20)} ${col(a)} ${col(b)} ${delta(v1 ?? null, v2 ?? null, unit, lowerBetter)}`);
+  }
+
+  const sr1 = r1.totalRequests ? ((r1.successRequests || 0) / r1.totalRequests * 100).toFixed(1) + '%' : '—';
+  const sr2 = r2.totalRequests ? ((r2.successRequests || 0) / r2.totalRequests * 100).toFixed(1) + '%' : '—';
+  const srGood = parseFloat(sr2) >= parseFloat(sr1);
+  console.log(`  ${'HTTP Success'.padEnd(20)} ${col(sr1)} ${col(sr2)} ${sr1 === '—' || sr2 === '—' ? chalk.gray('—') : srGood ? chalk.green('≥ A') : chalk.red('< A')}`);
+
+  console.log();
+
+  const p95Improved = r1.p95 && r2.p95 && r2.p95 < r1.p95;
+  const p95Worse = r1.p95 && r2.p95 && r2.p95 > r1.p95 * 1.1;
+  if (p95Improved) console.log(chalk.green('  ✓ B is faster — p95 improved by ' + Math.abs(r2.p95! - r1.p95!).toFixed(0) + 'ms'));
+  else if (p95Worse) console.log(chalk.red('  ✗ B is slower — p95 degraded by ' + Math.abs(r2.p95! - r1.p95!).toFixed(0) + 'ms'));
+  else console.log(chalk.gray('  ~ Performance roughly equivalent'));
+  console.log();
+}
+
+async function generatePerfReport(perfRunId: string, outFile: string) {
+  const pr = db.getPerfRun ? db.getPerfRun(perfRunId) : null;
+  if (!pr) return;
+  const config = pr.config ? (typeof pr.config === 'string' ? JSON.parse(pr.config) : pr.config) : {};
+  const perStep: Record<string, unknown>[] = pr.perStepStats
+    ? (typeof pr.perStepStats === 'string' ? Object.values(JSON.parse(pr.perStepStats)) : Object.values(pr.perStepStats as object))
+    : [];
+
+  const stepsHtml = perStep.map((s: Record<string, unknown>) => {
+    const p95Color = Number(s.p95) > 500 ? '#f85149' : Number(s.p95) > 200 ? '#e3b341' : '#56d364';
+    return `<tr>
+      <td>${escapeHtml(String(s.label || ''))}</td>
+      <td>${String(s.total || s.count || 0)}</td>
+      <td>${Number(s.p50 || 0).toFixed(0)}ms</td>
+      <td style="color:${p95Color}">${Number(s.p95 || 0).toFixed(0)}ms</td>
+      <td>${Number(s.p99 || 0).toFixed(0)}ms</td>
+      <td>${Number(s.min || 0).toFixed(0)}ms</td>
+      <td>${Number(s.max || 0).toFixed(0)}ms</td>
+    </tr>`;
+  }).join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GhostRun Perf — ${escapeHtml(pr.flowName)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
+h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
+.meta{color:#768390;font-size:13px;margin-bottom:32px}
+.summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:16px;margin-bottom:40px}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 20px}
+.stat-val{font-size:24px;font-weight:600;color:#f0f6fc}
+.stat-val.good{color:#56d364}.stat-val.warn{color:#e3b341}.stat-val.bad{color:#f85149}
+.stat-label{font-size:11px;color:#768390;text-transform:uppercase;letter-spacing:.07em;margin-top:4px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #21262d;font-size:13px}
+th{color:#768390;font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.07em}
+tr:last-child td{border-bottom:none}
+.section-title{font-size:16px;font-weight:600;color:#f0f6fc;margin:32px 0 12px}
+footer{margin-top:48px;color:#768390;font-size:12px}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(pr.flowName)}</h1>
+<div class="meta">
+  Perf Run ${pr.id.slice(0,8)} &nbsp;·&nbsp; ${(config as any).vus || '?'} VUs · ${(config as any).duration || '?'}s · ramp-up ${(config as any).rampUp || 0}s
+  &nbsp;·&nbsp; ${new Date(pr.startedAt).toLocaleString()}
+</div>
+<div class="summary">
+  <div class="stat"><div class="stat-val ${pr.status === 'done' ? 'good' : 'bad'}">${(pr.status || 'unknown').toUpperCase()}</div><div class="stat-label">Status</div></div>
+  <div class="stat"><div class="stat-val">${pr.totalRequests || 0}</div><div class="stat-label">HTTP Requests</div></div>
+  <div class="stat"><div class="stat-val ${pr.totalRequests && pr.successRequests === pr.totalRequests ? 'good' : 'warn'}">${pr.totalRequests ? ((pr.successRequests||0)/pr.totalRequests*100).toFixed(1)+'%' : '—'}</div><div class="stat-label">Success Rate</div></div>
+  <div class="stat"><div class="stat-val">${pr.avgRps ? pr.avgRps.toFixed(1) : '—'}</div><div class="stat-label">Avg RPS</div></div>
+  <div class="stat"><div class="stat-val">${pr.p50 != null ? pr.p50+'ms' : '—'}</div><div class="stat-label">p50</div></div>
+  <div class="stat"><div class="stat-val ${pr.p95 && pr.p95 > 500 ? 'bad' : pr.p95 && pr.p95 > 200 ? 'warn' : 'good'}">${pr.p95 != null ? pr.p95+'ms' : '—'}</div><div class="stat-label">p95</div></div>
+  <div class="stat"><div class="stat-val">${pr.p99 != null ? pr.p99+'ms' : '—'}</div><div class="stat-label">p99</div></div>
+  <div class="stat"><div class="stat-val">${pr.minMs != null ? pr.minMs+'ms' : '—'}</div><div class="stat-label">Min</div></div>
+  <div class="stat"><div class="stat-val">${pr.maxMs != null ? pr.maxMs+'ms' : '—'}</div><div class="stat-label">Max</div></div>
+</div>
+<div class="section-title">Per-step breakdown</div>
+<table>
+  <thead><tr><th>Step</th><th>Count</th><th>p50</th><th>p95</th><th>p99</th><th>Min</th><th>Max</th></tr></thead>
+  <tbody>${stepsHtml}</tbody>
+</table>
+<footer>Generated by GhostRun · ${new Date().toISOString()}</footer>
+</body></html>`;
+
+  fs.writeFileSync(outFile, html);
+  success(`HTML report: ${chalk.cyan(outFile)}`);
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -5619,6 +6167,7 @@ async function main() {
     console.log(`  ${C('run <id|name> [--var k=v]')}${G('Execute a flow headlessly')}`);
     console.log(`  ${C('run <id> --visible')}${G('Run with visible browser window')}`);
     console.log(`  ${C('run <id> --output json')}${G('JSON output with extracted data')}`);
+    console.log(`  ${C('run <id> --report html')}${G('Run flow + save HTML report')}`);
     console.log(`  ${C('create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
     console.log(`  ${C('code:scan <directory>')}${G('Scan codebase, create draft flows    🤖 AI')}`);
     console.log();
@@ -5629,6 +6178,10 @@ async function main() {
     console.log(`  ${C('flow:delete <id|name>')}${G('Delete a flow')}`);
     console.log(`  ${C('flow:export <id|name>')}${G('Export flow to .flow.json')}`);
     console.log(`  ${C('flow:import <file>')}${G('Import flow from .flow.json')}`);
+    console.log(`  ${C('flow:rename <id|name> <new>')}${G('Rename a flow')}`);
+    console.log(`  ${C('flow:clone <id|name>')}${G('Duplicate a flow')}`);
+    console.log(`  ${C('flow:from-curl [cmd]')}${G('Parse curl command → create flow')}`);
+    console.log(`  ${C('flow:from-spec <file>')}${G('Import OpenAPI/Swagger JSON or YAML spec')}`);
     console.log();
 
     H('Scheduling');
@@ -5686,6 +6239,8 @@ async function main() {
     console.log(`  ${C('perf:export <flow> [opts]')}${G('Export k6 script  --p95 500 --max-errors 1')}`);
     console.log(`  ${C('perf:list')}${G('List past performance runs')}`);
     console.log(`  ${C('perf:show <run-id>')}${G('Show detailed stats for a perf run')}`);
+    console.log(`  ${C('perf:compare <id-A> <id-B>')}${G('Side-by-side comparison of two perf runs')}`);
+    console.log(`  ${C('perf:run <flow> --report html')}${G('Run load test + save HTML report')}`);
     console.log(chalk.gray(`  ${'  Options: --vus N  --duration Ns  --ramp-up Ns  --timeout Ns'.padEnd(52)}`));
     console.log();
 
@@ -5717,9 +6272,18 @@ async function main() {
     case 'learn':
       if (!args[1]) { errorMsg('URL required'); process.exit(1); }
       await runLearn(args[1]); break;
-    case 'run':
+    case 'run': {
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
-      await runFlow(args[1], globalVars); break;
+      const reportFlag = args.indexOf('--report');
+      const reportFmt = reportFlag >= 0 ? (args[reportFlag + 1] || 'html') : null;
+      const reportOut = (() => { const i = args.indexOf('--output'); return i >= 0 && args[i+1] && !args[i+1].startsWith('--') && args[i+1] !== 'json' ? args[i+1] : null; })();
+      const savedRunId = await runFlow(args[1], globalVars);
+      if (reportFmt && savedRunId) {
+        const outFile = reportOut || `ghostrun-report-${savedRunId.slice(0,8)}.html`;
+        await generateRunReport(savedRunId, outFile);
+      }
+      break;
+    }
     case 'flow:list':       await runListFlows(); break;
     case 'flow:fix':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
@@ -5733,6 +6297,17 @@ async function main() {
     case 'flow:import':
       if (!args[1]) { errorMsg('File path required'); process.exit(1); }
       await runImportFlow(args[1]); break;
+    case 'flow:rename':
+      if (!args[1] || !args[2]) { errorMsg('Usage: flow:rename <id|name> <new-name>'); process.exit(1); }
+      await runRenameFlow(args[1], args.slice(2).join(' ')); break;
+    case 'flow:clone':
+      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
+      await runCloneFlow(args[1]); break;
+    case 'flow:from-curl':
+      await runFlowFromCurl(args[1]); break;
+    case 'flow:from-spec':
+      if (!args[1]) { errorMsg('File path required'); process.exit(1); }
+      await runFlowFromSpec(args[1]); break;
     case 'flow:schedule':
       if (!args[1] || !args[2]) { errorMsg('Usage: flow:schedule <id|name> "<cron expression>"'); process.exit(1); }
       await runScheduleAdd(args[1], args[2]); break;
@@ -5798,9 +6373,22 @@ async function main() {
       if (!args[1]) { errorMsg('Template name required. Run store:list to see options.'); process.exit(1); }
       await runStoreInstall(args[1]); break;
     case 'api:learn':         await runApiLearn(); break;
-    case 'perf:run':
+    case 'perf:run': {
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
-      await runPerfRun(args[1], args.slice(2)); break;
+      const perfExtraArgs = args.slice(2);
+      await runPerfRun(args[1], perfExtraArgs);
+      const perfReportFlag = perfExtraArgs.indexOf('--report');
+      if (perfReportFlag >= 0) {
+        const perfRuns = db.listPerfRuns();
+        const latestPerfRun = perfRuns[0];
+        if (latestPerfRun) {
+          const perfOutIdx = perfExtraArgs.indexOf('--output');
+          const perfOutFile = perfOutIdx >= 0 && perfExtraArgs[perfOutIdx+1] && !perfExtraArgs[perfOutIdx+1].startsWith('--') ? perfExtraArgs[perfOutIdx+1] : `ghostrun-perf-${latestPerfRun.id.slice(0,8)}.html`;
+          await generatePerfReport(latestPerfRun.id, perfOutFile);
+        }
+      }
+      break;
+    }
     case 'perf:export':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
       await runPerfExport(args[1], args.slice(2)); break;
@@ -5808,6 +6396,9 @@ async function main() {
     case 'perf:show':
       if (!args[1]) { errorMsg('Perf run ID required'); process.exit(1); }
       await runPerfShow(args[1]); break;
+    case 'perf:compare':
+      if (!args[1] || !args[2]) { errorMsg('Usage: perf:compare <run-id-A> <run-id-B>'); process.exit(1); }
+      await runPerfCompare(args[1], args[2]); break;
     case 'env:create':
       if (!args[1]) { errorMsg('Environment name required'); process.exit(1); }
       await runEnvCreate(args[1], args.slice(2)); break;
