@@ -1,6 +1,6 @@
 {
   "name": "ghostrun-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Browser automation + API testing + load testing in one tool. Record flows, test REST APIs, run VU-based load tests, export to k6. Entirely local.",
   "main": "ghostrun.js",
   "bin": {
@@ -8,13 +8,21 @@
     "ghostrun-mcp": "mcp-server.js"
   },
   "keywords": [
-    "browser-automation", "api-testing", "load-testing", "playwright",
-    "test-runner", "cli", "k6", "local-first", "mcp", "e2e-testing"
+    "browser-automation",
+    "api-testing",
+    "load-testing",
+    "playwright",
+    "test-runner",
+    "cli",
+    "k6",
+    "local-first",
+    "mcp",
+    "e2e-testing"
   ],
   "homepage": "https://ghostrun.builtbysharan.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/builtbysharan/ghostrun"
+    "url": "https://github.com/TechBuiltBySharan/ghostrun"
   },
   "license": "MIT",
   "scripts": {
