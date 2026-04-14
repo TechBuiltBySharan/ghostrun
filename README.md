@@ -9,6 +9,10 @@
 
 GhostRun is a local-first CLI for browser automation, API testing, and load testing — all in one tool. Record a real browser flow, replay it headlessly, test REST APIs with assertions, and run VU-based load tests. No cloud. No account. Runs entirely on your machine.
 
+```bash
+npm install -g ghostrun-cli
+```
+
 ![GhostRun Demo](https://raw.githubusercontent.com/TechBuiltBySharan/ghostrun/master/demo/out/ghostrun-demo.gif)
 
 ---
