@@ -4679,7 +4679,8 @@ async function runVU(vuId, actionNodes, baseVars, endTime, samples, timeoutMs) {
         };
         await runApiStepDirect(resolvedNode, action, ctx, timeoutMs);
         const isHttp = action === "http:request";
-        samples.push({ label, duration: Date.now() - t, success: true, vuId, isHttp });
+        const httpSuccess = isHttp ? (ctx.lastResponse?.status ?? 0) < 400 : true;
+        samples.push({ label, duration: Date.now() - t, success: httpSuccess, vuId, isHttp });
       } catch {
         const isHttp = action === "http:request";
         samples.push({ label, duration: Date.now() - t, success: false, vuId, isHttp });
@@ -10046,6 +10047,13 @@ async function main() {
     await runInteractive();
     db.close();
     return;
+  }
+  if (cmd === "--version" || cmd === "-v") {
+    const realBin = fs2.realpathSync(process.argv[1]);
+    const pkgPath = path2.join(path2.dirname(realBin), "package.json");
+    const pkg = JSON.parse(fs2.readFileSync(pkgPath, "utf8"));
+    console.log(pkg.version);
+    process.exit(0);
   }
   if (cmd === "help" || cmd === "--help" || cmd === "-h") {
     printLogo();

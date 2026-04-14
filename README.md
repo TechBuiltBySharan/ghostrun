@@ -37,7 +37,7 @@ npm install -g ghostrun-cli
   - [Test Suites](#test-suites)
   - [Web Dashboard](#web-dashboard)
   - [Chat Assistant](#chat-assistant)
-  - [MCP Server](#mcp-server)
+  - [MCP Server](#mcp-server-beta)
 - [Reports](#reports)
 - [Selector Repair](#selector-repair)
 - [Screenshot Diff](#screenshot-diff)
@@ -295,7 +295,9 @@ Examples:
 
 Requires Ollama (local, free) or an Anthropic API key. See [AI Setup](#ai-setup).
 
-### MCP Server
+### MCP Server *(beta)*
+
+> **Beta feature.** The MCP server works and all 7 tools are functional, but it hasn't been through the same level of testing as the core CLI. Use it, but expect rough edges.
 
 Expose GhostRun to AI agents (Claude Desktop, Cursor, etc.):
 
