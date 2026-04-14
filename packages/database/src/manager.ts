@@ -274,14 +274,82 @@ export class DatabaseManager {
   }
 
   // ---- DB migrations ----
+  //
+  // Uses SQLite's built-in PRAGMA user_version as a schema version counter.
+  // Each migration runs exactly once: we read the current version, apply every
+  // migration whose index is >= that version (in order), then write the new version.
+  //
+  // HOW TO ADD A NEW MIGRATION:
+  //   1. Append a new string to the MIGRATIONS array below.
+  //   2. That's it. The runner handles the rest.
+  //
+  // Never edit or reorder existing entries — just append.
+
+  private static readonly MIGRATIONS: string[] = [
+    // v1: add diff_percent to steps
+    'ALTER TABLE steps ADD COLUMN diff_percent REAL',
+    // v2: add created_by to flows
+    "ALTER TABLE flows ADD COLUMN created_by TEXT NOT NULL DEFAULT 'human'",
+    // v3: add verified flag to flows
+    'ALTER TABLE flows ADD COLUMN verified INTEGER NOT NULL DEFAULT 0',
+    // v4: add captured_at to run_data
+    "ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))",
+    // v5: environments table
+    `CREATE TABLE IF NOT EXISTS environments (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, base_url TEXT,
+      variables TEXT NOT NULL DEFAULT '{}', is_active INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    // v6: api_responses table
+    `CREATE TABLE IF NOT EXISTS api_responses (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_number INTEGER NOT NULL,
+      method TEXT NOT NULL, url TEXT NOT NULL, status_code INTEGER,
+      response_time_ms INTEGER, response_headers TEXT, response_body TEXT,
+      error_message TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    // v7: perf_runs table
+    `CREATE TABLE IF NOT EXISTS perf_runs (
+      id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_name TEXT NOT NULL,
+      config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running',
+      total_requests INTEGER, success_requests INTEGER, failed_requests INTEGER,
+      avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER,
+      min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT
+    )`,
+    // --- add new migrations below this line ---
+  ];
+
+  // Number of migrations that existed before we introduced versioning.
+  // Existing databases have these applied already (via old try/catch approach)
+  // but their user_version is 0. We detect this and fast-forward rather than
+  // re-running them (which would throw "duplicate column" errors).
+  private static readonly LEGACY_MIGRATION_COUNT = 7;
+
+  private columnExists(table: string, column: string): boolean {
+    const cols = this.db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+    return cols.some(c => c.name === column);
+  }
+
   private runMigrations() {
-    try { this.db.exec('ALTER TABLE steps ADD COLUMN diff_percent REAL'); } catch {}
-    try { this.db.exec("ALTER TABLE flows ADD COLUMN created_by TEXT NOT NULL DEFAULT 'human'"); } catch {}
-    try { this.db.exec('ALTER TABLE flows ADD COLUMN verified INTEGER NOT NULL DEFAULT 0'); } catch {}
-    try { this.db.exec("ALTER TABLE run_data ADD COLUMN captured_at TEXT DEFAULT (datetime('now'))"); } catch {}
-    try { this.db.exec(`CREATE TABLE IF NOT EXISTS environments (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, base_url TEXT, variables TEXT NOT NULL DEFAULT '{}', is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')))`); } catch {}
-    try { this.db.exec(`CREATE TABLE IF NOT EXISTS api_responses (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_number INTEGER NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL, status_code INTEGER, response_time_ms INTEGER, response_headers TEXT, response_body TEXT, error_message TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`); } catch {}
-    try { this.db.exec(`CREATE TABLE IF NOT EXISTS perf_runs (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, flow_name TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', total_requests INTEGER, success_requests INTEGER, failed_requests INTEGER, avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER, min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT, started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT)`); } catch {}
+    let currentVersion = (this.db.pragma('user_version', { simple: true }) as number) ?? 0;
+
+    // Bootstrap: if user_version is 0 but the DB already has columns from the
+    // old try/catch migration approach, fast-forward to avoid re-running them.
+    if (currentVersion === 0 && this.columnExists('steps', 'diff_percent')) {
+      currentVersion = DatabaseManager.LEGACY_MIGRATION_COUNT;
+      this.db.pragma(`user_version = ${currentVersion}`);
+    }
+
+    if (currentVersion >= DatabaseManager.MIGRATIONS.length) return;
+
+    const applyAll = this.db.transaction(() => {
+      for (let i = currentVersion; i < DatabaseManager.MIGRATIONS.length; i++) {
+        this.db.exec(DatabaseManager.MIGRATIONS[i]);
+      }
+      this.db.pragma(`user_version = ${DatabaseManager.MIGRATIONS.length}`);
+    });
+
+    applyAll();
   }
 
   // ---- Suites ----
