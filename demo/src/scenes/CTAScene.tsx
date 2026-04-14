@@ -9,58 +9,6 @@ import {
   staticFile,
 } from "remotion";
 
-// Animated stars counter
-const StarCounter: React.FC<{ frame: number; fps: number }> = ({ frame, fps }) => {
-  const targetStars = 1247;
-  const countProgress = spring({
-    frame: Math.max(0, frame - 20),
-    fps,
-    config: { damping: 20, stiffness: 40, mass: 1.5 },
-  });
-  const count = Math.round(interpolate(countProgress, [0, 1], [0, targetStars]));
-
-  const opacity = interpolate(frame, [20, 35], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  return (
-    <div
-      style={{
-        opacity,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        backgroundColor: "rgba(210, 153, 34, 0.1)",
-        border: "1px solid rgba(210, 153, 34, 0.3)",
-        borderRadius: 20,
-        padding: "6px 16px",
-      }}
-    >
-      <span style={{ color: "#d29922", fontSize: 16 }}>★</span>
-      <span
-        style={{
-          color: "#d29922",
-          fontFamily: "'JetBrains Mono', Menlo, monospace",
-          fontSize: 14,
-          fontWeight: 600,
-        }}
-      >
-        {count.toLocaleString()}
-      </span>
-      <span
-        style={{
-          color: "#6e7681",
-          fontFamily: "'JetBrains Mono', Menlo, monospace",
-          fontSize: 12,
-        }}
-      >
-        GitHub stars
-      </span>
-    </div>
-  );
-};
-
 // Typewriter for npm command
 const NpmCommand: React.FC<{ frame: number }> = ({ frame }) => {
   const CMD = "npm install -g ghostrun";
@@ -250,9 +198,6 @@ export const CTAScene: React.FC = () => {
 
         {/* npm install command */}
         <NpmCommand frame={frame} />
-
-        {/* Star counter */}
-        <StarCounter frame={frame} fps={fps} />
 
         {/* Main tagline */}
         <div
