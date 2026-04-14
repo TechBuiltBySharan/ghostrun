@@ -41,6 +41,7 @@ GhostRun is a local-first CLI for browser automation, API testing, and load test
 - [AI Setup](#ai-setup)
 - [Data & Privacy](#data--privacy)
 - [Contributing](#contributing)
+- [Tech Stack](#tech-stack)
 - [Trust & Transparency](#trust--transparency)
 - [License](#license)
 
@@ -458,13 +459,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started, and [REFERENCE.md
 
 ---
 
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Language | TypeScript (Node.js 18+) |
+| Browser automation | [Playwright](https://playwright.dev) / Chromium |
+| Database | [SQLite](https://www.sqlite.org) via [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) |
+| Bundler | [esbuild](https://esbuild.github.io) |
+| CLI framework | [Yargs](https://yargs.js.org) |
+| Web dashboard | [Express](https://expressjs.com) |
+| Screenshot diff | [Pixelmatch](https://github.com/mapbox/pixelmatch) |
+| Local AI | [Ollama](https://ollama.com) (optional) |
+| Cloud AI | [Anthropic Claude](https://www.anthropic.com) (optional fallback) |
+| MCP server | [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk) |
+
+---
+
 ## Trust & Transparency
 
 - **100% local by default** — no cloud, no telemetry, no tracking
 - **Open source (MIT)** — full source at [github.com/TechBuiltBySharan/ghostrun](https://github.com/TechBuiltBySharan/ghostrun)
 - **No surprise costs** — AI works offline via [Ollama](https://ollama.com) (free); Anthropic key is optional
 - **No vendor lock-in** — flows are plain JSON files you own; export, import, version-control them like code
-- Built with the help of [Claude](https://claude.ai) and [Goose](https://goose-docs.ai)
 
 ---
 
