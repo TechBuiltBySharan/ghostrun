@@ -9,6 +9,8 @@
 
 GhostRun is a local-first CLI for browser automation, API testing, and load testing — all in one tool. Record a real browser flow, replay it headlessly, test REST APIs with assertions, and run VU-based load tests. No cloud. No account. Runs entirely on your machine.
 
+![GhostRun Demo](https://raw.githubusercontent.com/TechBuiltBySharan/ghostrun/master/demo/out/ghostrun-demo.gif)
+
 ---
 
 ## Table of Contents
@@ -209,7 +211,6 @@ ghostrun run <id|name> --session-load <name>   # restore browser cookies/storage
 
 ```bash
 ghostrun flow:list                         # list all flows
-ghostrun flow:show <id|name>               # show steps for a flow
 ghostrun flow:rename <id|name> <new-name>  # rename a flow
 ghostrun flow:clone <id|name>              # duplicate a flow
 ghostrun flow:delete <id|name>             # delete a flow
@@ -225,12 +226,11 @@ ghostrun flow:from-spec <file>             # create flows from an OpenAPI spec
 Named variable sets injected at run time. Perfect for dev / staging / prod.
 
 ```bash
-ghostrun env:create <name> [base-url]  # create an environment
-ghostrun env:set <name> <key=value>    # add or update a variable
+ghostrun env:create <name>             # create an environment (dev/staging/prod)
+ghostrun env:set <name> <key> <value>  # add or update a variable
 ghostrun env:list                      # list all environments
 ghostrun env:show <name>               # show variables in an environment
 ghostrun env:use <name>                # set as the active environment
-ghostrun env:delete <name>             # delete an environment
 ```
 
 Reference variables in any URL, header, or body field with `{{variableName}}`. The active environment's variables are injected automatically before each run.
