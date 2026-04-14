@@ -1,0 +1,142 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-14T00:00:00.000Z",
+  "flow": {
+    "name": "Hacker News - Extract Top Stories",
+    "description": "Extract top 3 story titles/scores/submitters from HN, then navigate to #1 article and extract its headline and first paragraph",
+    "appUrl": "https://news.ycombinator.com",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "navigate",
+          "url": "https://news.ycombinator.com",
+          "label": "Navigate to Hacker News"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "wait:ms",
+          "value": "1500",
+          "label": "Wait for page load"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "screenshot",
+          "label": "Screenshot of HN front page"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(1) .titleline > a",
+          "variable": "story1Title",
+          "label": "Extract #1 story title"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(1) .sitestr",
+          "variable": "story1Domain",
+          "label": "Extract #1 story domain"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(1) + tr .score",
+          "variable": "story1Score",
+          "label": "Extract #1 story score"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(1) + tr .hnuser",
+          "variable": "story1Submitter",
+          "label": "Extract #1 story submitter"
+        },
+        {
+          "id": "n8",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(1) + tr .age a",
+          "variable": "story1Age",
+          "label": "Extract #1 story age"
+        },
+        {
+          "id": "n9",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(4) .titleline > a",
+          "variable": "story2Title",
+          "label": "Extract #2 story title"
+        },
+        {
+          "id": "n10",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(4) + tr .score",
+          "variable": "story2Score",
+          "label": "Extract #2 story score"
+        },
+        {
+          "id": "n11",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(7) .titleline > a",
+          "variable": "story3Title",
+          "label": "Extract #3 story title"
+        },
+        {
+          "id": "n12",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing:nth-child(7) + tr .score",
+          "variable": "story3Score",
+          "label": "Extract #3 story score"
+        },
+        {
+          "id": "n13",
+          "type": "action",
+          "action": "click",
+          "selector": "tr.athing:nth-child(1) .titleline > a",
+          "label": "Click #1 story link"
+        },
+        {
+          "id": "n14",
+          "type": "action",
+          "action": "wait:ms",
+          "value": "3000",
+          "label": "Wait for linked article to load"
+        },
+        {
+          "id": "n15",
+          "type": "action",
+          "action": "screenshot",
+          "label": "Screenshot of linked article"
+        },
+        {
+          "id": "n16",
+          "type": "action",
+          "action": "extract",
+          "selector": "h1",
+          "variable": "articleHeadline",
+          "label": "Extract article headline"
+        },
+        {
+          "id": "n17",
+          "type": "action",
+          "action": "extract",
+          "selector": "article p:first-of-type, main p:first-of-type, p:first-of-type",
+          "variable": "articleFirstParagraph",
+          "label": "Extract first paragraph"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

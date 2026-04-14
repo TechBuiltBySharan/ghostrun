@@ -67,7 +67,7 @@ Complete reference for all actions you can use in recorded or hand-crafted `.flo
 
 | Action | Fields | Description |
 |--------|--------|-------------|
-| `extract` | `selector`, `value: "variableName"` | Extract element text → variable |
+| `extract` | `selector`, `variable: "variableName"` | Extract element text → variable |
 | `screenshot` | — | Capture screenshot at this step |
 
 ### Browser State
