@@ -1,6 +1,6 @@
 {
   "name": "ghostrun-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Browser automation + API testing + load testing in one tool. Record flows, test REST APIs, run VU-based load tests, export to k6. Entirely local.",
   "main": "ghostrun.js",
   "bin": {
