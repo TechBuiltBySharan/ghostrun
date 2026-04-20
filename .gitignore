@@ -42,3 +42,4 @@ tsconfig.json
 # Benchmark results
 benchmarks/
 *.bench.*
+.tmp/*

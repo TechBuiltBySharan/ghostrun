@@ -45,7 +45,11 @@
     "lint": "eslint . --ext .ts,.js,.mjs 2>/dev/null || echo 'ESLint not configured'",
     "lint:fix": "eslint . --fix 2>/dev/null || echo 'ESLint fix skipped'",
     "format": "prettier --write .",
-    "typecheck": "tsc --noEmit --skipLibCheck 2>/dev/null || echo 'TypeScript check'"
+    "typecheck": "tsc --noEmit --skipLibCheck 2>/dev/null || echo 'TypeScript check'",
+    "test:visual": "node scripts/run-visual-tests.mjs",
+    "test:visual:update": "rm -rf tests/visual/baselines && node scripts/run-visual-tests.mjs",
+    "test:edge": "node scripts/run-edge-tests.mjs",
+    "test:explore": "node scripts/run-explore-tests.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
