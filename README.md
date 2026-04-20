@@ -2,7 +2,7 @@
 
 **Record once. Replay as a ghost.**
 
-GhostRun is a local-first CLI for browser automation, API testing, and load testing. Record browser flows, test REST APIs with assertions, and run load tests. No cloud. No account. Runs entirely on your machine.
+A local-first CLI for browser automation, API testing, and load testing. No cloud. No account. Runs entirely on your machine.
 
 [![npm version](https://img.shields.io/npm/v/ghostrun-cli)](https://www.npmjs.com/package/ghostrun-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -13,59 +13,131 @@ GhostRun is a local-first CLI for browser automation, API testing, and load test
 
 ```bash
 npm install -g ghostrun-cli
+ghostrun init
 ```
 
 ## Quick Start
 
 ```bash
-# Record a new flow
+# Record a browser flow
 ghostrun record
 
-# Run a flow
+# Run a saved flow
 ghostrun run <flow-id>
 
-# Explore a website
+# Explore a website and generate flows
 ghostrun explore <url>
 
-# Run tests
-npm test
+# Test an API
+ghostrun api get https://jsonplaceholder.typicode.com/posts/1
+
+# Run load test
+ghostrun load --vus 10 --duration 30s <flow-id>
+
+# Start web dashboard
+ghostrun serve --ui
+
+# AI-powered chat
+ghostrun chat
 ```
 
 ## Features
 
-- **Browser Automation** - Record and replay browser flows with Playwright
-- **API Testing** - Test REST APIs with assertions and variables
-- **Load Testing** - Run VU-based load tests locally
-- **Web Dashboard** - Visual UI at `ghostrun serve --ui`
-- **AI Integration** - Claude-powered selector healing
+| Feature | Description |
+|---------|-------------|
+| **Browser Automation** | Record/replay with Playwright, smart waits, selector healing |
+| **API Testing** | REST testing with assertions, variables, chaining |
+| **Load Testing** | Local VU-based load tests, exportable to k6 |
+| **AI Integration** | Claude-powered selector healing and chat |
+| **Web Dashboard** | Visual UI for flows and runs |
+| **Privacy** | Local-only, PII sanitization |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `record` | Record a new flow |
-| `run <id>` | Run a flow |
-| `explore <url>` | Explore a website |
-| `serve --ui` | Start web dashboard |
-| `flow:list` | List all flows |
-| `flow:import <file>` | Import a flow |
-| `chat` | Start AI chat |
-| `perf` | View performance reports |
+| `ghostrun record` | Record a new flow |
+| `ghostrun run <id>` | Run a flow |
+| `ghostrun explore <url>` | Explore and generate flows |
+| `ghostrun api <method> <url>` | Test APIs |
+| `ghostrun load <flow-id>` | Run load test |
+| `ghostrun serve --ui` | Start web dashboard |
+| `ghostrun chat` | AI chat assistant |
+| `ghostrun flow:list` | List all flows |
+| `ghostrun flow:import <file>` | Import a flow |
+| `ghostrun perf` | View performance reports |
+| `ghostrun init` | Setup and install browsers |
 
 ## Testing
 
 ```bash
+# Install dependencies
 npm install
-npm test           # Unit + E2E tests
-npm run test:all   # All tests including comprehensive
-npm run test:flows # Flow execution tests
+
+# Build
+npm run build
+
+# Run tests (100% pass rate)
+npm test           # Unit tests (58)
+npm run test:flows # Comprehensive (29)
+npm run test:all   # All tests
 ```
 
-## Documentation
+## Examples
 
-- [API Documentation](docs/API.md)
-- [Examples](docs/EXAMPLES.md)
-- [Test Results](tests/RESULTS.md)
+### Browser Flow
+```json
+{
+  "name": "Wikipedia Search",
+  "graph": {
+    "nodes": [
+      { "id": "n1", "type": "action", "action": "navigate", "url": "https://wikipedia.org" },
+      { "id": "n2", "type": "action", "action": "fill", "selector": "input[name=search]", "value": "Playwright" },
+      { "id": "n3", "type": "action", "action": "press", "selector": "input[name=search]", "value": "Enter" }
+    ],
+    "edges": [
+      { "source": "n1", "target": "n2" },
+      { "source": "n2", "target": "n3" }
+    ]
+  }
+}
+```
+
+### API Test
+```json
+{
+  "name": "Health Check",
+  "api": {
+    "method": "GET",
+    "url": "https://api.example.com/health",
+    "assert": [
+      { "type": "status", "value": 200 },
+      { "type": "jsonpath", "value": "$.status", "expected": "ok" }
+    ]
+  }
+}
+```
+
+## Architecture
+
+```
+ghostrun/
+├── ghostrun.ts       # Main CLI (6000+ lines)
+├── packages/
+│   ├── executor/     # Flow execution engine
+│   ├── adapters-web/ # Playwright adapter
+│   ├── database/    # SQLite manager
+│   ├── privacy/     # PII sanitization
+│   └── ...
+└── tests/           # Test suites
+```
+
+## Privacy
+
+All data stays local:
+- No cloud dependency
+- PII automatically sanitized
+- Database stored at `~/.ghostrun/`
 
 ## License
 

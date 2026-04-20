@@ -1,61 +1,24 @@
 {
-  "version": "1.0.0",
-  "exportedAt": "2025-01-15T00:00:00.000Z",
   "flow": {
     "name": "Wikipedia Smoke Test",
-    "description": "Basic smoke test for Wikipedia - verify page loads, search works, navigation works",
-    "appUrl": "https://en.wikipedia.org",
+    "description": "Tests Wikipedia homepage loading, search, and navigation",
     "graph": {
       "nodes": [
-        {
-          "id": "n1",
-          "type": "action",
-          "action": "navigate",
-          "value": "https://en.wikipedia.org",
-          "label": "Navigate to Wikipedia homepage"
-        },
-        {
-          "id": "n2",
-          "type": "action",
-          "action": "assert:title",
-          "value": "Wikipedia",
-          "label": "Assert page title contains Wikipedia"
-        },
-        {
-          "id": "n3",
-          "type": "action",
-          "action": "assert:element",
-          "selector": "#searchform",
-          "label": "Assert search form exists"
-        },
-        {
-          "id": "n4",
-          "type": "action",
-          "action": "assert:element",
-          "selector": "a[href='/wiki/Main_Page']",
-          "label": "Assert main page link exists"
-        },
-        {
-          "id": "n5",
-          "type": "action",
-          "action": "click",
-          "selector": "a[href='/wiki/Main_Page']",
-          "label": "Click Main Page link"
-        },
-        {
-          "id": "n6",
-          "type": "action",
-          "action": "assert:url",
-          "value": "/wiki/Main_Page",
-          "label": "Assert URL contains Main_Page"
-        }
+        { "id": "n1", "type": "action", "action": "navigate", "url": "https://en.wikipedia.org", "label": "Navigate to Wikipedia" },
+        { "id": "n2", "type": "assert", "action": "assert", "properties": { "type": "title", "value": "Wikipedia" }, "label": "Assert page title" },
+        { "id": "n3", "type": "assert", "action": "assert", "properties": { "type": "selector", "value": "#searchform" }, "label": "Assert search form" },
+        { "id": "n4", "type": "assert", "action": "assert", "properties": { "type": "selector", "value": "body" }, "label": "Assert body visible" },
+        { "id": "n5", "type": "action", "action": "fill", "selector": "input[name=search]", "value": "Playwright", "label": "Search for Playwright" },
+        { "id": "n6", "type": "action", "action": "press", "selector": "input[name=search]", "value": "Enter", "label": "Submit search" },
+        { "id": "n7", "type": "assert", "action": "assert", "properties": { "type": "url", "value": "wiki/Playwright_(software)" }, "label": "Assert search results" }
       ],
       "edges": [
         { "source": "n1", "target": "n2" },
         { "source": "n2", "target": "n3" },
         { "source": "n3", "target": "n4" },
         { "source": "n4", "target": "n5" },
-        { "source": "n5", "target": "n6" }
+        { "source": "n5", "target": "n6" },
+        { "source": "n6", "target": "n7" }
       ]
     }
   }
