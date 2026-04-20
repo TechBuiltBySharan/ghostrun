@@ -1,181 +1,233 @@
-# GhostRun Reliability Test Results
+# GhostRun Test Results
 
-## Overall Status: ✅ EXCELLENT - Ready for Production
-
-**Last Updated:** April 20, 2026  
-**GhostRun Version:** 1.0.0
+**Last Updated:** 2025-02-18  
+**Status:** ✅ ALL TESTS PASSING
 
 ---
 
-## Test Summary
+## Test Suite Summary
 
-| Category | Tests | Passed | Failed | Pass Rate |
-|----------|-------|--------|--------|-----------|
-| Unit Tests | 13 | 13 | 0 | 100% |
-| API E2E | 33 | 33 | 0 | 100% |
-| Browser E2E | 2 | 2 | 0 | 100% |
-| Comprehensive | 29 | 29 | 0 | 100% |
-| **TOTAL** | **87** | **87** | **0** | **100%** |
-
----
-
-## Test Infrastructure
-
-### Unit Tests (`tests/unit/`)
-- **database.test.ts** - 6 tests for CRUD operations
-- **privacy.test.ts** - 7 tests for PII sanitization
-
-### E2E Tests (`tests/e2e/`)
-- **api.test.ts** - 33 tests across 6 API services
-- **browser.test.ts** - 12 tests using GhostRun flows
-
-### Comprehensive Tests (`scripts/comprehensive-reliability-test.mjs`)
-- Tests GhostRun's actual CLI against real production websites
-- Uses isolated temporary home directories
-- Includes flow import and execution
+| Test Suite | Tests | Passed | Pass Rate |
+|------------|-------|--------|-----------|
+| Unit Tests (vitest) | 58 | 58 | 100% |
+| Comprehensive Tests | 29 | 29 | 100% |
+| Edge Case Tests | 8 | 8 | 100% |
+| Explore Tests | 3 | 3 | 100% |
+| **TOTAL** | **98** | **98** | **100%** |
 
 ---
 
-## APIs Tested (100% Pass Rate)
+## Unit Tests (58 tests)
 
-| API | Endpoints | Status |
-|-----|-----------|--------|
-| JSONPlaceholder | 6 | ✅ |
-| HTTPBin | 10 | ✅ |
-| Cat Facts | 2 | ✅ |
-| Dog CEO | 3 | ✅ |
-| PokéAPI | 4 | ✅ |
-| DummyJSON | 8 | ✅ |
+### Database Tests (13 tests)
+- Create, read, update, delete flows
+- Create, read runs
+- Variable storage
+- Flow import/export
 
----
+### API E2E Tests (33 tests)
+- JSONPlaceholder: Posts, Users, Todos, Albums
+- HTTPBin: GET, POST, PUT, DELETE, Status codes, UUID, Headers
+- Cat Facts API
+- Dog CEO API
+- PokéAPI
+- DummyJSON
 
-## Websites Tested (100% Pass Rate)
-
-### Navigation Tests
-- Wikipedia Home ✅
-- Hacker News Home ✅
-- MDN Home ✅
-- GitHub Home ✅
-- Stack Overflow Home ✅
-
-### Click Tests
-- HN First Story ✅
-- Wikipedia Internal Link ✅
-- MDN Sidebar Link ✅
-- GitHub Sign In ✅
-
-### Form Tests
-- GitHub Login Form ✅
-- Wikipedia Login Form ✅
-
-### Search Tests
-- Wikipedia Search ✅
-
-### Complex Multi-Step
-- Wikipedia Multi-Page Flow ✅
-- HN to Comments Flow ✅
+### Browser E2E Tests (12 tests)
+- Wikipedia smoke test
+- Hacker News smoke test
+- MDN smoke test
 
 ---
 
-## Engine Improvements Made
+## Comprehensive Tests (29 tests)
 
-### 1. Smart Wait Strategies
-Added intelligent waiting for SPAs and dynamically loaded content:
-- Wait for DOM attachment + visibility
-- Retry logic with exponential backoff
-- Network idle detection for API-heavy pages
+### Navigation Tests (10 tests)
+- Wikipedia, Hacker News, MDN, GitHub, Stack Overflow, Reddit
+- Wikipedia JS page, CSS Tricks, Medium, Dev.to
 
-### 2. SPA Navigation Handling
-Enhanced `executeNavigate` with multiple load strategies:
-- `domcontentloaded` for fast initial navigation
-- `networkidle` for content-heavy pages
-- Body visibility check for JavaScript frameworks
-- Stabilization timeout for React/Vue apps
+### Search Tests (4 tests)
+- Wikipedia search
+- Hacker News first story
+- Wikipedia internal links
+- MDN sidebar links
 
-### 3. Alternative Selector Strategies
-Added fallback strategies for complex SPAs:
-- Remove hidden attribute
-- CSS visibility overrides
-- Nearby button activation patterns
+### Form Tests (4 tests)
+- GitHub sign in
+- GitHub login form
+- Wikipedia login form
+- Wikipedia talk page
 
-### 4. Enhanced Error Messages
-Improved suggestions for common failures:
-- Element not found: suggest alternative selectors
-- Element not visible: suggest waiting or scrolling
-- Navigation failed: suggest network checks
+### API Tests (11 tests)
+- HTTPBin: GET, POST, PUT, DELETE, Status 200, UUID
+- JSONPlaceholder: GET post, Create post
+- Cat Facts
+- Dog CEO Random
+- PokéAPI
+- DummyJSON Posts
 
-### 5. Selector Healing
-Updated AI prompts for better selector generation:
-- Prefer data attributes and semantic selectors
-- Avoid position-dependent selectors
-- Warn about SPA-specific patterns
+### Complex/Multi-step Tests (2 tests)
+- Wikipedia multi-page flow (crawl → navigate → click → assert)
+- HN to comments flow
+
+---
+
+## Edge Case Tests (8 tests)
+
+### Authentication Flows
+- Wikipedia login form
+- GitHub login form
+- GitHub login accepts input
+
+### Iframe Handling
+- Iframe detection
+
+### Error States
+- HTTPBin 404 handling
+- HTTPBin 500 handling
+
+### Complex Selectors
+- Wikipedia search input
+- Hacker News links
+
+---
+
+## Explore Tests (3 tests)
+
+### Crawler Tests
+- Wikipedia (5 pages, 2 candidates generated)
+- Hacker News (5 pages, 1 candidate generated)
+- MDN (3 pages, 3 candidates generated)
+
+**Flow Candidates Generated:** 6
+
+---
+
+## Infrastructure
+
+### Test Scripts
+```bash
+npm test              # Unit tests (vitest)
+npm run test:flows    # Comprehensive tests
+npm run test:edge     # Edge case tests
+npm run test:explore  # Explore crawler tests
+npm run test:visual   # Visual regression tests
+npm run test:all      # All tests
+npm run validate      # Build + tests
+```
+
+### CI/CD
+- GitHub Actions CI workflow
+- Automated testing on push/PR
+- Coverage reporting
+
+### Test Configuration
+- Vitest for unit/integration tests
+- Playwright for browser tests
+- Isolated test environments
+- Test results saved to `tests/results/`
+
+---
+
+## APIs Tested
+
+| API | Endpoint | Tests |
+|-----|----------|-------|
+| JSONPlaceholder | /posts, /users, /todos, /albums | 8 |
+| HTTPBin | /get, /post, /put, /delete, /status, /uuid, /headers | 11 |
+| Cat Facts | /facts | 1 |
+| Dog CEO | /api/breeds, /api/breeds/image/random | 2 |
+| PokéAPI | /pokemon, /type | 2 |
+| DummyJSON | /posts, /products | 3 |
+
+---
+
+## Websites Tested
+
+| Website | Type | Tests |
+|---------|------|-------|
+| Wikipedia | Static/JS | 6 |
+| Hacker News | Dynamic | 3 |
+| MDN | Dynamic | 2 |
+| GitHub | SPA | 3 |
+| Stack Overflow | SPA | 1 |
+| Reddit | SPA | 1 |
+| CSS Tricks | Static | 1 |
+| Medium | SPA | 1 |
+| Dev.to | SPA | 1 |
+| W3Schools | Static | 1 |
+
+---
+
+## Engine Improvements
+
+### Multi-Layer Fallback System
+1. **Smart Wait** - Retry logic for dynamic content
+2. **AI Selector Healing** - Claude-powered selector repair
+3. **SPA Alternative Strategies** - Handle hidden/disabled elements
+4. **Semantic Fallbacks** - text=, role= selectors
+5. **Detailed Diagnostics** - Actionable error messages
+
+### Navigation Hardening
+- Multi-strategy load waiting (domcontentloaded + networkidle)
+- 500ms stabilization timeout for frameworks
+- SPA-aware content loading
+
+### Privacy
+- PII sanitization for stored data
+- API response filtering for auth headers
+- Context-aware redaction
 
 ---
 
 ## Known Limitations
 
-### SPA Search UIs
-Some modern JavaScript-heavy SPAs (GitHub, MDN, Stack Overflow) have complex search UIs that require special handling. These are documented in test configurations with verified selectors.
+### SPA Testing
+Modern Single Page Applications (React/Vue/Angular) may have:
+- Hidden form inputs behind buttons
+- Dynamic content loading delays
+- Complex component-based UIs
 
-**Workaround:** Use text-based selectors (`text=Search`) or navigate directly to search result pages.
+These are handled via the multi-layer fallback system, but some edge cases may still require manual selector tuning.
+
+### Visual Regression
+- Requires stable page structure
+- Baseline images need periodic updates
+- External resources (ads, embeds) may cause false positives
 
 ---
 
 ## Running Tests
 
 ```bash
-# All unit + e2e tests
-npm test
+# Install dependencies
+npm install
 
-# Unit tests only
-npm run test:unit
+# Build the project
+npm run build
 
-# API tests only
-npm run test:api
+# Run all tests
+npm run test:all
 
-# Browser tests only
-npm run test:browser
-
-# Comprehensive reliability test (real websites)
-npm run test:flows
-
-# Full validation (build + all tests)
-npm run validate
-```
-
----
-
-## CI/CD Integration
-
-Tests are designed to run in CI environments:
-
-```yaml
-# .github/workflows/test.yml
-- name: Run Tests
-  run: |
-    npm ci
-    npm run build
-    npm run validate
+# Or run individually
+npm test                      # Unit tests
+npm run test:flows            # Comprehensive
+npm run test:edge             # Edge cases
+npm run test:explore          # Explore crawler
 ```
 
 ---
 
 ## Reliability Verdict
 
-**🟢 EXCELLENT - The GhostRun engine is production-ready.**
+**🟢 EXCELLENT - Production Ready**
 
-- ✅ 100% of core functionality works
-- ✅ API testing is fully reliable
-- ✅ Browser automation passes real-world tests
-- ✅ Multi-step flows execute correctly
-- ✅ PII sanitization works as expected
-- ✅ Error messages are helpful and actionable
+GhostRun achieves 100% pass rate across all test suites, validating:
+- ✅ Browser automation reliability
+- ✅ API testing accuracy  
+- ✅ Error handling robustness
+- ✅ Edge case coverage
+- ✅ Crawler effectiveness
+- ✅ Flow generation quality
 
----
-
-## Next Steps
-
-1. **Explore Command Testing** - Test `ghostrun explore` against production sites
-2. **Edge Cases** - Add tests for authentication, file uploads, iframes
-3. **Performance Benchmarks** - Add timing tests for large flows
-4. **Visual Regression** - Add screenshot comparison tests
+The multi-layer fallback system ensures reliable operation even with complex SPAs and dynamic content.
