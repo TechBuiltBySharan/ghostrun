@@ -1317,7 +1317,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   } catch { /* optional */ }
 
   for (const node of actionNodes) {
-    const label = node.label as string, action = node.action as string;
+    const label = (node.label as string) || node.action as string || "Step " + stepNum, action = node.action as string;
     const barStr = progressBar(stepNum, actionNodes.length);
     log(chalk.cyan(`\n  [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + chalk.white(label));
     opts?.onStep?.(stepNum - 1, action, node.selector as string | undefined);
