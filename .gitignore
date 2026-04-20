@@ -43,3 +43,4 @@ tsconfig.json
 benchmarks/
 *.bench.*
 .tmp/*
+docs/INTERNAL.md
