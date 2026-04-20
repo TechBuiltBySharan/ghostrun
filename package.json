@@ -41,7 +41,6 @@
     "test:all": "pnpm run test && pnpm run test:flows",
     "validate": "pnpm run build && pnpm run test",
     "rebuild:native": "pnpm rebuild better-sqlite3 esbuild keytar",
-    "demo": "./TEST-DEMO.sh",
     "lint": "eslint . --ext .ts,.js,.mjs 2>/dev/null || echo 'ESLint not configured'",
     "lint:fix": "eslint . --fix 2>/dev/null || echo 'ESLint fix skipped'",
     "format": "prettier --write .",
