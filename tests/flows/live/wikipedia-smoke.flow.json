@@ -1,0 +1,62 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2025-01-15T00:00:00.000Z",
+  "flow": {
+    "name": "Wikipedia Smoke Test",
+    "description": "Basic smoke test for Wikipedia - verify page loads, search works, navigation works",
+    "appUrl": "https://en.wikipedia.org",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "navigate",
+          "value": "https://en.wikipedia.org",
+          "label": "Navigate to Wikipedia homepage"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:title",
+          "value": "Wikipedia",
+          "label": "Assert page title contains Wikipedia"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "#searchform",
+          "label": "Assert search form exists"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "a[href='/wiki/Main_Page']",
+          "label": "Assert main page link exists"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "click",
+          "selector": "a[href='/wiki/Main_Page']",
+          "label": "Click Main Page link"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "assert:url",
+          "value": "/wiki/Main_Page",
+          "label": "Assert URL contains Main_Page"
+        }
+      ],
+      "edges": [
+        { "source": "n1", "target": "n2" },
+        { "source": "n2", "target": "n3" },
+        { "source": "n3", "target": "n4" },
+        { "source": "n4", "target": "n5" },
+        { "source": "n5", "target": "n6" }
+      ]
+    }
+  }
+}

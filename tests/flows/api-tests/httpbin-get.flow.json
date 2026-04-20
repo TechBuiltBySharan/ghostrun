@@ -1,0 +1,38 @@
+{
+  "name": "HTTPBin GET Test",
+  "description": "Test HTTP GET request to httpbin.org",
+  "version": "1.0",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "action",
+      "action": "api:request",
+      "name": "GET /get",
+      "method": "GET",
+      "url": "https://httpbin.org/get",
+      "headers": {
+        "User-Agent": "GhostRun/1.0",
+        "Accept": "application/json"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "action",
+      "action": "api:assert",
+      "name": "Assert 200",
+      "status": 200,
+      "operator": "equals"
+    },
+    {
+      "id": "n3",
+      "type": "action",
+      "action": "api:extract",
+      "name": "Extract origin",
+      "path": "$.origin"
+    }
+  ],
+  "edges": [
+    { "from": "n1", "to": "n2" },
+    { "from": "n2", "to": "n3" }
+  ]
+}

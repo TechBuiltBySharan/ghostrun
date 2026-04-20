@@ -2,7 +2,7 @@
  * Screen Matcher - Match current screen to graph nodes during execution
  */
 
-import type { FlowNode, Selector } from '@flowmind/core';
+import type { FlowNode, Selector } from '@ghostrun/core';
 
 export interface MatchContext {
   url: string;

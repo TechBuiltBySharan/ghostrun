@@ -24,7 +24,7 @@ export interface VaultConfig {
 }
 
 const DEFAULT_CONFIG: Required<VaultConfig> = {
-  serviceName: 'flowmind',
+  serviceName: 'ghostrun',
   useKeychain: true,
   fallbackToFile: true,
   encryptionKey: '', // Will use machine-derived key if not provided
@@ -82,7 +82,8 @@ export class Vault {
     // Store in keychain if available
     if (this.keychain && credential.password) {
       await this.keychain.setPassword(
-        `${this.config.serviceName}:${newCredential.id}`,
+        this.config.serviceName,
+        newCredential.id,
         credential.password
       );
     }
@@ -110,7 +111,8 @@ export class Vault {
     if (this.keychain) {
       try {
         const password = await this.keychain.getPassword(
-          `${this.config.serviceName}:${id}`
+          this.config.serviceName,
+          id
         );
         return { ...credential, password: password || undefined };
       } catch {
@@ -165,7 +167,8 @@ export class Vault {
     // Update password in keychain
     if (this.keychain && updates.password) {
       await this.keychain.setPassword(
-        `${this.config.serviceName}:${id}`,
+        this.config.serviceName,
+        id,
         updates.password
       );
       updated.password = undefined; // Don't store in memory
@@ -186,7 +189,7 @@ export class Vault {
     // Delete from keychain
     if (this.keychain) {
       try {
-        await this.keychain.deletePassword(`${this.config.serviceName}:${id}`);
+        await this.keychain.deletePassword(this.config.serviceName, id);
       } catch {
         // Ignore if not found
       }
@@ -252,7 +255,7 @@ export class Vault {
     const fs = await import('fs');
     const path = await import('path');
 
-    const configDir = path.join(process.env.HOME || '.', '.flowmind', 'vault');
+    const configDir = path.join(process.env.HOME || '.', '.ghostrun', 'vault');
     const metaPath = path.join(configDir, 'credentials.meta.json');
 
     if (fs.existsSync(metaPath)) {
@@ -280,7 +283,7 @@ export class Vault {
     const fs = await import('fs');
     const path = await import('path');
 
-    const configDir = path.join(process.env.HOME || '.', '.flowmind', 'vault');
+    const configDir = path.join(process.env.HOME || '.', '.ghostrun', 'vault');
     
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });

@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "HTTPBin Live API",
+    "description": "Verifies query-string handling and JSON-path assertions against HTTPBin.",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "https://httpbin.org/get?source=ghostrun",
+          "label": "GET /get?source=ghostrun"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert status 200"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.args.source",
+          "expected": "ghostrun",
+          "label": "Assert source arg"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:exists",
+          "path": "$.origin",
+          "label": "Assert origin exists"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

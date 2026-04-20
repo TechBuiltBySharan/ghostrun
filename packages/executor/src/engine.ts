@@ -2,12 +2,12 @@
  * Execution Engine - Replay flows using Playwright
  */
 
-import { type Flow, type FlowNode, type FlowEdge, findOutgoingEdges } from '@flowmind/core';
-import { type GraphState, findNode, findBestMatch, type MatchContext } from '@flowmind/memory';
-import { sanitize, sanitizeNetworkLog, sanitizeConsoleLog } from '@flowmind/privacy';
+import { type Flow, type FlowNode, type FlowEdge, findOutgoingEdges } from '@ghostrun/core';
+import { type GraphState, findNode, findBestMatch, type MatchContext } from '@ghostrun/memory';
+import { sanitize, sanitizeNetworkLog, sanitizeConsoleLog } from '@ghostrun/privacy';
 import { executeAction, type ActionResult } from './actions';
 import { validateTransition, type ValidationResult } from './validation';
-import type { StepResult, ConsoleLog, NetworkLog, StepError, StepStatus } from '@flowmind/core';
+import type { StepResult, ConsoleLog, NetworkLog, StepError, StepStatus } from '@ghostrun/core';
 import type { Page, Browser, BrowserContext } from 'playwright';
 
 export interface ExecutionConfig {

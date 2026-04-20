@@ -2,7 +2,7 @@
  * Action Condenser - Convert raw events into meaningful steps
  */
 
-import type { RecordedAction, ActionType } from '@flowmind/core';
+import type { RecordedAction, ActionType } from '@ghostrun/core';
 
 export interface CondensedStep {
   id: string;

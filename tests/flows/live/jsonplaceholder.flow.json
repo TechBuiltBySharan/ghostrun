@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "JSONPlaceholder Live API",
+    "description": "Verifies the API-only runner against JSONPlaceholder.",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "https://jsonplaceholder.typicode.com/posts/1",
+          "label": "GET /posts/1"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert status 200"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.id",
+          "expected": "1",
+          "label": "Assert $.id = 1"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:exists",
+          "path": "$.title",
+          "label": "Assert $.title exists"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

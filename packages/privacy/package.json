@@ -1,5 +1,5 @@
 {
-  "name": "@flowmind/privacy",
+  "name": "@ghostrun/privacy",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@flowmind/core": "workspace:*"
+    "@ghostrun/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

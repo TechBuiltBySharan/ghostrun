@@ -2,7 +2,7 @@
  * Report Formatter - Format test results for various outputs
  */
 
-import type { FlowRun, StepResult, StepFailureReport, ConsoleLog, NetworkLog } from '@flowmind/core';
+import type { FlowRun, StepResult, StepFailureReport, ConsoleLog, NetworkLog } from '@ghostrun/core';
 
 /**
  * Format duration in human-readable form

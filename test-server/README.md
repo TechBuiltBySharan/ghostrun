@@ -1,4 +1,4 @@
-# FlowMind Test Server
+# GhostRun Test Server
 
 Run: node test-server/server.js
 Starts on http://localhost:3456

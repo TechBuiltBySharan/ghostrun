@@ -1,5 +1,5 @@
 /**
- * Flowmind Runtime - Local API server and runtime engine
+ * GhostRun Runtime - Local API server and runtime engine
  */
 
 import Fastify from 'fastify';
@@ -7,10 +7,10 @@ import cors from '@fastify/cors';
 import { flowRoutes } from './routes/flows';
 import { runRoutes } from './routes/runs';
 import { configRoutes } from './routes/config';
-import { createGraphStorage } from '@flowmind/memory';
-import { createReportStorage } from '@flowmind/reporting';
-import { PlaywrightAdapter } from '@flowmind/adapters-web';
-import { executeFlow, type ExecutionConfig } from '@flowmind/executor';
+import { createGraphStorage } from '@ghostrun/memory';
+import { createReportStorage } from '@ghostrun/reporting';
+import { PlaywrightAdapter } from '@ghostrun/adapters-web';
+import { executeFlow, type ExecutionConfig } from '@ghostrun/executor';
 
 export interface RuntimeConfig {
   port: number;
@@ -21,10 +21,10 @@ export interface RuntimeConfig {
 const DEFAULT_CONFIG: RuntimeConfig = {
   port: 3030,
   host: 'localhost',
-  storagePath: './.flowmind',
+  storagePath: './.ghostrun',
 };
 
-export class FlowmindRuntime {
+export class GhostRunRuntime {
   private config: RuntimeConfig;
   private app: ReturnType<typeof Fastify>;
   private storage: ReturnType<typeof createGraphStorage>;
@@ -76,7 +76,7 @@ export class FlowmindRuntime {
     try {
       await this.app.listen({ port: this.config.port, host: this.config.host });
       this.isRunning = true;
-      console.log(`Flowmind Runtime running at http://${this.config.host}:${this.config.port}`);
+      console.log(`GhostRun Runtime running at http://${this.config.host}:${this.config.port}`);
     } catch (error) {
       this.app.log.error(error);
       throw error;
@@ -140,7 +140,7 @@ export class FlowmindRuntime {
 
 // CLI entry point
 async function main() {
-  const runtime = new FlowmindRuntime({
+  const runtime = new GhostRunRuntime({
     port: parseInt(process.env.PORT || '3030'),
     host: process.env.HOST || 'localhost',
   });

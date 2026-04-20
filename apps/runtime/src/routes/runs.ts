@@ -3,9 +3,9 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { createReportStorage, createReporter } from '@flowmind/reporting';
-import type { ExecutionConfig } from '@flowmind/executor';
-import { createGraphStorage } from '@flowmind/memory';
+import { createReportStorage, createReporter } from '@ghostrun/reporting';
+import type { ExecutionConfig } from '@ghostrun/executor';
+import { createGraphStorage } from '@ghostrun/memory';
 
 export async function runRoutes(
   app: FastifyInstance,

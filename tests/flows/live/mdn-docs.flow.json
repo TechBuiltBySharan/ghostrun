@@ -1,0 +1,79 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2025-01-15T00:00:00.000Z",
+  "flow": {
+    "name": "MDN Web Docs Smoke Test",
+    "description": "Test MDN web documentation site - navigate, search, and verify content",
+    "appUrl": "https://developer.mozilla.org",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "navigate",
+          "value": "https://developer.mozilla.org/en-US/",
+          "label": "Navigate to MDN homepage"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:title",
+          "value": "MDN",
+          "label": "Assert page title contains MDN"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "input#top-of-site-search-input",
+          "label": "Assert search input exists"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "click",
+          "selector": "input#top-of-site-search-input",
+          "label": "Click search input"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "fill",
+          "selector": "input#top-of-site-search-input",
+          "value": "javascript",
+          "label": "Type JavaScript in search"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "press",
+          "value": "Enter",
+          "label": "Press Enter to search"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "wait:ms",
+          "value": "2000",
+          "label": "Wait for results"
+        },
+        {
+          "id": "n8",
+          "type": "action",
+          "action": "assert:url",
+          "value": "search",
+          "label": "Assert URL contains search"
+        }
+      ],
+      "edges": [
+        { "source": "n1", "target": "n2" },
+        { "source": "n2", "target": "n3" },
+        { "source": "n3", "target": "n4" },
+        { "source": "n4", "target": "n5" },
+        { "source": "n5", "target": "n6" },
+        { "source": "n6", "target": "n7" },
+        { "source": "n7", "target": "n8" }
+      ]
+    }
+  }
+}

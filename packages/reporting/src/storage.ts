@@ -2,8 +2,8 @@
  * Report Storage - Store and retrieve reports
  */
 
-import type { FlowRun, FlowRunSummary } from '@flowmind/core';
-import { serializeFlowRun, deserializeFlowRun, type SerializedFlowRun } from '@flowmind/core';
+import type { FlowRun, FlowRunSummary } from '@ghostrun/core';
+import { serializeFlowRun, deserializeFlowRun, type SerializedFlowRun } from '@ghostrun/core';
 import * as fs from 'fs';
 import * as path from 'path';
 

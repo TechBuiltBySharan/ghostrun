@@ -1,0 +1,10 @@
+# Test results
+*.json
+*.html
+
+# Coverage reports
+coverage/
+
+# Temporary files
+.tmp/
+*.tmp

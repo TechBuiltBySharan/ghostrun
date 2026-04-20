@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "Example Domain Live Smoke",
+    "description": "Verifies a stable public website in the browser runner.",
+    "appUrl": "https://example.com",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "assert:title",
+          "value": "Example Domain",
+          "label": "Assert page title"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:text",
+          "value": "Example Domain",
+          "label": "Assert page heading text"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "extract",
+          "selector": "h1",
+          "variable": "heading",
+          "label": "Extract heading"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

@@ -152,7 +152,7 @@ class NodeKeychain implements Keychain {
 class EnvKeychain implements Keychain {
   private prefix: string;
 
-  constructor(prefix: string = 'FLOWMIND_') {
+  constructor(prefix: string = 'GHOSTRUN_') {
     this.prefix = prefix;
   }
 
@@ -201,13 +201,13 @@ class EnvKeychain implements Keychain {
  */
 export function createKeychain(): Keychain {
   // Check if we're in CI/headless environment
-  if (process.env.CI || process.env.FLOWMIND_USE_ENV === 'true') {
+  if (process.env.CI || process.env.GHOSTRUN_USE_ENV === 'true') {
     return new EnvKeychain();
   }
 
   // Try native keychain first
   try {
-    return new NodeKeychain('flowmind');
+    return new NodeKeychain('ghostrun');
   } catch {
     // Fall back to environment
     return new EnvKeychain();

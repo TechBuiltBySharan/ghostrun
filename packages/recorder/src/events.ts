@@ -2,7 +2,7 @@
  * Event Capture - Capture browser events during recording
  */
 
-import type { RecordedAction, ActionType, ActionTarget, ElementSelector, ElementSnapshot } from '@flowmind/core';
+import type { RecordedAction, ActionType, ActionTarget, ElementSelector, ElementSnapshot } from '@ghostrun/core';
 
 export interface EventCaptureConfig {
   captureClicks?: boolean;
@@ -512,4 +512,4 @@ export class EventCapture {
 }
 
 // Re-export types
-export type { ElementSnapshot } from '@flowmind/core';
+export type { ElementSnapshot } from '@ghostrun/core';

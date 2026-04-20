@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "Hacker News Live Smoke",
+    "description": "Verifies a dynamic public website with extraction and selector assertions.",
+    "appUrl": "https://news.ycombinator.com",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "assert:title",
+          "value": "Hacker News",
+          "label": "Assert page title"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "tr.athing .titleline > a",
+          "label": "Assert story links exist"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "extract",
+          "selector": "tr.athing .titleline > a",
+          "variable": "topStoryTitle",
+          "label": "Extract top story title"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

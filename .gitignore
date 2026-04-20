@@ -19,3 +19,26 @@ dist/
 .idea/
 .vscode/
 *.swp
+
+# Test results
+tests/results/*.json
+tests/results/coverage/
+
+# Visual regression test baselines
+__snapshots__/
+*.png
+
+# Temporary test data
+/tmp/
+/tmp
+
+# Comprehensive test artifacts
+scripts/comprehensive-*.mjs
+scripts/explore-*.mjs
+
+# TypeScript base config (use tsconfig.cli.json)
+tsconfig.json
+
+# Benchmark results
+benchmarks/
+*.bench.*

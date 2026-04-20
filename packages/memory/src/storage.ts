@@ -2,7 +2,7 @@
  * Flow Storage - File-based storage for flow graphs
  */
 
-import { type SerializedFlow, serializeFlow, deserializeFlow, type Flow } from '@flowmind/core';
+import { type SerializedFlow, serializeFlow, deserializeFlow, type Flow } from '@ghostrun/core';
 import { serializeGraph, deserializeGraph, type GraphState } from './graph';
 import * as fs from 'fs';
 import * as path from 'path';

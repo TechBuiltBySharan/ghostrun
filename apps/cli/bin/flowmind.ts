@@ -7,11 +7,11 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { createGraphStorage, createFlowGraph, serializeGraph } from '@flowmind/memory';
-import { createReportStorage, createReporter, formatConsoleOutput, formatDuration, formatJUnitXML } from '@flowmind/reporting';
-import { executeFlow } from '@flowmind/executor';
-import { PlaywrightAdapter } from '@flowmind/adapters-web';
-import { createVault } from '@flowmind/vault';
+import { createGraphStorage, createFlowGraph, serializeGraph } from '@ghostrun/memory';
+import { createReportStorage, createReporter, formatConsoleOutput, formatDuration, formatJUnitXML } from '@ghostrun/reporting';
+import { executeFlow } from '@ghostrun/executor';
+import { PlaywrightAdapter } from '@ghostrun/adapters-web';
+import { createVault } from '@ghostrun/vault';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -202,7 +202,7 @@ program
       return;
     }
 
-    const { exportForVisualization } = await import('@flowmind/memory');
+    const { exportForVisualization } = await import('@ghostrun/memory');
     const data = exportForVisualization(graph);
     const json = JSON.stringify(data, null, 2);
 

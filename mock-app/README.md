@@ -1,6 +1,6 @@
-# Mock Application for Flowmind Testing
+# Mock Application for GhostRun Testing
 
-A multi-page web application with login validation, designed to test Flowmind's flow learning and replay capabilities.
+A multi-page web application with login validation, designed to test GhostRun's flow learning and replay capabilities.
 
 ## Pages
 
@@ -23,7 +23,7 @@ A multi-page web application with login validation, designed to test Flowmind's 
 
 | Field | Value |
 |-------|-------|
-| Email | `test@flowmind.com` |
+| Email | `test@ghostrun.dev` |
 | Phone | `555-123-4567` |
 | Password | `password123` |
 
@@ -48,7 +48,7 @@ php -S localhost:3333
 
 Then visit: http://localhost:3333
 
-## Testing with Flowmind
+## Testing with GhostRun
 
 ### 1. Install Dependencies
 

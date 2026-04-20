@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * FlowMind Test Server — pure Node.js HTTP server (no dependencies)
+ * GhostRun Test Server — pure Node.js HTTP server (no dependencies)
  * Starts on http://localhost:3456
  * Credentials: admin / test123
  */
@@ -253,7 +253,7 @@ function dashboardPage(user) {
       <table>
         <thead><tr><th>Order #</th><th>Product</th><th>Status</th><th>Amount</th></tr></thead>
         <tbody>
-          <tr><td>#1042</td><td>FlowMind Pro</td><td><span class="badge badge-green">Delivered</span></td><td>$49</td></tr>
+          <tr><td>#1042</td><td>GhostRun Pro</td><td><span class="badge badge-green">Delivered</span></td><td>$49</td></tr>
           <tr><td>#1038</td><td>DevTools Bundle</td><td><span class="badge badge-green">Delivered</span></td><td>$89</td></tr>
           <tr><td>#1021</td><td>AI Automation Kit</td><td><span class="badge badge-blue">Processing</span></td><td>$129</td></tr>
         </tbody>
@@ -270,9 +270,9 @@ function dashboardPage(user) {
 
 function productsPage(user) {
   const products = [
-    { id: 1, name: 'FlowMind Starter', price: '$19', desc: 'Record and replay web flows with ease. Perfect for small teams.', badge: 'Popular' },
-    { id: 2, name: 'FlowMind Pro', price: '$49', desc: 'AI-powered test healing, visual regression, and multi-tab support.', badge: 'Best Value' },
-    { id: 3, name: 'FlowMind Enterprise', price: '$129', desc: 'Unlimited flows, suite management, and priority support.', badge: 'For Teams' },
+    { id: 1, name: 'GhostRun Starter', price: '$19', desc: 'Record and replay web flows with ease. Perfect for small teams.', badge: 'Popular' },
+    { id: 2, name: 'GhostRun Pro', price: '$49', desc: 'AI-powered test healing, visual regression, and multi-tab support.', badge: 'Best Value' },
+    { id: 3, name: 'GhostRun Enterprise', price: '$129', desc: 'Unlimited flows, suite management, and priority support.', badge: 'For Teams' },
   ];
   const cards = products.map(p => `
     <div class="card" id="product-${p.id}">
@@ -476,7 +476,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  FlowMind Test Server`);
+  console.log(`\n  GhostRun Test Server`);
   console.log(`  ─────────────────────────────────`);
   console.log(`  URL:         http://localhost:${PORT}`);
   console.log(`  Credentials: admin / test123`);

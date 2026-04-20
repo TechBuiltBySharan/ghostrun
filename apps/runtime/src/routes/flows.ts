@@ -3,7 +3,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { createGraphStorage, type GraphState, createFlowGraph, addScreenNode, addActionNode, addEndNode } from '@flowmind/memory';
+import { createGraphStorage, type GraphState, createFlowGraph, addScreenNode, addActionNode, addEndNode } from '@ghostrun/memory';
 
 export async function flowRoutes(
   app: FastifyInstance,
@@ -139,7 +139,7 @@ export async function flowRoutes(
       return { error: 'Flow not found' };
     }
 
-    const { exportForVisualization } = await import('@flowmind/memory');
+    const { exportForVisualization } = await import('@ghostrun/memory');
     const data = exportForVisualization(graph);
     
     reply.header('Content-Type', 'application/json');

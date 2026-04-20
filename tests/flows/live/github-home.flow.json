@@ -1,0 +1,86 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2025-01-15T00:00:00.000Z",
+  "flow": {
+    "name": "GitHub Homepage Smoke",
+    "description": "Test GitHub homepage - verify navigation, sign in link, and basic elements",
+    "appUrl": "https://github.com",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "navigate",
+          "value": "https://github.com",
+          "label": "Navigate to GitHub homepage"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:title",
+          "value": "GitHub",
+          "label": "Assert page title contains GitHub"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "a[href='/login']",
+          "label": "Assert Sign in link exists"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "a[href='/signup']",
+          "label": "Assert Sign up link exists"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "a[rel='nofollow'][href*='/pricing']",
+          "label": "Assert Pricing link exists"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "click",
+          "selector": "a[href='/login']",
+          "label": "Click Sign in"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "assert:url",
+          "value": "/login",
+          "label": "Assert URL contains login"
+        },
+        {
+          "id": "n8",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "input[name='login']",
+          "label": "Assert username field exists"
+        },
+        {
+          "id": "n9",
+          "type": "action",
+          "action": "assert:element",
+          "selector": "input[name='password']",
+          "label": "Assert password field exists"
+        }
+      ],
+      "edges": [
+        { "source": "n1", "target": "n2" },
+        { "source": "n2", "target": "n3" },
+        { "source": "n3", "target": "n4" },
+        { "source": "n4", "target": "n5" },
+        { "source": "n5", "target": "n6" },
+        { "source": "n6", "target": "n7" },
+        { "source": "n7", "target": "n8" },
+        { "source": "n8", "target": "n9" }
+      ]
+    }
+  }
+}

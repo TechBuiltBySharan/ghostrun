@@ -1,5 +1,5 @@
 {
-  "name": "@flowmind/runtime",
+  "name": "@ghostrun/runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,13 +11,13 @@
     "lint": "eslint src --ext .ts"
   },
   "dependencies": {
-    "@flowmind/core": "workspace:*",
-    "@flowmind/memory": "workspace:*",
-    "@flowmind/executor": "workspace:*",
-    "@flowmind/reporting": "workspace:*",
-    "@flowmind/privacy": "workspace:*",
-    "@flowmind/vault": "workspace:*",
-    "@flowmind/adapters-web": "workspace:*",
+    "@ghostrun/core": "workspace:*",
+    "@ghostrun/memory": "workspace:*",
+    "@ghostrun/executor": "workspace:*",
+    "@ghostrun/reporting": "workspace:*",
+    "@ghostrun/privacy": "workspace:*",
+    "@ghostrun/vault": "workspace:*",
+    "@ghostrun/adapters-web": "workspace:*",
     "fastify": "^4.25.2",
     "@fastify/cors": "^8.5.0",
     "@fastify/static": "^7.0.1",

@@ -1,5 +1,5 @@
 {
-  "name": "@flowmind/executor",
+  "name": "@ghostrun/executor",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,9 +15,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@flowmind/core": "workspace:*",
-    "@flowmind/memory": "workspace:*",
-    "@flowmind/privacy": "workspace:*",
+    "@ghostrun/core": "workspace:*",
+    "@ghostrun/memory": "workspace:*",
+    "@ghostrun/privacy": "workspace:*",
     "playwright": "^1.41.0"
   },
   "devDependencies": {

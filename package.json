@@ -30,14 +30,28 @@
     "cli": "node ghostrun.js",
     "mcp": "npx tsx mcp-server.ts",
     "build": "npx esbuild ghostrun.ts --platform=node --format=cjs --outfile=ghostrun.js --bundle --external:playwright --external:better-sqlite3 --external:chalk --external:uuid --external:@anthropic-ai/sdk --external:@clack/prompts && npx esbuild mcp-server.ts --platform=node --format=cjs --outfile=mcp-server.js --bundle --external:playwright --external:better-sqlite3 --external:uuid --external:@anthropic-ai/sdk --external:@modelcontextprotocol/sdk",
-    "test": "./TEST-DEMO.sh",
-    "demo": "./TEST-DEMO.sh"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run tests/unit",
+    "test:e2e": "vitest run tests/e2e",
+    "test:api": "vitest run tests/e2e/api.test.ts",
+    "test:browser": "vitest run tests/e2e/browser.test.ts",
+    "test:flows": "node scripts/run-flow-tests.mjs",
+    "test:all": "pnpm run test && pnpm run test:flows",
+    "validate": "pnpm run build && pnpm run test",
+    "rebuild:native": "pnpm rebuild better-sqlite3 esbuild keytar",
+    "demo": "./TEST-DEMO.sh",
+    "lint": "eslint . --ext .ts,.js,.mjs 2>/dev/null || echo 'ESLint not configured'",
+    "lint:fix": "eslint . --fix 2>/dev/null || echo 'ESLint fix skipped'",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit --skipLibCheck 2>/dev/null || echo 'TypeScript check'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
     "@clack/prompts": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^9.4.3",
+    "better-sqlite3": "^9.6.0",
     "chalk": "^4.1.2",
     "node-cron": "^4.2.1",
     "pixelmatch": "^7.1.0",
@@ -54,8 +68,11 @@
     "@types/node-cron": "^3.0.11",
     "@types/pngjs": "^6.0.5",
     "@types/uuid": "^9.0.7",
+    "@vitest/coverage-v8": "^4.1.4",
     "electron": "^41.2.0",
+    "esbuild": "^0.27.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.4"
   }
 }

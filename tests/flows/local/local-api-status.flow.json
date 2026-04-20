@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "Local API Status",
+    "description": "Exercises the API-only path against the local test server.",
+    "appUrl": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "http:request",
+          "method": "GET",
+          "url": "http://localhost:3456/api/status",
+          "label": "GET /api/status"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "status",
+          "expected": 200,
+          "label": "Assert status 200"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "json:path",
+          "path": "$.status",
+          "expected": "ok",
+          "label": "Assert $.status = ok"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "assert:response",
+          "assert": "time",
+          "expected": 3000,
+          "label": "Assert response under 3s"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

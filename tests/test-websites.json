@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GhostRun Test Suite Configuration",
+  "description": "Configuration for GhostRun's reliability test suite against production websites",
+  "version": "1.0.0",
+  "categories": {
+    "content": {
+      "label": "Content & Information Sites",
+      "description": "News, documentation, and reference sites",
+      "weight": 1.0,
+      "sites": [
+        {
+          "name": "Wikipedia",
+          "url": "https://www.wikipedia.org",
+          "testTypes": ["navigation", "search", "assertions"],
+          "expectedSelectors": ["#searchform", "a[href*='/wiki/']", "#p-lang"],
+          "notes": "Stable, no auth required, good for basic navigation tests"
+        },
+        {
+          "name": "Hacker News",
+          "url": "https://news.ycombinator.com",
+          "testTypes": ["navigation", "clicks", "content-verification"],
+          "expectedSelectors": [".titleline a", ".score", ".athing"],
+          "notes": "Minimal HTML, fast loading, no auth for reading"
+        },
+        {
+          "name": "MDN Web Docs",
+          "url": "https://developer.mozilla.org",
+          "testTypes": ["navigation", "search", "content-verification"],
+          "expectedSelectors": ["[aria-label='Search']", "#content", "nav"],
+          "notes": "Rich documentation site, good for multi-step flows"
+        }
+      ]
+    },
+    "saas": {
+      "label": "SaaS & Web Applications",
+      "description": "Typical web application patterns",
+      "weight": 1.5,
+      "sites": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com",
+          "testTypes": ["navigation", "search", "sign-in-detection"],
+          "expectedSelectors": ["[data-target='qbsearch-input']", "a[href='/login']", "header"],
+          "notes": "High traffic, well-maintained, good for reliability testing"
+        },
+        {
+          "name": "GitLab",
+          "url": "https://gitlab.com",
+          "testTypes": ["navigation", "explore", "sign-in-detection"],
+          "expectedSelectors": [".geo-search-container", "a[href*='sign_in']", ".nav-sidebar"],
+          "notes": "Alternative to GitHub, similar patterns"
+        }
+      ]
+    },
+    "forms": {
+      "label": "Form-Heavy Sites",
+      "description": "Sites with significant form interactions",
+      "weight": 2.0,
+      "sites": [
+        {
+          "name": "Typeform",
+          "url": "https://typeform.com",
+          "testTypes": ["navigation", "form-detection", "cta-verification"],
+          "expectedSelectors": ["form", "button[type='submit']", "input[type='email']"],
+          "notes": "Form-centric design, good for form flow testing"
+        }
+      ]
+    },
+    "api": {
+      "label": "API Testing Endpoints",
+      "description": "Public APIs designed for testing",
+      "weight": 3.0,
+      "endpoints": [
+        {
+          "name": "JSONPlaceholder",
+          "description": "Free fake REST API for testing",
+          "baseUrl": "https://jsonplaceholder.typicode.com",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/posts/1", "expect": { "status": 200, "hasKeys": ["title", "body"] } },
+            { "method": "GET", "path": "/users", "expect": { "status": 200, "minLength": 5 } },
+            { "method": "POST", "path": "/posts", "body": { "title": "Test", "userId": 1 }, "expect": { "status": 201 } }
+          ]
+        },
+        {
+          "name": "HTTPBin",
+          "description": "HTTP request & response service",
+          "baseUrl": "https://httpbin.org",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/get", "expect": { "status": 200 } },
+            { "method": "POST", "path": "/post", "body": { "test": "data" }, "expect": { "status": 200 } },
+            { "method": "GET", "path": "/status/200", "expect": { "status": 200 } },
+            { "method": "GET", "path": "/status/404", "expect": { "status": 404 } },
+            { "method": "GET", "path": "/uuid", "expect": { "status": 200, "hasKeys": ["uuid"] } },
+            { "method": "GET", "path": "/ip", "expect": { "status": 200, "hasKeys": ["origin"] } }
+          ]
+        },
+        {
+          "name": "Cat Facts",
+          "description": "Simple fact API",
+          "baseUrl": "https://catfact.ninja",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/fact", "expect": { "status": 200, "hasKeys": ["fact"] } },
+            { "method": "GET", "path": "/breeds?limit=3", "expect": { "status": 200, "hasKeys": ["data"] } }
+          ]
+        },
+        {
+          "name": "Dog CEO",
+          "description": "Dog breed images API",
+          "baseUrl": "https://dog.ceo/api",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/breeds/list/all", "expect": { "status": 200, "hasKeys": ["message"] } },
+            { "method": "GET", "path": "/breeds/image/random", "expect": { "status": 200, "hasKeys": ["message"] } }
+          ]
+        },
+        {
+          "name": "PokéAPI",
+          "description": "Pokémon data API",
+          "baseUrl": "https://pokeapi.co/api/v2",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/pokemon/pikachu", "expect": { "status": 200, "hasKeys": ["name", "abilities"] } },
+            { "method": "GET", "path": "/pokemon?limit=10", "expect": { "status": 200, "hasKeys": ["results"] } }
+          ]
+        },
+        {
+          "name": "DummyJSON",
+          "description": "Fake data for testing",
+          "baseUrl": "https://dummyjson.com",
+          "reliability": "high",
+          "tests": [
+            { "method": "GET", "path": "/posts/1", "expect": { "status": 200, "hasKeys": ["title"] } },
+            { "method": "GET", "path": "/users/1", "expect": { "status": 200, "hasKeys": ["firstName", "email"] } },
+            { "method": "POST", "path": "/posts/add", "body": { "title": "Test", "userId": 1 }, "expect": { "status": 201 } }
+          ]
+        }
+      ]
+    }
+  },
+  "thresholds": {
+    "api": { "minPassRate": 0.95, "timeout": 15000 },
+    "browser": { "minPassRate": 0.80, "timeout": 30000 }
+  }
+}

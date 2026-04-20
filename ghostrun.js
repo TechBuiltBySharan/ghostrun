@@ -4363,6 +4363,14 @@ function sanitizePII(text) {
   text = text.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[SSN]");
   return text;
 }
+function sanitizeStoredValue(value, label, selector) {
+  if (!value) return value;
+  const context = `${label || ""} ${selector || ""}`.toLowerCase();
+  if (/(password|passwd|pwd|token|secret|auth)/.test(context)) {
+    return "[REDACTED]";
+  }
+  return sanitizePII(value);
+}
 function resolveVarsDeep(value, ctx) {
   if (typeof value === "string") {
     return value.replace(/\{\{(\w+)\}\}/g, (_, k) => ctx.variables[k] ?? "");
@@ -4442,6 +4450,15 @@ async function executeHttpRequest(node, ctx, runId, stepNumber) {
     url,
     method
   };
+  const sanitizedResponseHeaders = Object.fromEntries(
+    Object.entries(responseHeaders).map(([key, value]) => {
+      const lowerKey = key.toLowerCase();
+      if (["authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization"].includes(lowerKey)) {
+        return [key, "[REDACTED]"];
+      }
+      return [key, sanitizePII(value)];
+    })
+  );
   db.saveApiResponse({
     runId,
     stepNumber,
@@ -4449,8 +4466,8 @@ async function executeHttpRequest(node, ctx, runId, stepNumber) {
     url,
     statusCode: response.status,
     responseTimeMs,
-    responseHeaders,
-    responseBody: bodyText.slice(0, 1e4)
+    responseHeaders: sanitizedResponseHeaders,
+    responseBody: sanitizePII(bodyText.slice(0, 1e4))
   });
   const extract = node.extract;
   if (extract && bodyJson) {
@@ -4458,7 +4475,7 @@ async function executeHttpRequest(node, ctx, runId, stepNumber) {
       const val = getJsonPath(bodyJson, jsonPath);
       if (val !== void 0) {
         ctx.variables[varName] = String(val);
-        db.saveRunData(runId, stepNumber, varName, String(val));
+        db.saveRunData(runId, stepNumber, varName, sanitizePII(String(val)));
       }
     }
   }
@@ -4543,7 +4560,7 @@ function executeSetVariable(node, ctx, runId, stepNumber) {
   const value = resolveVarsDeep(node.value, ctx);
   if (!varName) throw new Error("set:variable requires a variable name");
   ctx.variables[varName] = String(value ?? "");
-  db.saveRunData(runId, stepNumber, varName, String(value ?? ""));
+  db.saveRunData(runId, stepNumber, varName, sanitizePII(String(value ?? "")));
 }
 function executeExtractJson(node, ctx, runId, stepNumber) {
   const varName = node.variable;
@@ -4553,7 +4570,7 @@ function executeExtractJson(node, ctx, runId, stepNumber) {
   const val = getJsonPath(ctx.lastResponse.body, jsonPath);
   if (val === void 0) throw new Error(`JSON path "${jsonPath}" not found in response`);
   ctx.variables[varName] = String(val);
-  db.saveRunData(runId, stepNumber, varName, String(val));
+  db.saveRunData(runId, stepNumber, varName, sanitizePII(String(val)));
 }
 function calcPercentile(sortedMs, pct) {
   if (!sortedMs.length) return 0;
@@ -4969,8 +4986,8 @@ async function callAnthropic(prompt) {
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
     const client = new Anthropic({ apiKey });
     const msg = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 250,
+      model: "claude-3-5-haiku-20241022",
+      max_tokens: 1024,
       messages: [{ role: "user", content: prompt }]
     });
     const content = msg.content[0];
@@ -4994,25 +5011,71 @@ function buildFailurePrompt(ctx) {
   const stepsSummary = ctx.steps.map(
     (s) => `  Step ${s.stepNumber} [${s.status}]: ${s.name} (${s.action}${s.selector ? ` on "${s.selector}"` : ""})`
   ).join("\n");
-  return `A web automation flow named "${ctx.flowName}" failed during a browser test.
+  const errorType = categorizeError(ctx.failedStep.errorMessage);
+  const selectorHint = ctx.failedStep.selector ? detectSelectorIssue(ctx.failedStep.selector, ctx.failedStep.errorMessage) : "";
+  return `You are a web automation expert analyzing why a browser test failed.
 
-Steps run:
+Flow: "${ctx.flowName}"
+Completed steps:
 ${stepsSummary}
 
 Failed step: "${ctx.failedStep.name}"
-Action: ${ctx.failedStep.action}${ctx.failedStep.selector ? ` on selector "${ctx.failedStep.selector}"` : ""}
+Action: ${ctx.failedStep.action}${ctx.failedStep.selector ? `
+Selector: "${ctx.failedStep.selector}"` : ""}
 Error: ${ctx.failedStep.errorMessage}
 
-Respond in exactly this format (no extra text):
+Error category detected: ${errorType}
+${selectorHint ? `Selector analysis: ${selectorHint}` : ""}
+
+Respond in EXACTLY this format (no extra text, no markdown):
 
 WHAT FAILED
-<one sentence describing which step failed and what it was trying to do>
+<specific description of what step failed and what it was trying to accomplish>
 
-WHY IT FAILED
-<one or two sentences on the likely root cause \u2014 selector broken, page changed, timing issue, etc.>
+WHY IT FAILED  
+<2-3 sentences explaining the root cause \u2014 be specific about whether this is a selector issue, timing, page structure change, network issue, or assertion mismatch>
 
 HOW TO FIX IT
-<one or two specific, actionable steps the developer can take right now>`;
+<2-3 actionable steps the developer can take to resolve this \u2014 include specific suggestions for selectors or timing if applicable>`;
+}
+function categorizeError(errorMessage) {
+  const msg = errorMessage.toLowerCase();
+  if (msg.includes("not found") || msg.includes("timeout") || msg.includes("locator")) {
+    return "ELEMENT_NOT_FOUND - Selector may be broken or element not loaded";
+  }
+  if (msg.includes("not visible") || msg.includes("hidden")) {
+    return "ELEMENT_NOT_VISIBLE - Element exists but is not interactable";
+  }
+  if (msg.includes("disabled") || msg.includes("not actionable")) {
+    return "ELEMENT_DISABLED - Element is present but not clickable";
+  }
+  if (msg.includes("network") || msg.includes("fetch") || msg.includes("failed to load")) {
+    return "NETWORK_ERROR - Page or resource failed to load";
+  }
+  if (msg.includes("assert") || msg.includes("expected")) {
+    return "ASSERTION_FAILED - Expected condition not met";
+  }
+  return "UNKNOWN_ERROR - Review error message for details";
+}
+function detectSelectorIssue(selector, errorMessage) {
+  const issues = [];
+  const msg = errorMessage.toLowerCase();
+  if (selector.includes("//") && msg.includes("not found")) {
+    issues.push("- XPath selectors are fragile; consider using CSS or data attributes");
+  }
+  if (selector.includes("text=") || selector.includes(":has-text")) {
+    issues.push("- Text-based selectors break when UI text changes");
+  }
+  if (selector.includes("nth") || selector.includes("[1]") || selector.includes("[2]")) {
+    issues.push("- Positional selectors are brittle; element order may have changed");
+  }
+  if (selector.match(/[.#][\w-]+(?<!\w)/) && !selector.includes("data-testid") && !selector.includes("data-cy")) {
+    issues.push("- CSS class selectors may change with UI updates; consider data-testid attributes");
+  }
+  if (selector.includes(" ") && selector.includes("//")) {
+    issues.push("- Complex XPath may be too specific; try shorter path");
+  }
+  return issues.join("\n");
 }
 function printLogo() {
   console.log(import_chalk.default.cyan(`
@@ -5194,6 +5257,7 @@ async function saveSession(context, name) {
   const cookies = await context.cookies();
   const sessionPath = path2.join(DATA_PATH2, "sessions", `${name}.json`);
   fs2.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
+  fs2.chmodSync(sessionPath, 384);
   return cookies.length;
 }
 async function runLearn(url, nameOverride) {
@@ -5431,7 +5495,15 @@ async function executeFlow(flowId, vars, opts) {
     log(import_chalk.default.cyan(`
   [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + import_chalk.default.white(label));
     opts?.onStep?.(stepNum - 1, action, node.selector);
-    const step = db.createStep({ runId: run.id, stepNumber: stepNum, name: label, action, selector: node.selector, value: node.value });
+    const sanitizedStepValue = typeof node.value === "string" ? sanitizeStoredValue(node.value, label, node.selector) : void 0;
+    const step = db.createStep({
+      runId: run.id,
+      stepNumber: stepNum,
+      name: label,
+      action,
+      selector: node.selector,
+      value: sanitizedStepValue
+    });
     const t = Date.now();
     try {
       const resolvedNode = {
@@ -5478,7 +5550,7 @@ async function executeFlow(flowId, vars, opts) {
       log(import_chalk.default.green(`      \u2713 passed`) + import_chalk.default.gray(` (${duration}ms)`));
       if (action === "extract" && resolvedNode.__extracted) {
         const extracted = resolvedNode.__extracted;
-        db.saveRunData(run.id, stepNum, extracted.variable, extracted.value);
+        db.saveRunData(run.id, stepNum, extracted.variable, sanitizePII(extracted.value));
         runVars[extracted.variable] = extracted.value;
         log(import_chalk.default.cyan(`      \u2192 extracted ${extracted.variable}: ${import_chalk.default.white(extracted.value.slice(0, 60))}`));
       }
@@ -5786,22 +5858,61 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
       p.__activeFrame = null;
       break;
     case "assert:visible": {
-      const isVisible = await p.locator(node.selector).first().isVisible({ timeout: 1e4 }).catch(() => false);
-      if (!isVisible) throw new Error(`assert:visible failed \u2014 "${node.selector}" is not visible`);
+      const maxRetries = 2;
+      const retryTimeout = 8e3;
+      let lastError = "";
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          await p.locator(node.selector).first().waitFor({ state: "visible", timeout: retryTimeout });
+          const isVisible2 = await p.locator(node.selector).first().isVisible({ timeout: 5e3 });
+          if (isVisible2) break;
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+          if (attempt < maxRetries) await p.waitForTimeout(1e3);
+        }
+      }
+      const isVisible = await p.locator(node.selector).first().isVisible({ timeout: 5e3 }).catch(() => false);
+      if (!isVisible) throw new Error(`assert:visible failed \u2014 "${node.selector}" is not visible (tried ${maxRetries + 1}x with smart wait)`);
       break;
     }
     case "assert:hidden": {
+      const maxRetries = 2;
+      const retryTimeout = 4e3;
+      let lastError = "";
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          await p.locator(node.selector).first().waitFor({ state: "hidden", timeout: retryTimeout });
+          const isHidden2 = await p.locator(node.selector).first().isHidden({ timeout: 5e3 });
+          if (isHidden2) break;
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+          if (attempt < maxRetries) await p.waitForTimeout(500);
+        }
+      }
       const isHidden = await p.locator(node.selector).first().isHidden({ timeout: 5e3 }).catch(() => true);
       if (!isHidden) throw new Error(`assert:hidden failed \u2014 "${node.selector}" is visible but expected hidden`);
       break;
     }
     case "assert:value": {
+      const maxRetries = 2;
+      const retryTimeout = 8e3;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          await p.locator(node.selector).first().waitFor({ state: "attached", timeout: retryTimeout });
+          const inputVal2 = await p.inputValue(node.selector, { timeout: 5e3 });
+          if (inputVal2.includes(node.value)) break;
+        } catch (e) {
+          if (attempt < maxRetries) await p.waitForTimeout(500);
+        }
+      }
       const inputVal = await p.inputValue(node.selector, { timeout: 1e4 });
       if (!inputVal.includes(node.value)) throw new Error(`assert:value failed \u2014 input value "${inputVal}" does not contain "${node.value}"`);
       break;
     }
     case "assert:count": {
       const expected = parseInt(node.value, 10);
+      await p.locator(node.selector).first().waitFor({ state: "attached", timeout: 1e4 }).catch(() => {
+      });
       const actual = await p.locator(node.selector).count();
       if (actual !== expected) throw new Error(`assert:count failed \u2014 found ${actual} elements, expected ${expected}`);
       break;
@@ -5809,7 +5920,18 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
     case "assert:attr": {
       const [attrName, ...rest] = (node.value || "").split("=");
       const expected = rest.join("=");
-      const actual = await p.locator(node.selector).first().getAttribute(attrName, { timeout: 1e4 });
+      const maxRetries = 2;
+      const retryTimeout = 8e3;
+      let actual = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          await p.locator(node.selector).first().waitFor({ state: "attached", timeout: retryTimeout });
+          actual = await p.locator(node.selector).first().getAttribute(attrName, { timeout: 5e3 });
+          if (actual !== null) break;
+        } catch (e) {
+          if (attempt < maxRetries) await p.waitForTimeout(500);
+        }
+      }
       if (actual === null) throw new Error(`assert:attr failed \u2014 attribute "${attrName}" not found on "${node.selector}"`);
       if (!actual.includes(expected)) throw new Error(`assert:attr failed \u2014 "${attrName}" is "${actual}", expected to contain "${expected}"`);
       break;
@@ -5908,13 +6030,28 @@ async function attemptHeal(page, label, selector, _action) {
         return `<${el.tagName.toLowerCase()} ${attrs}>${text}</${el.tagName.toLowerCase()}>`;
       }).join("\n");
     }).catch(() => "");
-    const prompt = `Given these interactive elements on a web page, return ONLY the CSS selector (no explanation) for: "${label}"
+    const prompt = `You are a web automation selector expert. Given a label and page elements, return the most robust CSS selector.
 
-Page: ${pageTitle}
-Elements:
+Label requested: "${label}"
+Page title: ${pageTitle}
+
+Available elements:
 ${elementsHtml}
 
-Return just the selector, like: a[href="/login"]`;
+Guidelines:
+- Prefer selectors with data-testid or data-* attributes (most stable)
+- Prefer id attributes (second most stable)
+- Prefer semantic selectors like [role="button"] or [role="link"]
+- Avoid XPath (XPath is fragile and breaks on DOM changes)
+- Avoid text-based selectors (they break when UI text changes)
+- Avoid positional selectors like :nth-child (they break when layout changes)
+- If no good selector exists, return the text of a nearby stable element
+
+Return ONLY the selector string, nothing else. Example formats:
+  #submit-button
+  [data-testid="login-btn"]
+  [role="button"]:has-text("Submit")
+  a[href*="/login"]`;
     const result = await callAI(prompt);
     if (result?.text) {
       const healed = result.text.trim().replace(/^['"`]|['"`]$/g, "").split("\n")[0].trim();
@@ -7706,7 +7843,7 @@ Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>"
                 const Anthropic = (await import("@anthropic-ai/sdk")).default;
                 const client = new Anthropic({ apiKey });
                 const msg = await client.messages.create({
-                  model: "claude-haiku-4-5-20251001",
+                  model: "claude-3-5-haiku-20241022",
                   max_tokens: 512,
                   system: systemPrompt,
                   messages: [{ role: "user", content: message }]
@@ -7818,9 +7955,11 @@ async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
       const actualHost = new URL(page.url()).hostname;
       allowedHosts.add(actualHost);
       allowedHosts.add(actualHost.startsWith("www.") ? actualHost.slice(4) : "www." + actualHost);
-      await page.waitForLoadState("networkidle", { timeout: 3e3 }).catch(() => {
+      await page.waitForLoadState("networkidle", { timeout: 5e3 }).catch(() => {
       });
-      await page.waitForTimeout(500).catch(() => {
+      await page.waitForSelector("body", { state: "visible", timeout: 5e3 }).catch(() => {
+      });
+      await page.waitForTimeout(1e3).catch(() => {
       });
       onProgress(pages.length + 1, page.url());
       const title = await page.title().catch(() => "");
@@ -7927,15 +8066,32 @@ async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
           const text = btn.innerText.trim();
           if (!text || text.length > 60) return;
           if (/menu|close|open|toggle|collapse|expand/i.test(text)) return;
+          const style = window.getComputedStyle(btn);
+          if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) return;
           ctaButtons.push({ text, selector: bestSelector(btn) });
         });
+        const spaIndicators = {
+          hasRouter: !!document.querySelector('[data-reactroot], [data-rid], [id^="__"]'),
+          hasVueApp: !!document.querySelector("[data-v-app], #app[data-v-]"),
+          hasNgApp: !!document.querySelector("[ng-app], [data-ng-app]"),
+          // Check for dynamic loading indicators (loading spinners, skeletons)
+          hasLoadingState: !!document.querySelector('[class*="loading"], [class*="skeleton"], [class*="spinner"]')
+        };
         return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8) };
       }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [] }));
       const ssPath = path2.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
       await page.screenshot({ path: ssPath, type: "jpeg", quality: 60 }).catch(() => {
       });
       const ssExists = fs2.existsSync(ssPath);
-      pages.push({ url: page.url(), title, headings, links: sameHostLinks, screenshotPath: ssExists ? ssPath : null, interactives });
+      pages.push({
+        url: page.url(),
+        title,
+        headings,
+        links: sameHostLinks,
+        screenshotPath: ssExists ? ssPath : null,
+        interactives,
+        spaIndicators: interactives.spaIndicators
+      });
       for (const link of sameHostLinks) {
         const norm = normalize(link);
         if (!visited.has(norm) && !queued.has(norm)) {
@@ -7943,7 +8099,11 @@ async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
           queued.add(norm);
         }
       }
-    } catch {
+    } catch (err) {
+      const errorMsg2 = err instanceof Error ? err.message : String(err);
+      if (pages.length < 5) {
+        console.log(import_chalk.default.yellow(`  Warning: Skipped ${url} \u2014 ${errorMsg2}`));
+      }
     }
   }
   await browser.close();
@@ -8012,7 +8172,7 @@ function buildStepsFromInteractives(p) {
       })();
       const varName = inferredVarName;
       const action = f.type === "select" ? "select" : f.type === "checkbox" || f.type === "radio" ? "check" : "fill";
-      const scopedSelector = form.selector && !form.selector.startsWith("form:nth") ? f.selector : `${form.selector} ${f.selector}`;
+      const scopedSelector = form.selector && !form.selector.startsWith("form:nth") ? `${form.selector} ${f.selector}` : f.selector;
       const usedSelectors = steps.map((s) => s.selector);
       const baseSelector = scopedSelector.trim();
       const dupCount = usedSelectors.filter((s) => s === baseSelector).length;
@@ -9128,6 +9288,13 @@ async function runChat() {
 
 GhostRun lets developers record browser flows and replay them headlessly for testing, monitoring, and data extraction. Uses Playwright + SQLite. AI (Ollama/Anthropic) powers failure analysis, flow generation, and this chat.
 
+## Important Response Rules
+1. Be concise and practical \u2014 developers prefer direct answers
+2. If asked to RUN an existing flow, respond with exactly: [RUN: <flow-name>]
+3. Never invent flow names, IDs, or commands \u2014 only reference what exists in the lists below
+4. If you don't know something, say so \u2014 don't guess
+5. When suggesting fixes, be specific and actionable
+
 ## Core Commands
 - ghostrun learn <url>          \u2014 Record a flow (real browser)
 - ghostrun run <id|name>        \u2014 Run headlessly
@@ -9137,15 +9304,11 @@ GhostRun lets developers record browser flows and replay them headlessly for tes
 - ghostrun run:list             \u2014 Recent runs
 - ghostrun run:show <id>        \u2014 Per-step details + screenshots
 - ghostrun run:analyze <id>     \u2014 AI failure analysis
-- ghostrun monitor <flow>       \u2014 Run + show extracted data changes
-- ghostrun explore <url>        \u2014 BFS crawl + auto-generate flows with AI
-- ghostrun create               \u2014 Generate flow from plain English
-- ghostrun store list/install   \u2014 Browse + install 10 template flows
-- ghostrun suite:create/run     \u2014 Group flows into test suites
+- ghostrun flow:fix <id>        \u2014 Fix broken selectors interactively
+- ghostrun flow:create <desc>   \u2014 Generate flow from description
 - ghostrun chat                 \u2014 This chat interface
 - ghostrun init                 \u2014 Setup wizard
 - ghostrun status               \u2014 Stats + AI provider info
-- ghostrun serve                \u2014 Scheduler daemon (runs cron schedules)
 - ghostrun serve --ui           \u2014 Web dashboard at http://localhost:3000
 
 ## Flow Actions Supported
@@ -9154,17 +9317,14 @@ click, dblclick, fill, type, clear, select, check, focus, hover,
 drag, keyboard, upload,
 wait, wait:text, wait:url, wait:ms,
 scroll, scroll:element, scroll:bottom, scroll:load,
-next:page,
 assert:visible, assert:hidden, assert:text, assert:not-text, assert:value, assert:count, assert:attr,
-extract (capture page data to variable),
-screenshot, eval, iframe:enter, iframe:exit,
-cookie:set, cookie:clear, storage:set
+extract, screenshot, eval
 
 ## Variables
 Use {{VAR_NAME}} in flows. Pass with --var KEY=value or .ghostrun.env file in CWD.
 
 ## Creator Types
-\u{1F464} human = recorded live \xB7 \u{1F916} agent = AI-generated (via create/explore/store)
+\u{1F464} human = recorded live \xB7 \u{1F916} agent = AI-generated (via create/explore)
 
 ## YOUR FLOWS RIGHT NOW
 ${flowsList}
@@ -9172,13 +9332,7 @@ ${flowsList}
 ## RECENT RUN HISTORY
 ${runsList}
 
-## Response Rules
-1. Be concise and practical \u2014 developers prefer direct answers
-2. If asked to RUN an existing flow, write exactly: [RUN: <flow-name>]
-3. Only reference flows that actually exist in the list above
-4. If asked about a failed run, check the run history summary above
-5. To create NEW flows: ghostrun create (AI) or ghostrun learn <url> (browser recording)
-6. If you don't know something, say so \u2014 don't invent flow names or IDs`;
+When a flow fails, check if recent runs have the same issue. Suggest specific fixes based on the error patterns.`;
   }
   const conversationHistory = [];
   async function* streamResponse(userMessage) {
@@ -9240,7 +9394,6 @@ ${runsList}
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       try {
         const msg = await client.messages.create({
-          model: "claude-haiku-4-5-20251001",
           max_tokens: 1024,
           system: buildSystemPrompt(),
           messages: conversationHistory.map((m) => ({ role: m.role, content: m.content }))

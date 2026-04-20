@@ -4,7 +4,7 @@
  * Bridges the CLI commands with SQLite database operations.
  */
 
-import { initDatabase, getDatabase, type FlowRecord, type RunRecord, type StepRecord } from '@flowmind/database';
+import { initDatabase, getDatabase, type FlowRecord, type RunRecord, type StepRecord } from '@ghostrun/database';
 import * as path from 'path';
 import * as fs from 'fs';
 

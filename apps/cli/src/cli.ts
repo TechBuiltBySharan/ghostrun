@@ -10,10 +10,10 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import figlet from 'figlet';
 import { UI, ui } from './ui.js';
-import { initDatabase, getDatabase, type FlowRecord, type RunRecord, type StepRecord } from '@flowmind/database';
-import { executeFlow } from '@flowmind/executor';
-import { PlaywrightAdapter } from '@flowmind/adapters-web';
-import { sanitizeObject, auditLog } from '@flowmind/privacy';
+import { initDatabase, getDatabase, type FlowRecord, type RunRecord, type StepRecord } from '@ghostrun/database';
+import { executeFlow } from '@ghostrun/executor';
+import { PlaywrightAdapter } from '@ghostrun/adapters-web';
+import { sanitizeObject, auditLog } from '@ghostrun/privacy';
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -827,7 +827,7 @@ program
     ui.info('Press Ctrl+C to stop');
     console.log();
     
-    // This would start the Fastify server from @flowmind/runtime
+    // This would start the Fastify server from @ghostrun/runtime
     // For now, just show a message
     ui.warn('API server not yet implemented - use CLI directly');
     ui.info('Run ' + chalk.cyan('flowmind --help') + ' for available commands');

@@ -1,5 +1,5 @@
 {
-  "name": "@flowmind/adapters-web",
+  "name": "@ghostrun/adapters-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,8 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@flowmind/core": "workspace:*",
-    "@flowmind/recorder": "workspace:*",
+    "@ghostrun/core": "workspace:*",
+    "@ghostrun/recorder": "workspace:*",
     "playwright": "^1.41.0"
   },
   "devDependencies": {

@@ -3,7 +3,7 @@
  */
 
 import { PII_PATTERNS, type PlaceholderType, type PIIPattern } from './patterns';
-import type { ConsoleLog, NetworkLog } from '@flowmind/core';
+import type { ConsoleLog, NetworkLog } from '@ghostrun/core';
 
 export interface SanitizeOptions {
   /** Replace with placeholders (default: true) */

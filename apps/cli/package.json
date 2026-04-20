@@ -1,5 +1,5 @@
 {
-  "name": "@flowmind/cli",
+  "name": "@ghostrun/cli",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -13,13 +13,13 @@
     "test": "tsx src/cli.ts flow:list"
   },
   "dependencies": {
-    "@flowmind/core": "workspace:*",
-    "@flowmind/database": "workspace:*",
-    "@flowmind/memory": "workspace:*",
-    "@flowmind/executor": "workspace:*",
-    "@flowmind/reporting": "workspace:*",
-    "@flowmind/privacy": "workspace:*",
-    "@flowmind/adapters-web": "workspace:*",
+    "@ghostrun/core": "workspace:*",
+    "@ghostrun/database": "workspace:*",
+    "@ghostrun/memory": "workspace:*",
+    "@ghostrun/executor": "workspace:*",
+    "@ghostrun/reporting": "workspace:*",
+    "@ghostrun/privacy": "workspace:*",
+    "@ghostrun/adapters-web": "workspace:*",
     "chalk": "^5.3.0",
     "commander": "^11.1.0",
     "ora": "^8.0.1",

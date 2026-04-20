@@ -3,7 +3,7 @@
  */
 
 import type { ExecutionContext } from './engine';
-import type { EdgeCondition, Condition } from '@flowmind/core';
+import type { EdgeCondition, Condition } from '@ghostrun/core';
 
 export interface ValidationResult {
   valid: boolean;

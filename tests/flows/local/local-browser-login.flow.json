@@ -1,0 +1,66 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-04-20T00:00:00.000Z",
+  "flow": {
+    "name": "Local Browser Login",
+    "description": "Exercises the local browser replay path against the test server login flow.",
+    "appUrl": "http://localhost:3456/login",
+    "graph": {
+      "nodes": [
+        {
+          "id": "n1",
+          "type": "action",
+          "action": "assert:title",
+          "value": "Login",
+          "label": "Assert login title"
+        },
+        {
+          "id": "n2",
+          "type": "action",
+          "action": "fill",
+          "selector": "#username",
+          "value": "admin",
+          "label": "Fill username"
+        },
+        {
+          "id": "n3",
+          "type": "action",
+          "action": "fill",
+          "selector": "#password",
+          "value": "test123",
+          "label": "Fill password"
+        },
+        {
+          "id": "n4",
+          "type": "action",
+          "action": "click",
+          "selector": "button[type=\"submit\"]",
+          "label": "Submit login"
+        },
+        {
+          "id": "n5",
+          "type": "action",
+          "action": "assert:url",
+          "value": "/dashboard",
+          "label": "Assert dashboard URL"
+        },
+        {
+          "id": "n6",
+          "type": "action",
+          "action": "assert:text",
+          "value": "Dashboard",
+          "label": "Assert dashboard text"
+        },
+        {
+          "id": "n7",
+          "type": "action",
+          "action": "extract",
+          "selector": "h1",
+          "variable": "pageTitle",
+          "label": "Extract dashboard heading"
+        }
+      ],
+      "edges": []
+    }
+  }
+}

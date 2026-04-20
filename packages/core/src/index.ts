@@ -1,4 +1,4 @@
-// Core type definitions for Flowmind
+// Core type definitions for GhostRun
 
 export * from './types/flow';
 export * from './types/node';

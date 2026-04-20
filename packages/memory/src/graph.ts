@@ -2,9 +2,9 @@
  * Memory Graph - Graph-based flow representation
  */
 
-import { createFlow, type Flow, type SerializedFlow, serializeFlow, deserializeFlow } from '@flowmind/core';
-import { createStartNode, createScreenNode, createActionNode, createEndNode, createDecisionNode, type FlowNode, type NodeType } from '@flowmind/core';
-import { createEdge, createConditionalEdge, findOutgoingEdges, findIncomingEdges, type FlowEdge } from '@flowmind/core';
+import { createFlow, type Flow, type SerializedFlow, serializeFlow, deserializeFlow } from '@ghostrun/core';
+import { createStartNode, createScreenNode, createActionNode, createEndNode, createDecisionNode, type FlowNode, type NodeType } from '@ghostrun/core';
+import { createEdge, createConditionalEdge, findOutgoingEdges, findIncomingEdges, type FlowEdge } from '@ghostrun/core';
 
 export interface GraphState {
   flow: Flow;

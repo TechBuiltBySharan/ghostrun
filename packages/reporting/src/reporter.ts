@@ -2,9 +2,9 @@
  * Reporter - Generate and manage test reports
  */
 
-import type { FlowRun, StepResult, FlowRunSummary, SerializedFlowRun, StepFailureReport } from '@flowmind/core';
-import { generateFailureReport } from '@flowmind/core';
-import { serializeFlowRun, deserializeFlowRun } from '@flowmind/core';
+import type { FlowRun, StepResult, FlowRunSummary, SerializedFlowRun, StepFailureReport } from '@ghostrun/core';
+import { generateFailureReport } from '@ghostrun/core';
+import { serializeFlowRun, deserializeFlowRun } from '@ghostrun/core';
 import * as fs from 'fs';
 import * as path from 'path';
 

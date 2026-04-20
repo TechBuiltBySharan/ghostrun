@@ -1,0 +1,26 @@
+{
+  "name": "Sample Flow for Testing",
+  "description": "A simple test flow for verifying flow execution",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "action",
+      "action": "api:request",
+      "name": "GET Health",
+      "method": "GET",
+      "url": "{{baseUrl}}/health"
+    },
+    {
+      "id": "n2",
+      "type": "action",
+      "action": "api:assert",
+      "name": "Assert 200",
+      "status": 200,
+      "operator": "equals"
+    }
+  ],
+  "edges": [
+    { "from": "n1", "to": "n2" }
+  ]
+}
