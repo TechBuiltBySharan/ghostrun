@@ -1,6 +1,6 @@
 # GhostRun — Guide for AI Agents
 
-**Version:** 2.0.0-alpha.5  
+**Version:** 2.0.0-alpha.6  
 **Audience:** Claude, Cursor, Copilot, and any MCP-capable assistant operating GhostRun for a SaaS team.
 
 GhostRun is a **local-first QA agent**: record browser/API flows, run them against staging with shared credentials, publish CI artifacts, and investigate failures — without a cloud account.

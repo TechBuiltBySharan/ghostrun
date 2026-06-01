@@ -1,0 +1,14 @@
+# Dependabot watches the published npm CLI only (root package-lock.json).
+# Legacy pnpm workspace / apps/ stubs were removed to avoid duplicate alerts.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        patterns:
+          - '*'

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.ghostrun/
 .turbo/
 .vite/
 # Local env and secrets — never commit

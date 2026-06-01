@@ -10,6 +10,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.0-alpha.6] — 2026-06-01
+
+### Fixed
+
+- **Dependabot / supply chain** — removed stale `pnpm-lock.yaml` (source of 15+ false alerts), removed legacy `apps/` stubs with vulnerable `fastify`, dropped unused `uuid` from `@ghostrun/database` (uses `crypto.randomUUID`)
+- Pinned `@modelcontextprotocol/sdk` to `^1.29.0`
+- Added `.github/dependabot.yml` scoped to root npm package only
+
+### Removed
+
+- `pnpm-lock.yaml`, `pnpm-workspace.yaml` — project uses npm (`package-lock.json`) for CI and publish
+- `apps/cli`, `apps/runtime` — unused monorepo stubs (main CLI is root `ghostrun.ts`)
+
+### Changed
+
+- Package version **2.0.0-alpha.6**
+
+---
+
 ## [2.0.0-alpha.5] — 2026-06-01
 
 ### Fixed

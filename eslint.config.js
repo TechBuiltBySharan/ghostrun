@@ -17,7 +17,6 @@ module.exports = [
       'tests/visual/screenshots/**',
       'mock-app/**',
       // Nested package node_modules
-      'apps/cli/node_modules/**',
       '**/node_modules/**',
     ],
   },
