@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/TechBuiltBySharan/ghostrun/blob/master/docs/getting-started.md
+    about: Getting started, profiles, CI/CD, and workspace layout
+  - name: Agent guide (Claude / Cursor)
+    url: https://github.com/TechBuiltBySharan/ghostrun/blob/master/AGENTS.md
+    about: MCP tools, auth patterns, and SaaS QA workflows for AI assistants
+  - name: Security issue (private)
+    url: https://github.com/TechBuiltBySharan/ghostrun/blob/master/SECURITY.md
+    about: Report vulnerabilities privately — do not use public issues

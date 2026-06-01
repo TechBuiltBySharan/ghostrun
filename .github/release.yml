@@ -1,0 +1,10 @@
+changelog:
+  - github:
+      owner: TechBuiltBySharan
+      repo: ghostrun
+    template: |
+      ## What's Changed
+      
+      $CHANGES
+      
+      **Full changelog:** https://github.com/TechBuiltBySharan/ghostrun/blob/master/CHANGELOG.md

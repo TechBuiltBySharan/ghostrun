@@ -8,9 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- GitHub enrichment — historical releases, closed issue backlog, milestones, SECURITY.md, issue template config
+
 ### Changed
 
 - CI matrix uses Node 20/22 only — Vitest 4 requires Node 20.12+ (`util.styleText`)
+- README badges: CI, GitHub release, Node 20+
 
 ---
 

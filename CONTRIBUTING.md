@@ -19,15 +19,21 @@ node ghostrun.js help
 ## Project structure
 
 ```
-ghostrun.ts          # Main CLI — all commands live here (~6400 lines)
+ghostrun.ts          # Main CLI — all commands live here
 mcp-server.ts        # MCP server — delegates flow execution to ghostrun.js
-templates/           # Built-in flow templates (ghostrun store install)
-test-flows/          # Example API test flows for development
-packages/database/   # DatabaseManager (extracted from main CLI)
-landing/             # Landing page (ghostrun.builtbysharan.com)
+service-bridge.ts    # Mailpit, webhooks, Postgres helpers
+project-scope.ts     # Per-repo .ghostrun/ workspace
+account-scope.ts     # Multi-account profile auth
+run-report-v2.ts     # Run Report v2 HTML builder
+templates/           # Profile and CI templates
+packages/            # Extracted modules (database, executor, core, …)
+tests/unit/          # Fast unit tests
+tests/e2e/           # Browser and API integration tests
+docs/                # Human onboarding and product docs
+AGENTS.md            # Guide for AI agents (Claude, Cursor, MCP)
 ```
 
-The project is a single-file TypeScript CLI compiled with esbuild into `ghostrun.js`. The monorepo packages under `packages/` are stubs for a future refactor — the active code is in `ghostrun.ts`.
+The published npm package ships compiled `ghostrun.js` and `mcp-server.js` (esbuild bundle).
 
 ---
 

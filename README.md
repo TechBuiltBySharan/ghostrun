@@ -5,7 +5,10 @@
 Record browser flows once, replay them in CI, monitor staging, and let AI assistants run your test suite via MCP — all on your machine. No cloud account required. Secrets stay in env vars and CI secrets, not in the npm package.
 
 [![npm version](https://img.shields.io/npm/v/ghostrun-cli)](https://www.npmjs.com/package/ghostrun-cli)
+[![GitHub release](https://img.shields.io/github/v/release/TechBuiltBySharan/ghostrun?include_prereleases&label=release)](https://github.com/TechBuiltBySharan/ghostrun/releases)
+[![CI](https://github.com/TechBuiltBySharan/ghostrun/actions/workflows/ci.yml/badge.svg)](https://github.com/TechBuiltBySharan/ghostrun/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
 
 > **AI agents (Claude, Cursor, etc.):** start with [AGENTS.md](AGENTS.md) — capabilities, auth patterns, MCP workflows, and SaaS readiness.
 
@@ -163,6 +166,12 @@ npm run test:unit    # 108+ tests
 ## Contributing
 
 Issues and pull requests are welcome on [GitHub](https://github.com/TechBuiltBySharan/ghostrun).
+
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+- [Changelog / release history](CHANGELOG.md)
+- [Open issues](https://github.com/TechBuiltBySharan/ghostrun/issues)
 
 ## License
 
