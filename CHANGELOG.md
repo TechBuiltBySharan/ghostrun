@@ -8,14 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Added
+---
 
-- GitHub enrichment — historical releases, closed issue backlog, milestones, SECURITY.md, issue template config
+## [2.0.0-alpha.5] — 2026-06-01
+
+### Fixed
+
+- E2E Hacker News tests skip gracefully when datacenter IPs are blocked (`Sorry.` page)
+- **0 npm audit vulnerabilities** — removed unused `electron` devDependency, applied Dependabot-aligned dependency updates
 
 ### Changed
 
-- CI matrix uses Node 20/22 only — Vitest 4 requires Node 20.12+ (`util.styleText`)
-- README badges: CI, GitHub release, Node 20+
+- Package version **2.0.0-alpha.5**
 
 ---
 
