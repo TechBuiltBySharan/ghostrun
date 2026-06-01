@@ -77,7 +77,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.37.0",
+    "@anthropic-ai/sdk": "^0.100.1",
     "@clack/prompts": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^9.6.0",
