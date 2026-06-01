@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -24,14 +24,43 @@ import * as os from 'os';
 // ---------------------------------------------------------------------------
 
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
+const GHOSTRUN_CLI = path.join(PROJECT_ROOT, 'ghostrun.js');
+
+/** Isolated project workspace — same DB path for DatabaseManager and ghostrun CLI. */
+const E2E_WORKSPACE = path.join(os.tmpdir(), `ghostrun-e2e-${process.pid}`);
+const E2E_GHOSTRUN = path.join(E2E_WORKSPACE, '.ghostrun');
+const E2E_DB = path.join(E2E_GHOSTRUN, 'data', 'ghostrun.db');
+
+function ensureE2eWorkspace(): void {
+  fs.mkdirSync(path.join(E2E_GHOSTRUN, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(E2E_GHOSTRUN, 'screenshots'), { recursive: true });
+  fs.mkdirSync(path.join(E2E_GHOSTRUN, 'sessions'), { recursive: true });
+  const configPath = path.join(E2E_GHOSTRUN, 'config.json');
+  if (!fs.existsSync(configPath)) {
+    fs.writeFileSync(configPath, JSON.stringify({ version: '1.0' }, null, 2));
+  }
+}
+
+type TestDatabaseManager = InstanceType<typeof import('../../packages/database/src/manager').DatabaseManager>;
+
+async function createTestDatabase(): Promise<TestDatabaseManager> {
+  ensureE2eWorkspace();
+  const { DatabaseManager } = await import('../../packages/database/src/manager');
+  return new DatabaseManager({
+    dbPath: E2E_DB,
+    screenshotsPath: path.join(E2E_GHOSTRUN, 'screenshots'),
+    sessionsPath: path.join(E2E_GHOSTRUN, 'sessions'),
+  });
+}
 
 /** Run `node ghostrun.js <args>` synchronously and return stdout + exit code. */
 function ghostrun(args: string, env?: Record<string, string>): { stdout: string; stderr: string; status: number } {
+  ensureE2eWorkspace();
   const result = spawnSync(
     process.execPath,
-    ['ghostrun.js', ...args.split(/\s+/).filter(Boolean)],
+    [GHOSTRUN_CLI, ...args.split(/\s+/).filter(Boolean)],
     {
-      cwd: PROJECT_ROOT,
+      cwd: E2E_WORKSPACE,
       env: { ...process.env, ...env },
       encoding: 'utf8',
       timeout: 60_000,
@@ -43,6 +72,10 @@ function ghostrun(args: string, env?: Record<string, string>): { stdout: string;
     status: result.status ?? 1,
   };
 }
+
+afterAll(() => {
+  fs.rmSync(E2E_WORKSPACE, { recursive: true, force: true });
+});
 
 // ---------------------------------------------------------------------------
 // Test URLs — chosen for stability and bot-permissive robots.txt
@@ -183,17 +216,10 @@ describe('Programmatic flow: API-only http:request + assert:response', () => {
   const API_URL = 'https://jsonplaceholder.typicode.com/posts/1';
 
   let flowId: string;
-  let db: import('/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager').DatabaseManager;
+  let db: TestDatabaseManager;
 
   beforeAll(async () => {
-    // DatabaseManager uses module-level constants computed at first import,
-    // so HOME overrides have no effect after the module is cached.
-    // We use the real database and delete the test flow in afterAll.
-    const { DatabaseManager } = await import(
-      '/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager'
-    ) as typeof import('/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager');
-
-    db = new DatabaseManager();
+    db = await createTestDatabase();
 
     // API-only flow: HTTP GET + assert status 200. No browser required.
     const graph = {
@@ -275,18 +301,14 @@ describe('Programmatic flow: API-only http:request + assert:response', () => {
 
 describe('--ci flag behaviour', () => {
   let flowId: string;
-  let db: import('/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager').DatabaseManager;
+  let db: TestDatabaseManager;
 
   // A flow that will always fail: click a selector that does not exist
   const BROKEN_SELECTOR = '#ghostrun-nonexistent-element-xyzzy';
   const TARGET_URL = 'https://example.com';
 
   beforeAll(async () => {
-    const { DatabaseManager } = await import(
-      '/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager'
-    ) as typeof import('/Volumes/DevAPFS/github/ghostrun/packages/database/src/manager');
-
-    db = new DatabaseManager();
+    db = await createTestDatabase();
 
     const graph = {
       nodes: [
