@@ -1,0 +1,19 @@
+{
+  "name": "staging",
+  "baseUrl": "https://staging.example.com",
+
+  "variables": {
+    "testEmail": "qa+ghostrun@example.com"
+  },
+
+  "auth": {
+    "strategy": "form",
+    "loginFlow": "login",
+    "usernameVar": "testEmail",
+    "passwordSecret": "STAGING_QA_PASSWORD"
+  },
+
+  "metadata": {
+    "environment": "staging"
+  }
+}

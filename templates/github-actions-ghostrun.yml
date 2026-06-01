@@ -1,0 +1,219 @@
+# ============================================================
+# GhostRun — reusable GitHub Actions workflow template
+# ============================================================
+# Usage:
+#   1. Copy this file to .github/workflows/ghostrun.yml in your repo.
+#   2. Set the ANTHROPIC_API_KEY secret in your repository (Settings →
+#      Secrets and variables → Actions). The key is optional; when absent
+#      GhostRun runs in non-AI mode (flows still execute but auto-repair
+#      and summary generation are disabled).
+#   3. Adjust the `profile` input default and the daily schedule cron to
+#      match your team's conventions.
+#   4. Commit and push — the workflow will run on the next qualifying event.
+# ============================================================
+
+name: GhostRun Tests
+
+on:
+  # Run on every push to the main branch so regressions surface immediately.
+  push:
+    branches:
+      - main
+
+  # Run on every pull request so reviewers can see test results before merging.
+  pull_request:
+
+  # Daily smoke run at 9:00 AM UTC to catch drift between your app and flows.
+  # Adjust the cron expression to suit your timezone / team schedule.
+  schedule:
+    - cron: '0 9 * * *'
+
+  # Manual trigger with optional inputs so engineers can run on-demand.
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'GhostRun environment profile to activate'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+          - local
+      suite:
+        description: >
+          Named suite to run (e.g. "smoke", "auth", "checkout").
+          Leave blank to run the default smoke suite.
+        required: false
+        default: ''
+        type: string
+
+# ============================================================
+# Shared defaults — override per-job if needed.
+# ============================================================
+env:
+  # GhostRun reads this automatically when present. Remove the secret from
+  # your repo settings to run in non-AI mode (useful for cost control on
+  # high-frequency branches).
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # Convenience: surface the active profile in logs.
+  GHOSTRUN_PROFILE: ${{ inputs.profile || 'staging' }}
+
+jobs:
+  # ----------------------------------------------------------
+  # ghostrun-test: main test execution job
+  # ----------------------------------------------------------
+  ghostrun-test:
+    name: GhostRun — ${{ inputs.suite || 'smoke' }} (${{ inputs.profile || 'staging' }})
+    runs-on: ubuntu-latest
+
+    # Collect results even when the test step itself fails so the artifact
+    # upload and step summary always have something to show.
+    continue-on-error: false
+
+    steps:
+      # ----------------------------------------------------------
+      # 1. Checkout the calling repository.
+      #    The .ghostrun/ directory (flows, profiles, config) must live here.
+      # ----------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # 2. Install Node.js 20 (LTS).
+      #    GhostRun requires Node >= 18; 20 is recommended.
+      # ----------------------------------------------------------
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ----------------------------------------------------------
+      # 3. Install the GhostRun CLI from npm.
+      #    Pin to a specific version (e.g. ghostrun-cli@1.0.4) in production
+      #    workflows to prevent unexpected upgrades.
+      # ----------------------------------------------------------
+      - name: Install ghostrun-cli
+        run: npm install -g ghostrun-cli@1.2.0
+
+      # ----------------------------------------------------------
+      # 4. Install the Chromium browser that Playwright will drive.
+      #    --with-deps installs system-level OS dependencies automatically,
+      #    which is required on bare Ubuntu runners.
+      # ----------------------------------------------------------
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      # ----------------------------------------------------------
+      # 5. Initialise the GhostRun workspace (idempotent).
+      #    If a .ghostrun/ directory already exists in the repo this step
+      #    is a fast no-op.  --yes skips interactive prompts so the step
+      #    never blocks.
+      # ----------------------------------------------------------
+      - name: Initialise GhostRun workspace
+        run: ghostrun init --yes
+
+      # ----------------------------------------------------------
+      # 6. Run the target suite (or the default smoke suite).
+      #
+      #    Flags explained:
+      #      --profile  : select the environment profile (staging/production/local)
+      #      --suite    : named suite file under .ghostrun/suites/
+      #      --ci       : enables CI mode — disables interactive prompts,
+      #                   exits non-zero on any failure, emits machine-readable output
+      #      --reporter junit : writes JUnit XML to ./test-results/results.xml
+      #                         so CI systems can parse pass/fail counts
+      #
+      #    The conditional logic below passes --suite only when the input is
+      #    non-empty; otherwise GhostRun falls back to the smoke suite.
+      # ----------------------------------------------------------
+      - name: Run GhostRun suite
+        run: |
+          SUITE_ARG=""
+          if [ -n "${{ inputs.suite }}" ]; then
+            SUITE_ARG="--suite ${{ inputs.suite }}"
+          fi
+
+          ghostrun suite:run smoke \
+            --profile "$GHOSTRUN_PROFILE" \
+            $SUITE_ARG \
+            --ci \
+            || ghostrun run --profile "$GHOSTRUN_PROFILE" --ci --reporter junit
+
+      - name: Publish reports
+        if: always()
+        run: ghostrun report publish --dir ./test-results --output json || true
+
+      - name: Publish GitHub Check Run
+        if: always()
+        run: node templates/ci/publish-github-check.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHOSTRUN_JUNIT_PATH: test-results/ghostrun-junit.xml
+
+      # ----------------------------------------------------------
+      # 7. Upload test results artifact.
+      #    `if: always()` ensures this step runs even when the test step
+      #    above fails, so results are always available for inspection.
+      # ----------------------------------------------------------
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostrun-results-${{ github.run_id }}
+          path: |
+            test-results/
+            .ghostrun/reports/
+          # Retain artifacts for 30 days; adjust to suit your retention policy.
+          retention-days: 30
+
+      # ----------------------------------------------------------
+      # 8. Write a step summary to the GitHub Actions job page.
+      #    This populates the "Summary" tab with a human-readable digest
+      #    without requiring a separate reporting service.
+      # ----------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## GhostRun Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "| ----- | ----- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Profile | \`$GHOSTRUN_PROFILE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Suite | \`${{ inputs.suite || 'smoke (default)' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # If GhostRun emitted a JUnit report, surface a line count as a
+          # quick sanity check (full results are in the uploaded artifact).
+          if [ -f test-results/ghostrun-junit.xml ]; then
+            TEST_COUNT=$(grep -c '<testcase' test-results/ghostrun-junit.xml 2>/dev/null || echo "?")
+            FAIL_COUNT=$(grep -c 'failure\|error' test-results/ghostrun-junit.xml 2>/dev/null || echo "?")
+            echo "| Test cases | \`$TEST_COUNT\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failures / errors | \`$FAIL_COUNT\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "_JUnit report not found — check the uploaded artifact for raw logs._" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ----------------------------------------------------------
+      # 9. (Optional) Post results as a PR comment.
+      #    Remove this step if you do not want a comment on every PR.
+      #    `if: always()` ensures the comment posts even when tests fail.
+      #
+      #    Required secrets / variables:
+      #      GITHUB_TOKEN      — provided automatically by Actions (read-only
+      #                          by default; grant write permission below).
+      #      GITHUB_REPOSITORY — set automatically by Actions (owner/repo).
+      #      PR_NUMBER         — not needed; the script reads GITHUB_REF.
+      #
+      #    The step is a no-op on push / schedule events because GITHUB_REF
+      #    will not match refs/pull/*/merge and PR_NUMBER is unset.
+      # ----------------------------------------------------------
+      - name: Post results as PR comment
+        if: always() && github.event_name == 'pull_request'
+        run: node templates/ci/post-pr-comment.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHOSTRUN_JUNIT_PATH: test-results/ghostrun-junit.xml

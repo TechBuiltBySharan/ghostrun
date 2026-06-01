@@ -47,6 +47,12 @@ dashboard.log
 *.env
 .ghostrun.env
 .flowmind.env
+.ghostrun/
+
+# Coverage / tests / docs (not shipped)
+coverage/
+tests/
+docs/
 
 # Git
 .git/

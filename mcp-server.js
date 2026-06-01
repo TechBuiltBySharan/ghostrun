@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -28,14 +29,53 @@ var import_stdio = require("@modelcontextprotocol/sdk/server/stdio.js");
 var import_types = require("@modelcontextprotocol/sdk/types.js");
 var import_child_process = require("child_process");
 var import_better_sqlite3 = __toESM(require("better-sqlite3"));
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+
+// project-scope.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
+function resolveProjectRoot(startDir = process.cwd()) {
+  let dir = path.resolve(startDir);
+  while (true) {
+    const config = path.join(dir, ".ghostrun", "config.json");
+    if (fs.existsSync(config)) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function buildProjectPaths(root) {
+  const ghostrunPath = path.join(root, ".ghostrun");
+  return {
+    root,
+    ghostrunPath,
+    configPath: path.join(ghostrunPath, "config.json"),
+    projectJsonPath: path.join(ghostrunPath, "project.json"),
+    dbPath: path.join(ghostrunPath, "data", "ghostrun.db"),
+    screenshotsPath: path.join(ghostrunPath, "screenshots"),
+    sessionsPath: path.join(ghostrunPath, "sessions"),
+    flowsBrowser: path.join(ghostrunPath, "flows", "browser"),
+    flowsApi: path.join(ghostrunPath, "flows", "api"),
+    flowsGenerated: path.join(ghostrunPath, "flows", "generated"),
+    fixturesSql: path.join(ghostrunPath, "fixtures", "sql"),
+    servicesPath: path.join(ghostrunPath, "services"),
+    webhooksPath: path.join(ghostrunPath, "services", "webhooks")
+  };
+}
+
+// mcp-server.ts
 var HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
-var DATA_PATH = path.join(HOME_DIR, ".ghostrun");
-var DB_PATH = path.join(DATA_PATH, "data", "ghostrun.db");
-var GHOSTRUN_BIN = path.join(__dirname, "ghostrun.js");
+var DATA_PATH = path2.join(HOME_DIR, ".ghostrun");
+function resolveDbPath() {
+  const root = resolveProjectRoot(process.cwd());
+  if (root) return buildProjectPaths(root).dbPath;
+  return path2.join(DATA_PATH, "data", "ghostrun.db");
+}
+var GHOSTRUN_BIN = path2.join(__dirname, "ghostrun.js");
 function openDb() {
-  if (!fs.existsSync(DB_PATH)) return null;
+  const DB_PATH = resolveDbPath();
+  if (!fs2.existsSync(DB_PATH)) return null;
   const db = new import_better_sqlite3.default(DB_PATH, { readonly: true });
   db.pragma("foreign_keys = ON");
   return db;
@@ -79,7 +119,7 @@ function mapStep(r) {
   };
 }
 function runFlowViaCli(flowId, vars) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const varArgs = [];
     if (vars) {
       for (const [k, v] of Object.entries(vars)) varArgs.push("--var", `${k}=${v}`);
@@ -100,7 +140,7 @@ function runFlowViaCli(flowId, vars) {
       const jsonLine = stdout.split("\n").find((l) => l.trim().startsWith("{"));
       if (jsonLine) {
         try {
-          resolve(JSON.parse(jsonLine));
+          resolve2(JSON.parse(jsonLine));
           return;
         } catch {
         }
@@ -110,8 +150,54 @@ function runFlowViaCli(flowId, vars) {
     proc.on("error", (err) => reject(new Error(`Failed to spawn ghostrun: ${err.message}`)));
   });
 }
+function runCliJson(args) {
+  return new Promise((resolve2, reject) => {
+    const proc = (0, import_child_process.spawn)("node", [GHOSTRUN_BIN, ...args], {
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => {
+      stdout += d.toString();
+    });
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+    });
+    proc.on("close", () => {
+      const jsonLine = stdout.split("\n").filter((l) => {
+        const trimmed = l.trim();
+        return trimmed.startsWith("{") || trimmed.startsWith("[");
+      }).at(-1);
+      if (jsonLine) {
+        try {
+          resolve2(JSON.parse(jsonLine));
+          return;
+        } catch {
+        }
+      }
+      reject(new Error(stderr || stdout || "GhostRun command produced no JSON output"));
+    });
+    proc.on("error", (err) => reject(new Error(`Failed to spawn ghostrun: ${err.message}`)));
+  });
+}
+function runScrapeViaCli(url, options) {
+  const args = ["scrape", url, "--output", "json"];
+  if (options?.maxPages) args.push("--max-pages", String(options.maxPages));
+  if (options?.selector) args.push("--selector", options.selector);
+  return runCliJson(args);
+}
+function runScrapeAndFlowViaCli(url, flowId, vars, options) {
+  const args = ["scrape:run", url, "--flow", flowId, "--output", "json"];
+  if (options?.maxPages) args.push("--max-pages", String(options.maxPages));
+  if (options?.selector) args.push("--selector", options.selector);
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) args.push("--var", `${k}=${v}`);
+  }
+  return runCliJson(args);
+}
 var server = new import_server.Server(
-  { name: "ghostrun", version: "1.0.0" },
+  { name: "ghostrun", version: "1.1.0" },
   { capabilities: { tools: {} } }
 );
 server.setRequestHandler(import_types.ListToolsRequestSchema, async () => ({
@@ -146,6 +232,50 @@ server.setRequestHandler(import_types.ListToolsRequestSchema, async () => ({
           }
         },
         required: ["flowId"]
+      }
+    },
+    {
+      name: "scrape_website",
+      description: "Scrape a website with optional Crawlee support and return structured page data for agent workflows: title, headings, links, forms, buttons, text, and selected content.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL to scrape" },
+          maxPages: { type: "number", description: "Maximum pages to scrape (default 1)" },
+          selector: { type: "string", description: "Optional CSS selector for targeted content extraction" },
+          waitFor: { type: "string", description: "Reserved for future wait conditions" }
+        },
+        required: ["url"]
+      }
+    },
+    {
+      name: "get_scrape_result",
+      description: "Fetch a saved scrape result by ID, including the structured JSON dataset and artifact path.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          scrapeId: { type: "string", description: "Scrape ID or first 8 characters of it" }
+        },
+        required: ["scrapeId"]
+      }
+    },
+    {
+      name: "scrape_and_run_flow",
+      description: "Scrape a website first, then run a GhostRun flow. Useful for AI agents that need page context and a test result in one tool call.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL to scrape before running the flow" },
+          flowId: { type: "string", description: "Flow ID or name to run after scraping" },
+          maxPages: { type: "number", description: "Maximum pages to scrape (default 1)" },
+          selector: { type: "string", description: "Optional CSS selector for targeted content extraction" },
+          vars: {
+            type: "object",
+            description: "Optional key=value variables to inject into the flow",
+            additionalProperties: { type: "string" }
+          }
+        },
+        required: ["url", "flowId"]
       }
     },
     {
@@ -185,6 +315,63 @@ server.setRequestHandler(import_types.ListToolsRequestSchema, async () => ({
       name: "get_status",
       description: "Get GhostRun system statistics: total flows, total runs, pass/fail counts, success rate, and data path.",
       inputSchema: { type: "object", properties: {} }
+    },
+    {
+      name: "list_profiles",
+      description: "List all saved GhostRun profiles (environment configs) in the current project's .ghostrun/profiles/ directory.",
+      inputSchema: { type: "object", properties: {} }
+    },
+    {
+      name: "list_suites",
+      description: "List all saved GhostRun test suites in the current project's .ghostrun/suites/ directory.",
+      inputSchema: { type: "object", properties: {} }
+    },
+    {
+      name: "run_suite",
+      description: "Run a GhostRun test suite by name, optionally with a named profile. Returns suite results as JSON.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          suiteName: { type: "string", description: "Name of the suite to run (matches filename without .json)" },
+          profile: { type: "string", description: "Optional profile name to use when running the suite" }
+        },
+        required: ["suiteName"]
+      }
+    },
+    {
+      name: "list_repair_proposals",
+      description: "List all AI-generated repair proposals for failing flows in the current project's .ghostrun/proposals/repairs/ directory.",
+      inputSchema: { type: "object", properties: {} }
+    },
+    {
+      name: "get_repair_proposal",
+      description: "Get the full content of a specific repair proposal by ID (prefix match supported).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          proposalId: { type: "string", description: "Proposal ID or prefix to match" }
+        },
+        required: ["proposalId"]
+      }
+    },
+    {
+      name: "get_ai_usage",
+      description: "Get a summary of AI token and cost usage across all GhostRun sessions from the current project's .ghostrun/ai/usage/ directory.",
+      inputSchema: { type: "object", properties: {} }
+    },
+    {
+      name: "author_flow",
+      description: "Generate a GhostRun flow from a natural language description using project profile context. Saves the flow and returns flow ID, steps, and run hint.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: "Plain-language description of the flow to generate" },
+          baseUrl: { type: "string", description: "Optional base URL. Uses active profile baseUrl when omitted." },
+          profile: { type: "string", description: "Optional profile name for context and baseUrl resolution" },
+          preview: { type: "boolean", description: "If true, return generated flow without saving" }
+        },
+        required: ["description"]
+      }
     }
   ]
 }));
@@ -258,10 +445,61 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
           stepsPassed: result.steps?.filter((s) => s.status === "passed").length ?? 0,
           stepsFailed: result.steps?.filter((s) => s.status === "failed").length ?? 0,
           extractedData: result.extractedData || {},
+          scrapeDiagnostics: result.scrapeDiagnostics || [],
           steps: result.steps,
           errorMessage: result.steps?.find((s) => s.errorMessage)?.errorMessage ?? null,
           hint: !result.passed ? `Run failed. Use get_run_result with runId "${result.runId?.slice(0, 8)}" for details.` : "All steps passed."
         }, null, 2));
+      }
+      case "scrape_website": {
+        const { url, maxPages, selector, waitFor } = toolArgs;
+        try {
+          const result = await runScrapeViaCli(url, { maxPages, selector, waitFor });
+          return text(JSON.stringify(result, null, 2));
+        } catch (err) {
+          return error(err instanceof Error ? err.message : String(err));
+        }
+      }
+      case "get_scrape_result": {
+        const { scrapeId } = toolArgs;
+        const db = openDb();
+        if (!db) return error("No database found.");
+        let row;
+        try {
+          row = db.prepare("SELECT * FROM scrape_runs WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1").get(scrapeId + "%");
+        } catch {
+          db.close();
+          return error("No scrape history found. Run scrape_website first.");
+        }
+        db.close();
+        if (!row) return error(`Scrape not found: ${scrapeId}`);
+        const resultPath = row.result_path;
+        let data = null;
+        if (resultPath && fs2.existsSync(resultPath)) {
+          try {
+            data = JSON.parse(fs2.readFileSync(resultPath, "utf8"));
+          } catch {
+          }
+        }
+        return text(JSON.stringify({
+          scrapeId: row.id,
+          status: row.status,
+          url: row.url,
+          reason: row.reason,
+          pagesCount: row.pages_count,
+          resultPath,
+          errorMessage: row.error_message,
+          data
+        }, null, 2));
+      }
+      case "scrape_and_run_flow": {
+        const { url, flowId, vars, maxPages, selector } = toolArgs;
+        try {
+          const result = await runScrapeAndFlowViaCli(url, flowId, vars, { maxPages, selector });
+          return text(JSON.stringify(result, null, 2));
+        } catch (err) {
+          return error(err instanceof Error ? err.message : String(err));
+        }
       }
       case "get_run_result": {
         const { runId } = toolArgs;
@@ -276,6 +514,11 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
         const flowRow = db.prepare("SELECT * FROM flows WHERE id = ?").get(run.flowId);
         const flow = flowRow ? mapFlow(flowRow) : null;
         const steps = db.prepare("SELECT * FROM steps WHERE run_id = ? ORDER BY step_number").all(run.id).map(mapStep);
+        let scrapeDiagnostics = [];
+        try {
+          scrapeDiagnostics = db.prepare("SELECT * FROM scrape_runs WHERE run_id = ? ORDER BY created_at DESC").all(run.id);
+        } catch {
+        }
         db.close();
         return text(JSON.stringify({
           runId: run.id,
@@ -286,6 +529,13 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
           duration: run.duration ? `${run.duration}ms` : null,
           errorMessage: run.errorMessage,
           aiSummary: run.summary || null,
+          scrapeDiagnostics: scrapeDiagnostics.map((s) => ({
+            scrapeId: s.id,
+            reason: s.reason,
+            status: s.status,
+            pagesCount: s.pages_count,
+            resultPath: s.result_path
+          })),
           steps: steps.map((s) => ({
             step: s.stepNumber,
             name: s.name,
@@ -328,7 +578,7 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
           return error(`Flow not found: ${flowId}`);
         }
         const flow = mapFlow(row);
-        const writeDb = new import_better_sqlite3.default(DB_PATH);
+        const writeDb = new import_better_sqlite3.default(resolveDbPath());
         writeDb.prepare("DELETE FROM flows WHERE id = ?").run(flow.id);
         writeDb.close();
         db.close();
@@ -351,6 +601,127 @@ server.setRequestHandler(import_types.CallToolRequestSchema, async (request) => 
           dataPath: DATA_PATH,
           aiEnabled: !!process.env.ANTHROPIC_API_KEY
         }, null, 2));
+      }
+      case "list_profiles": {
+        const profilesDir = path2.join(process.cwd(), ".ghostrun", "profiles");
+        if (!fs2.existsSync(profilesDir)) return text(JSON.stringify({ total: 0, profiles: [] }, null, 2));
+        const files = fs2.readdirSync(profilesDir).filter((f) => f.endsWith(".json"));
+        const profiles = files.map((f) => {
+          try {
+            const content = JSON.parse(fs2.readFileSync(path2.join(profilesDir, f), "utf8"));
+            return { name: path2.basename(f, ".json"), ...content };
+          } catch {
+            return { name: path2.basename(f, ".json"), error: "Failed to parse" };
+          }
+        });
+        return text(JSON.stringify({ total: profiles.length, profiles }, null, 2));
+      }
+      case "list_suites": {
+        const suitesDir = path2.join(process.cwd(), ".ghostrun", "suites");
+        if (!fs2.existsSync(suitesDir)) return text(JSON.stringify({ total: 0, suites: [] }, null, 2));
+        const files = fs2.readdirSync(suitesDir).filter((f) => f.endsWith(".json"));
+        const suites = files.map((f) => {
+          try {
+            const content = JSON.parse(fs2.readFileSync(path2.join(suitesDir, f), "utf8"));
+            return { name: path2.basename(f, ".json"), ...content };
+          } catch {
+            return { name: path2.basename(f, ".json"), error: "Failed to parse" };
+          }
+        });
+        return text(JSON.stringify({ total: suites.length, suites }, null, 2));
+      }
+      case "run_suite": {
+        const { suiteName, profile } = toolArgs;
+        const args = ["suite:run", suiteName, "--output", "json"];
+        if (profile) args.push("--profile", profile);
+        try {
+          const result = await runCliJson(args);
+          return text(JSON.stringify(result, null, 2));
+        } catch (err) {
+          return error(err instanceof Error ? err.message : String(err));
+        }
+      }
+      case "list_repair_proposals": {
+        const repairsDir = path2.join(process.cwd(), ".ghostrun", "proposals", "repairs");
+        if (!fs2.existsSync(repairsDir)) return text(JSON.stringify({ total: 0, proposals: [] }, null, 2));
+        const files = fs2.readdirSync(repairsDir).filter((f) => f.endsWith(".json"));
+        const proposals = files.map((f) => {
+          try {
+            const content = JSON.parse(fs2.readFileSync(path2.join(repairsDir, f), "utf8"));
+            return {
+              id: content.id ?? path2.basename(f, ".json"),
+              status: content.status ?? null,
+              flowName: content.flowName ?? null,
+              createdAt: content.createdAt ?? null
+            };
+          } catch {
+            return { id: path2.basename(f, ".json"), status: null, flowName: null, createdAt: null };
+          }
+        });
+        return text(JSON.stringify({ total: proposals.length, proposals }, null, 2));
+      }
+      case "get_repair_proposal": {
+        const { proposalId } = toolArgs;
+        const repairsDir = path2.join(process.cwd(), ".ghostrun", "proposals", "repairs");
+        if (!fs2.existsSync(repairsDir)) return error("No repair proposals directory found.");
+        const files = fs2.readdirSync(repairsDir).filter((f) => f.endsWith(".json"));
+        const match = files.find((f) => path2.basename(f, ".json").startsWith(proposalId) || f.startsWith(proposalId));
+        if (!match) return error(`Repair proposal not found: ${proposalId}`);
+        try {
+          const content = JSON.parse(fs2.readFileSync(path2.join(repairsDir, match), "utf8"));
+          return text(JSON.stringify(content, null, 2));
+        } catch {
+          return error(`Failed to read repair proposal: ${match}`);
+        }
+      }
+      case "get_ai_usage": {
+        const usageDir = path2.join(process.cwd(), ".ghostrun", "ai", "usage");
+        if (!fs2.existsSync(usageDir)) return text(JSON.stringify({ totalTokens: 0, totalCost: 0, sessions: 0, lastSessions: [] }, null, 2));
+        const files = fs2.readdirSync(usageDir).filter((f) => f.endsWith(".json")).sort();
+        let totalInputTokens = 0;
+        let totalOutputTokens = 0;
+        let totalCost = 0;
+        const sessions = [];
+        for (const f of files) {
+          try {
+            const record = JSON.parse(fs2.readFileSync(path2.join(usageDir, f), "utf8"));
+            totalInputTokens += record.inputTokens || 0;
+            totalOutputTokens += record.outputTokens || 0;
+            totalCost += record.cost || 0;
+            sessions.push(record);
+          } catch {
+          }
+        }
+        const lastSessions = sessions.slice(-10).map((s) => ({
+          sessionId: s.sessionId ?? s.id ?? null,
+          model: s.model ?? null,
+          inputTokens: s.inputTokens ?? 0,
+          outputTokens: s.outputTokens ?? 0,
+          cost: s.cost ?? 0,
+          createdAt: s.createdAt ?? s.timestamp ?? null
+        }));
+        return text(JSON.stringify({
+          totalInputTokens,
+          totalOutputTokens,
+          totalTokens: totalInputTokens + totalOutputTokens,
+          totalCost: Math.round(totalCost * 1e6) / 1e6,
+          sessions: sessions.length,
+          lastSessions
+        }, null, 2));
+      }
+      case "author_flow": {
+        const { description, baseUrl, profile, preview } = toolArgs;
+        if (!description?.trim()) return error("description is required");
+        const cliArgs = ["author", "create", description.trim(), "--output", "json"];
+        if (baseUrl) cliArgs.push("--base-url", baseUrl);
+        if (profile) cliArgs.push("--profile", profile);
+        if (preview) cliArgs.push("--preview");
+        try {
+          const result = await runCliJson(cliArgs);
+          return text(JSON.stringify(result, null, 2));
+        } catch (err) {
+          return error(err instanceof Error ? err.message : String(err));
+        }
       }
       default:
         return error(`Unknown tool: ${name}`);

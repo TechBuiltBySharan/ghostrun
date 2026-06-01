@@ -1,15 +1,42 @@
 {
   "name": "ghostrun-cli",
-  "version": "1.0.4",
+  "version": "2.0.0-alpha.3",
   "description": "Local-first CLI for browser automation, API testing, and load testing",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TechBuiltBySharan/ghostrun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TechBuiltBySharan/ghostrun/issues"
+  },
+  "homepage": "https://github.com/TechBuiltBySharan/ghostrun#readme",
   "main": "ghostrun.js",
+  "files": [
+    "ghostrun.js",
+    "mcp-server.js",
+    "README.md",
+    "AGENTS.md",
+    "MCP-SETUP.md",
+    "REFERENCE.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "templates/",
+    "scripts/author-benchmark.mjs"
+  ],
   "bin": {
-    "ghostrun": "./ghostrun.js"
+    "ghostrun": "./ghostrun.js",
+    "ghostrun-mcp": "./mcp-server.js"
   },
   "scripts": {
-    "build": "npx tsc -p apps/cli/tsconfig.json",
+    "build": "npm run typecheck && npm run build:bin",
+    "build:bin": "esbuild ghostrun.ts --bundle --platform=node --format=cjs --target=node18 --packages=external --outfile=ghostrun.js && esbuild mcp-server.ts --bundle --platform=node --format=cjs --target=node18 --packages=external --outfile=mcp-server.js && chmod +x ghostrun.js mcp-server.js",
     "dev": "npx tsx ghostrun.ts",
     "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:e2e": "vitest run tests/e2e",
+    "test:api": "vitest run tests/e2e/api.test.ts",
+    "test:browser": "vitest run tests/e2e/browser.test.ts",
+    "test:ci": "npm run test:unit && npm run test:e2e",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:flows": "node scripts/comprehensive-reliability-test.mjs",
@@ -18,37 +45,65 @@
     "test:visual": "node scripts/run-visual-tests.mjs",
     "test:benchmark": "node scripts/run-benchmark.mjs",
     "test:all": "npm run test && npm run test:flows",
+    "benchmark:author": "node scripts/author-benchmark.mjs --dry-run",
     "validate": "npm run build && npm run test",
+    "publish:check": "node scripts/publish-safety-check.mjs",
+    "prepublishOnly": "npm run build && npm run publish:check",
     "lint": "eslint . --ext .ts,.js,.mjs",
     "lint:fix": "eslint . --ext .ts,.js,.mjs --fix",
     "format": "prettier --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.release.json",
+    "typecheck:all": "tsc --noEmit"
   },
-  "keywords": ["browser-automation", "api-testing", "playwright", "cli"],
+  "keywords": [
+    "qa-agent",
+    "qa-automation",
+    "test-agent",
+    "ai-testing",
+    "browser-automation",
+    "api-testing",
+    "playwright",
+    "cli",
+    "mcp",
+    "mcp-server",
+    "test-automation",
+    "load-testing",
+    "regression-testing",
+    "e2e",
+    "local-first"
+  ],
   "license": "MIT",
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
-    "@clack/prompts": "^0.7.0",
-    "better-sqlite3": "^11.7.0",
-    "chalk": "^5.3.0",
+    "@anthropic-ai/sdk": "^0.37.0",
+    "@clack/prompts": "^1.2.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^9.6.0",
+    "chalk": "^4.1.2",
     "keytar": "^7.9.0",
+    "node-cron": "^4.2.1",
     "ollama": "^0.5.14",
-    "playwright": "^1.50.0",
-    "uuid": "^11.0.5",
+    "pixelmatch": "^7.1.0",
+    "playwright": "^1.41.0",
+    "pngjs": "^7.0.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^22.10.7",
-    "@types/uuid": "^10.0.0",
-    "@vitest/coverage-v8": "^3.0.0",
-    "@vitest/ui": "^3.0.0",
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.11.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/pngjs": "^6.0.5",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
+    "@vitest/coverage-v8": "^4.1.4",
+    "electron": "^41.2.0",
+    "esbuild": "^0.27.0",
     "eslint": "^9.18.0",
     "prettier": "^3.4.2",
-    "typescript": "^5.7.2",
-    "vitest": "^3.0.0"
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.4"
   }
 }

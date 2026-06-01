@@ -2,7 +2,14 @@
  * Event Capture - Capture browser events during recording
  */
 
-import type { RecordedAction, ActionType, ActionTarget, ElementSelector, ElementSnapshot } from '@ghostrun/core';
+import type {
+  RecordedAction,
+  ActionType,
+  ElementSelector,
+  ElementSnapshot,
+  KeyModifier,
+  SelectorStrategy,
+} from '@ghostrun/core';
 
 export interface EventCaptureConfig {
   captureClicks?: boolean;
@@ -148,7 +155,7 @@ export class EventCapture {
 
     // Click events
     if (this.config.captureClicks) {
-      const clickHandler = this.handleClick.bind(this);
+      const clickHandler: EventListener = (event) => this.handleClick(event as MouseEvent);
       this.boundHandlers.click = clickHandler;
       document.addEventListener('click', clickHandler, true);
       document.addEventListener('dblclick', clickHandler, true);
@@ -157,21 +164,21 @@ export class EventCapture {
 
     // Input events
     if (this.config.captureInputs) {
-      const inputHandler = this.handleInput.bind(this);
+      const inputHandler: EventListener = (event) => this.handleInput(event);
       this.boundHandlers.input = inputHandler;
       document.addEventListener('input', inputHandler, true);
       document.addEventListener('change', inputHandler, true);
     }
 
     // Keyboard events
-    const keyHandler = this.handleKeydown.bind(this);
+    const keyHandler: EventListener = (event) => this.handleKeydown(event as KeyboardEvent);
     this.boundHandlers.keydown = keyHandler;
     document.addEventListener('keydown', keyHandler, true);
 
     // Navigation events
     if (this.config.captureNavigation) {
-      const popstateHandler = this.handlePopstate.bind(this);
-      const hashchangeHandler = this.handleHashchange.bind(this);
+      const popstateHandler: EventListener = () => this.handlePopstate();
+      const hashchangeHandler: EventListener = () => this.handleHashchange();
       this.boundHandlers.popstate = popstateHandler;
       this.boundHandlers.hashchange = hashchangeHandler;
       window.addEventListener('popstate', popstateHandler);
@@ -246,7 +253,7 @@ export class EventCapture {
     if (target instanceof HTMLSelectElement) {
       actionType = 'select';
       value = target.value;
-    } else if (target.type === 'checkbox' || target.type === 'radio') {
+    } else if (target instanceof HTMLInputElement && (target.type === 'checkbox' || target.type === 'radio')) {
       actionType = target.checked ? 'check' : 'uncheck';
     } else {
       value = target.value;
@@ -306,7 +313,7 @@ export class EventCapture {
     target: HTMLElement,
     value?: string,
     coordinates?: { x: number; y: number },
-    modifiers?: string[]
+    modifiers?: KeyModifier[]
   ): RecordedAction {
     const selector = this.generateSelector(target);
     const element = this.captureElementSnapshot(target);
@@ -321,7 +328,7 @@ export class EventCapture {
         coordinates,
       },
       value,
-      modifiers: modifiers as ActionType[],
+      modifiers,
     };
   }
 
@@ -329,7 +336,7 @@ export class EventCapture {
    * Generate selector for element
    */
   private generateSelector(target: HTMLElement): ElementSelector {
-    const strategies: Array<{ type: string; value: string; priority: number }> = [];
+    const strategies: SelectorStrategy[] = [];
 
     // Test ID
     if (target.id) {
@@ -479,7 +486,7 @@ export class EventCapture {
   /**
    * Get key modifier
    */
-  private getKeyModifier(event: KeyboardEvent): string {
+  private getKeyModifier(event: KeyboardEvent): KeyModifier {
     if (event.ctrlKey || event.metaKey) return 'ControlOrMeta';
     if (event.shiftKey) return 'Shift';
     if (event.altKey) return 'Alt';

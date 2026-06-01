@@ -38,6 +38,7 @@ export interface ConsoleLog {
   message: string;
   location?: string;
   args?: unknown[];
+  stack?: string;
 }
 
 /**
@@ -91,6 +92,22 @@ export type StepErrorType =
   | 'network_error'
   | 'slot_missing'
   | 'validation_failed'
+  | 'unknown_action'
+  | 'missing_value'
+  | 'click_failed'
+  | 'dblclick_failed'
+  | 'rightclick_failed'
+  | 'type_failed'
+  | 'fill_failed'
+  | 'select_failed'
+  | 'check_failed'
+  | 'uncheck_failed'
+  | 'hover_failed'
+  | 'press_failed'
+  | 'goback_failed'
+  | 'goforward_failed'
+  | 'refresh_failed'
+  | 'screenshot_failed'
   | 'unknown';
 
 /**

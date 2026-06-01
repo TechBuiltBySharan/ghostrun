@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -7,9 +8,6 @@ var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __esm = (fn, res) => function __init() {
   return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-};
-var __commonJS = (cb, mod) => function __require() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 var __export = (target, all) => {
   for (var name in all)
@@ -32,3627 +30,406 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/pngjs/lib/chunkstream.js
-var require_chunkstream = __commonJS({
-  "node_modules/pngjs/lib/chunkstream.js"(exports2, module2) {
-    "use strict";
-    var util = require("util");
-    var Stream = require("stream");
-    var ChunkStream = module2.exports = function() {
-      Stream.call(this);
-      this._buffers = [];
-      this._buffered = 0;
-      this._reads = [];
-      this._paused = false;
-      this._encoding = "utf8";
-      this.writable = true;
-    };
-    util.inherits(ChunkStream, Stream);
-    ChunkStream.prototype.read = function(length, callback) {
-      this._reads.push({
-        length: Math.abs(length),
-        // if length < 0 then at most this length
-        allowLess: length < 0,
-        func: callback
-      });
-      process.nextTick(
-        function() {
-          this._process();
-          if (this._paused && this._reads && this._reads.length > 0) {
-            this._paused = false;
-            this.emit("drain");
-          }
-        }.bind(this)
-      );
-    };
-    ChunkStream.prototype.write = function(data, encoding) {
-      if (!this.writable) {
-        this.emit("error", new Error("Stream not writable"));
-        return false;
-      }
-      let dataBuffer;
-      if (Buffer.isBuffer(data)) {
-        dataBuffer = data;
-      } else {
-        dataBuffer = Buffer.from(data, encoding || this._encoding);
-      }
-      this._buffers.push(dataBuffer);
-      this._buffered += dataBuffer.length;
-      this._process();
-      if (this._reads && this._reads.length === 0) {
-        this._paused = true;
-      }
-      return this.writable && !this._paused;
-    };
-    ChunkStream.prototype.end = function(data, encoding) {
-      if (data) {
-        this.write(data, encoding);
-      }
-      this.writable = false;
-      if (!this._buffers) {
-        return;
-      }
-      if (this._buffers.length === 0) {
-        this._end();
-      } else {
-        this._buffers.push(null);
-        this._process();
-      }
-    };
-    ChunkStream.prototype.destroySoon = ChunkStream.prototype.end;
-    ChunkStream.prototype._end = function() {
-      if (this._reads.length > 0) {
-        this.emit("error", new Error("Unexpected end of input"));
-      }
-      this.destroy();
-    };
-    ChunkStream.prototype.destroy = function() {
-      if (!this._buffers) {
-        return;
-      }
-      this.writable = false;
-      this._reads = null;
-      this._buffers = null;
-      this.emit("close");
-    };
-    ChunkStream.prototype._processReadAllowingLess = function(read) {
-      this._reads.shift();
-      let smallerBuf = this._buffers[0];
-      if (smallerBuf.length > read.length) {
-        this._buffered -= read.length;
-        this._buffers[0] = smallerBuf.slice(read.length);
-        read.func.call(this, smallerBuf.slice(0, read.length));
-      } else {
-        this._buffered -= smallerBuf.length;
-        this._buffers.shift();
-        read.func.call(this, smallerBuf);
-      }
-    };
-    ChunkStream.prototype._processRead = function(read) {
-      this._reads.shift();
-      let pos = 0;
-      let count = 0;
-      let data = Buffer.alloc(read.length);
-      while (pos < read.length) {
-        let buf = this._buffers[count++];
-        let len = Math.min(buf.length, read.length - pos);
-        buf.copy(data, pos, 0, len);
-        pos += len;
-        if (len !== buf.length) {
-          this._buffers[--count] = buf.slice(len);
-        }
-      }
-      if (count > 0) {
-        this._buffers.splice(0, count);
-      }
-      this._buffered -= read.length;
-      read.func.call(this, data);
-    };
-    ChunkStream.prototype._process = function() {
-      try {
-        while (this._buffered > 0 && this._reads && this._reads.length > 0) {
-          let read = this._reads[0];
-          if (read.allowLess) {
-            this._processReadAllowingLess(read);
-          } else if (this._buffered >= read.length) {
-            this._processRead(read);
-          } else {
-            break;
-          }
-        }
-        if (this._buffers && !this.writable) {
-          this._end();
-        }
-      } catch (ex) {
-        this.emit("error", ex);
-      }
-    };
-  }
-});
-
-// node_modules/pngjs/lib/interlace.js
-var require_interlace = __commonJS({
-  "node_modules/pngjs/lib/interlace.js"(exports2) {
-    "use strict";
-    var imagePasses = [
-      {
-        // pass 1 - 1px
-        x: [0],
-        y: [0]
-      },
-      {
-        // pass 2 - 1px
-        x: [4],
-        y: [0]
-      },
-      {
-        // pass 3 - 2px
-        x: [0, 4],
-        y: [4]
-      },
-      {
-        // pass 4 - 4px
-        x: [2, 6],
-        y: [0, 4]
-      },
-      {
-        // pass 5 - 8px
-        x: [0, 2, 4, 6],
-        y: [2, 6]
-      },
-      {
-        // pass 6 - 16px
-        x: [1, 3, 5, 7],
-        y: [0, 2, 4, 6]
-      },
-      {
-        // pass 7 - 32px
-        x: [0, 1, 2, 3, 4, 5, 6, 7],
-        y: [1, 3, 5, 7]
-      }
-    ];
-    exports2.getImagePasses = function(width, height) {
-      let images = [];
-      let xLeftOver = width % 8;
-      let yLeftOver = height % 8;
-      let xRepeats = (width - xLeftOver) / 8;
-      let yRepeats = (height - yLeftOver) / 8;
-      for (let i = 0; i < imagePasses.length; i++) {
-        let pass = imagePasses[i];
-        let passWidth = xRepeats * pass.x.length;
-        let passHeight = yRepeats * pass.y.length;
-        for (let j = 0; j < pass.x.length; j++) {
-          if (pass.x[j] < xLeftOver) {
-            passWidth++;
-          } else {
-            break;
-          }
-        }
-        for (let j = 0; j < pass.y.length; j++) {
-          if (pass.y[j] < yLeftOver) {
-            passHeight++;
-          } else {
-            break;
-          }
-        }
-        if (passWidth > 0 && passHeight > 0) {
-          images.push({ width: passWidth, height: passHeight, index: i });
-        }
-      }
-      return images;
-    };
-    exports2.getInterlaceIterator = function(width) {
-      return function(x, y, pass) {
-        let outerXLeftOver = x % imagePasses[pass].x.length;
-        let outerX = (x - outerXLeftOver) / imagePasses[pass].x.length * 8 + imagePasses[pass].x[outerXLeftOver];
-        let outerYLeftOver = y % imagePasses[pass].y.length;
-        let outerY = (y - outerYLeftOver) / imagePasses[pass].y.length * 8 + imagePasses[pass].y[outerYLeftOver];
-        return outerX * 4 + outerY * width * 4;
-      };
-    };
-  }
-});
-
-// node_modules/pngjs/lib/paeth-predictor.js
-var require_paeth_predictor = __commonJS({
-  "node_modules/pngjs/lib/paeth-predictor.js"(exports2, module2) {
-    "use strict";
-    module2.exports = function paethPredictor(left, above, upLeft) {
-      let paeth = left + above - upLeft;
-      let pLeft = Math.abs(paeth - left);
-      let pAbove = Math.abs(paeth - above);
-      let pUpLeft = Math.abs(paeth - upLeft);
-      if (pLeft <= pAbove && pLeft <= pUpLeft) {
-        return left;
-      }
-      if (pAbove <= pUpLeft) {
-        return above;
-      }
-      return upLeft;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/filter-parse.js
-var require_filter_parse = __commonJS({
-  "node_modules/pngjs/lib/filter-parse.js"(exports2, module2) {
-    "use strict";
-    var interlaceUtils = require_interlace();
-    var paethPredictor = require_paeth_predictor();
-    function getByteWidth(width, bpp, depth) {
-      let byteWidth = width * bpp;
-      if (depth !== 8) {
-        byteWidth = Math.ceil(byteWidth / (8 / depth));
-      }
-      return byteWidth;
-    }
-    var Filter = module2.exports = function(bitmapInfo, dependencies) {
-      let width = bitmapInfo.width;
-      let height = bitmapInfo.height;
-      let interlace = bitmapInfo.interlace;
-      let bpp = bitmapInfo.bpp;
-      let depth = bitmapInfo.depth;
-      this.read = dependencies.read;
-      this.write = dependencies.write;
-      this.complete = dependencies.complete;
-      this._imageIndex = 0;
-      this._images = [];
-      if (interlace) {
-        let passes = interlaceUtils.getImagePasses(width, height);
-        for (let i = 0; i < passes.length; i++) {
-          this._images.push({
-            byteWidth: getByteWidth(passes[i].width, bpp, depth),
-            height: passes[i].height,
-            lineIndex: 0
-          });
-        }
-      } else {
-        this._images.push({
-          byteWidth: getByteWidth(width, bpp, depth),
-          height,
-          lineIndex: 0
-        });
-      }
-      if (depth === 8) {
-        this._xComparison = bpp;
-      } else if (depth === 16) {
-        this._xComparison = bpp * 2;
-      } else {
-        this._xComparison = 1;
-      }
-    };
-    Filter.prototype.start = function() {
-      this.read(
-        this._images[this._imageIndex].byteWidth + 1,
-        this._reverseFilterLine.bind(this)
-      );
-    };
-    Filter.prototype._unFilterType1 = function(rawData, unfilteredLine, byteWidth) {
-      let xComparison = this._xComparison;
-      let xBiggerThan = xComparison - 1;
-      for (let x = 0; x < byteWidth; x++) {
-        let rawByte = rawData[1 + x];
-        let f1Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
-        unfilteredLine[x] = rawByte + f1Left;
-      }
-    };
-    Filter.prototype._unFilterType2 = function(rawData, unfilteredLine, byteWidth) {
-      let lastLine = this._lastLine;
-      for (let x = 0; x < byteWidth; x++) {
-        let rawByte = rawData[1 + x];
-        let f2Up = lastLine ? lastLine[x] : 0;
-        unfilteredLine[x] = rawByte + f2Up;
-      }
-    };
-    Filter.prototype._unFilterType3 = function(rawData, unfilteredLine, byteWidth) {
-      let xComparison = this._xComparison;
-      let xBiggerThan = xComparison - 1;
-      let lastLine = this._lastLine;
-      for (let x = 0; x < byteWidth; x++) {
-        let rawByte = rawData[1 + x];
-        let f3Up = lastLine ? lastLine[x] : 0;
-        let f3Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
-        let f3Add = Math.floor((f3Left + f3Up) / 2);
-        unfilteredLine[x] = rawByte + f3Add;
-      }
-    };
-    Filter.prototype._unFilterType4 = function(rawData, unfilteredLine, byteWidth) {
-      let xComparison = this._xComparison;
-      let xBiggerThan = xComparison - 1;
-      let lastLine = this._lastLine;
-      for (let x = 0; x < byteWidth; x++) {
-        let rawByte = rawData[1 + x];
-        let f4Up = lastLine ? lastLine[x] : 0;
-        let f4Left = x > xBiggerThan ? unfilteredLine[x - xComparison] : 0;
-        let f4UpLeft = x > xBiggerThan && lastLine ? lastLine[x - xComparison] : 0;
-        let f4Add = paethPredictor(f4Left, f4Up, f4UpLeft);
-        unfilteredLine[x] = rawByte + f4Add;
-      }
-    };
-    Filter.prototype._reverseFilterLine = function(rawData) {
-      let filter = rawData[0];
-      let unfilteredLine;
-      let currentImage = this._images[this._imageIndex];
-      let byteWidth = currentImage.byteWidth;
-      if (filter === 0) {
-        unfilteredLine = rawData.slice(1, byteWidth + 1);
-      } else {
-        unfilteredLine = Buffer.alloc(byteWidth);
-        switch (filter) {
-          case 1:
-            this._unFilterType1(rawData, unfilteredLine, byteWidth);
-            break;
-          case 2:
-            this._unFilterType2(rawData, unfilteredLine, byteWidth);
-            break;
-          case 3:
-            this._unFilterType3(rawData, unfilteredLine, byteWidth);
-            break;
-          case 4:
-            this._unFilterType4(rawData, unfilteredLine, byteWidth);
-            break;
-          default:
-            throw new Error("Unrecognised filter type - " + filter);
-        }
-      }
-      this.write(unfilteredLine);
-      currentImage.lineIndex++;
-      if (currentImage.lineIndex >= currentImage.height) {
-        this._lastLine = null;
-        this._imageIndex++;
-        currentImage = this._images[this._imageIndex];
-      } else {
-        this._lastLine = unfilteredLine;
-      }
-      if (currentImage) {
-        this.read(currentImage.byteWidth + 1, this._reverseFilterLine.bind(this));
-      } else {
-        this._lastLine = null;
-        this.complete();
-      }
-    };
-  }
-});
-
-// node_modules/pngjs/lib/filter-parse-async.js
-var require_filter_parse_async = __commonJS({
-  "node_modules/pngjs/lib/filter-parse-async.js"(exports2, module2) {
-    "use strict";
-    var util = require("util");
-    var ChunkStream = require_chunkstream();
-    var Filter = require_filter_parse();
-    var FilterAsync = module2.exports = function(bitmapInfo) {
-      ChunkStream.call(this);
-      let buffers = [];
-      let that = this;
-      this._filter = new Filter(bitmapInfo, {
-        read: this.read.bind(this),
-        write: function(buffer) {
-          buffers.push(buffer);
-        },
-        complete: function() {
-          that.emit("complete", Buffer.concat(buffers));
-        }
-      });
-      this._filter.start();
-    };
-    util.inherits(FilterAsync, ChunkStream);
-  }
-});
-
-// node_modules/pngjs/lib/constants.js
-var require_constants = __commonJS({
-  "node_modules/pngjs/lib/constants.js"(exports2, module2) {
-    "use strict";
-    module2.exports = {
-      PNG_SIGNATURE: [137, 80, 78, 71, 13, 10, 26, 10],
-      TYPE_IHDR: 1229472850,
-      TYPE_IEND: 1229278788,
-      TYPE_IDAT: 1229209940,
-      TYPE_PLTE: 1347179589,
-      TYPE_tRNS: 1951551059,
-      // eslint-disable-line camelcase
-      TYPE_gAMA: 1732332865,
-      // eslint-disable-line camelcase
-      // color-type bits
-      COLORTYPE_GRAYSCALE: 0,
-      COLORTYPE_PALETTE: 1,
-      COLORTYPE_COLOR: 2,
-      COLORTYPE_ALPHA: 4,
-      // e.g. grayscale and alpha
-      // color-type combinations
-      COLORTYPE_PALETTE_COLOR: 3,
-      COLORTYPE_COLOR_ALPHA: 6,
-      COLORTYPE_TO_BPP_MAP: {
-        0: 1,
-        2: 3,
-        3: 1,
-        4: 2,
-        6: 4
-      },
-      GAMMA_DIVISION: 1e5
-    };
-  }
-});
-
-// node_modules/pngjs/lib/crc.js
-var require_crc = __commonJS({
-  "node_modules/pngjs/lib/crc.js"(exports2, module2) {
-    "use strict";
-    var crcTable = [];
-    (function() {
-      for (let i = 0; i < 256; i++) {
-        let currentCrc = i;
-        for (let j = 0; j < 8; j++) {
-          if (currentCrc & 1) {
-            currentCrc = 3988292384 ^ currentCrc >>> 1;
-          } else {
-            currentCrc = currentCrc >>> 1;
-          }
-        }
-        crcTable[i] = currentCrc;
-      }
-    })();
-    var CrcCalculator = module2.exports = function() {
-      this._crc = -1;
-    };
-    CrcCalculator.prototype.write = function(data) {
-      for (let i = 0; i < data.length; i++) {
-        this._crc = crcTable[(this._crc ^ data[i]) & 255] ^ this._crc >>> 8;
-      }
-      return true;
-    };
-    CrcCalculator.prototype.crc32 = function() {
-      return this._crc ^ -1;
-    };
-    CrcCalculator.crc32 = function(buf) {
-      let crc = -1;
-      for (let i = 0; i < buf.length; i++) {
-        crc = crcTable[(crc ^ buf[i]) & 255] ^ crc >>> 8;
-      }
-      return crc ^ -1;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/parser.js
-var require_parser = __commonJS({
-  "node_modules/pngjs/lib/parser.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    var CrcCalculator = require_crc();
-    var Parser = module2.exports = function(options, dependencies) {
-      this._options = options;
-      options.checkCRC = options.checkCRC !== false;
-      this._hasIHDR = false;
-      this._hasIEND = false;
-      this._emittedHeadersFinished = false;
-      this._palette = [];
-      this._colorType = 0;
-      this._chunks = {};
-      this._chunks[constants.TYPE_IHDR] = this._handleIHDR.bind(this);
-      this._chunks[constants.TYPE_IEND] = this._handleIEND.bind(this);
-      this._chunks[constants.TYPE_IDAT] = this._handleIDAT.bind(this);
-      this._chunks[constants.TYPE_PLTE] = this._handlePLTE.bind(this);
-      this._chunks[constants.TYPE_tRNS] = this._handleTRNS.bind(this);
-      this._chunks[constants.TYPE_gAMA] = this._handleGAMA.bind(this);
-      this.read = dependencies.read;
-      this.error = dependencies.error;
-      this.metadata = dependencies.metadata;
-      this.gamma = dependencies.gamma;
-      this.transColor = dependencies.transColor;
-      this.palette = dependencies.palette;
-      this.parsed = dependencies.parsed;
-      this.inflateData = dependencies.inflateData;
-      this.finished = dependencies.finished;
-      this.simpleTransparency = dependencies.simpleTransparency;
-      this.headersFinished = dependencies.headersFinished || function() {
-      };
-    };
-    Parser.prototype.start = function() {
-      this.read(constants.PNG_SIGNATURE.length, this._parseSignature.bind(this));
-    };
-    Parser.prototype._parseSignature = function(data) {
-      let signature = constants.PNG_SIGNATURE;
-      for (let i = 0; i < signature.length; i++) {
-        if (data[i] !== signature[i]) {
-          this.error(new Error("Invalid file signature"));
-          return;
-        }
-      }
-      this.read(8, this._parseChunkBegin.bind(this));
-    };
-    Parser.prototype._parseChunkBegin = function(data) {
-      let length = data.readUInt32BE(0);
-      let type = data.readUInt32BE(4);
-      let name = "";
-      for (let i = 4; i < 8; i++) {
-        name += String.fromCharCode(data[i]);
-      }
-      let ancillary = Boolean(data[4] & 32);
-      if (!this._hasIHDR && type !== constants.TYPE_IHDR) {
-        this.error(new Error("Expected IHDR on beggining"));
-        return;
-      }
-      this._crc = new CrcCalculator();
-      this._crc.write(Buffer.from(name));
-      if (this._chunks[type]) {
-        return this._chunks[type](length);
-      }
-      if (!ancillary) {
-        this.error(new Error("Unsupported critical chunk type " + name));
-        return;
-      }
-      this.read(length + 4, this._skipChunk.bind(this));
-    };
-    Parser.prototype._skipChunk = function() {
-      this.read(8, this._parseChunkBegin.bind(this));
-    };
-    Parser.prototype._handleChunkEnd = function() {
-      this.read(4, this._parseChunkEnd.bind(this));
-    };
-    Parser.prototype._parseChunkEnd = function(data) {
-      let fileCrc = data.readInt32BE(0);
-      let calcCrc = this._crc.crc32();
-      if (this._options.checkCRC && calcCrc !== fileCrc) {
-        this.error(new Error("Crc error - " + fileCrc + " - " + calcCrc));
-        return;
-      }
-      if (!this._hasIEND) {
-        this.read(8, this._parseChunkBegin.bind(this));
-      }
-    };
-    Parser.prototype._handleIHDR = function(length) {
-      this.read(length, this._parseIHDR.bind(this));
-    };
-    Parser.prototype._parseIHDR = function(data) {
-      this._crc.write(data);
-      let width = data.readUInt32BE(0);
-      let height = data.readUInt32BE(4);
-      let depth = data[8];
-      let colorType = data[9];
-      let compr = data[10];
-      let filter = data[11];
-      let interlace = data[12];
-      if (depth !== 8 && depth !== 4 && depth !== 2 && depth !== 1 && depth !== 16) {
-        this.error(new Error("Unsupported bit depth " + depth));
-        return;
-      }
-      if (!(colorType in constants.COLORTYPE_TO_BPP_MAP)) {
-        this.error(new Error("Unsupported color type"));
-        return;
-      }
-      if (compr !== 0) {
-        this.error(new Error("Unsupported compression method"));
-        return;
-      }
-      if (filter !== 0) {
-        this.error(new Error("Unsupported filter method"));
-        return;
-      }
-      if (interlace !== 0 && interlace !== 1) {
-        this.error(new Error("Unsupported interlace method"));
-        return;
-      }
-      this._colorType = colorType;
-      let bpp = constants.COLORTYPE_TO_BPP_MAP[this._colorType];
-      this._hasIHDR = true;
-      this.metadata({
-        width,
-        height,
-        depth,
-        interlace: Boolean(interlace),
-        palette: Boolean(colorType & constants.COLORTYPE_PALETTE),
-        color: Boolean(colorType & constants.COLORTYPE_COLOR),
-        alpha: Boolean(colorType & constants.COLORTYPE_ALPHA),
-        bpp,
-        colorType
-      });
-      this._handleChunkEnd();
-    };
-    Parser.prototype._handlePLTE = function(length) {
-      this.read(length, this._parsePLTE.bind(this));
-    };
-    Parser.prototype._parsePLTE = function(data) {
-      this._crc.write(data);
-      let entries = Math.floor(data.length / 3);
-      for (let i = 0; i < entries; i++) {
-        this._palette.push([data[i * 3], data[i * 3 + 1], data[i * 3 + 2], 255]);
-      }
-      this.palette(this._palette);
-      this._handleChunkEnd();
-    };
-    Parser.prototype._handleTRNS = function(length) {
-      this.simpleTransparency();
-      this.read(length, this._parseTRNS.bind(this));
-    };
-    Parser.prototype._parseTRNS = function(data) {
-      this._crc.write(data);
-      if (this._colorType === constants.COLORTYPE_PALETTE_COLOR) {
-        if (this._palette.length === 0) {
-          this.error(new Error("Transparency chunk must be after palette"));
-          return;
-        }
-        if (data.length > this._palette.length) {
-          this.error(new Error("More transparent colors than palette size"));
-          return;
-        }
-        for (let i = 0; i < data.length; i++) {
-          this._palette[i][3] = data[i];
-        }
-        this.palette(this._palette);
-      }
-      if (this._colorType === constants.COLORTYPE_GRAYSCALE) {
-        this.transColor([data.readUInt16BE(0)]);
-      }
-      if (this._colorType === constants.COLORTYPE_COLOR) {
-        this.transColor([
-          data.readUInt16BE(0),
-          data.readUInt16BE(2),
-          data.readUInt16BE(4)
-        ]);
-      }
-      this._handleChunkEnd();
-    };
-    Parser.prototype._handleGAMA = function(length) {
-      this.read(length, this._parseGAMA.bind(this));
-    };
-    Parser.prototype._parseGAMA = function(data) {
-      this._crc.write(data);
-      this.gamma(data.readUInt32BE(0) / constants.GAMMA_DIVISION);
-      this._handleChunkEnd();
-    };
-    Parser.prototype._handleIDAT = function(length) {
-      if (!this._emittedHeadersFinished) {
-        this._emittedHeadersFinished = true;
-        this.headersFinished();
-      }
-      this.read(-length, this._parseIDAT.bind(this, length));
-    };
-    Parser.prototype._parseIDAT = function(length, data) {
-      this._crc.write(data);
-      if (this._colorType === constants.COLORTYPE_PALETTE_COLOR && this._palette.length === 0) {
-        throw new Error("Expected palette not found");
-      }
-      this.inflateData(data);
-      let leftOverLength = length - data.length;
-      if (leftOverLength > 0) {
-        this._handleIDAT(leftOverLength);
-      } else {
-        this._handleChunkEnd();
-      }
-    };
-    Parser.prototype._handleIEND = function(length) {
-      this.read(length, this._parseIEND.bind(this));
-    };
-    Parser.prototype._parseIEND = function(data) {
-      this._crc.write(data);
-      this._hasIEND = true;
-      this._handleChunkEnd();
-      if (this.finished) {
-        this.finished();
-      }
-    };
-  }
-});
-
-// node_modules/pngjs/lib/bitmapper.js
-var require_bitmapper = __commonJS({
-  "node_modules/pngjs/lib/bitmapper.js"(exports2) {
-    "use strict";
-    var interlaceUtils = require_interlace();
-    var pixelBppMapper = [
-      // 0 - dummy entry
-      function() {
-      },
-      // 1 - L
-      // 0: 0, 1: 0, 2: 0, 3: 0xff
-      function(pxData, data, pxPos, rawPos) {
-        if (rawPos === data.length) {
-          throw new Error("Ran out of data");
-        }
-        let pixel = data[rawPos];
-        pxData[pxPos] = pixel;
-        pxData[pxPos + 1] = pixel;
-        pxData[pxPos + 2] = pixel;
-        pxData[pxPos + 3] = 255;
-      },
-      // 2 - LA
-      // 0: 0, 1: 0, 2: 0, 3: 1
-      function(pxData, data, pxPos, rawPos) {
-        if (rawPos + 1 >= data.length) {
-          throw new Error("Ran out of data");
-        }
-        let pixel = data[rawPos];
-        pxData[pxPos] = pixel;
-        pxData[pxPos + 1] = pixel;
-        pxData[pxPos + 2] = pixel;
-        pxData[pxPos + 3] = data[rawPos + 1];
-      },
-      // 3 - RGB
-      // 0: 0, 1: 1, 2: 2, 3: 0xff
-      function(pxData, data, pxPos, rawPos) {
-        if (rawPos + 2 >= data.length) {
-          throw new Error("Ran out of data");
-        }
-        pxData[pxPos] = data[rawPos];
-        pxData[pxPos + 1] = data[rawPos + 1];
-        pxData[pxPos + 2] = data[rawPos + 2];
-        pxData[pxPos + 3] = 255;
-      },
-      // 4 - RGBA
-      // 0: 0, 1: 1, 2: 2, 3: 3
-      function(pxData, data, pxPos, rawPos) {
-        if (rawPos + 3 >= data.length) {
-          throw new Error("Ran out of data");
-        }
-        pxData[pxPos] = data[rawPos];
-        pxData[pxPos + 1] = data[rawPos + 1];
-        pxData[pxPos + 2] = data[rawPos + 2];
-        pxData[pxPos + 3] = data[rawPos + 3];
-      }
-    ];
-    var pixelBppCustomMapper = [
-      // 0 - dummy entry
-      function() {
-      },
-      // 1 - L
-      // 0: 0, 1: 0, 2: 0, 3: 0xff
-      function(pxData, pixelData, pxPos, maxBit) {
-        let pixel = pixelData[0];
-        pxData[pxPos] = pixel;
-        pxData[pxPos + 1] = pixel;
-        pxData[pxPos + 2] = pixel;
-        pxData[pxPos + 3] = maxBit;
-      },
-      // 2 - LA
-      // 0: 0, 1: 0, 2: 0, 3: 1
-      function(pxData, pixelData, pxPos) {
-        let pixel = pixelData[0];
-        pxData[pxPos] = pixel;
-        pxData[pxPos + 1] = pixel;
-        pxData[pxPos + 2] = pixel;
-        pxData[pxPos + 3] = pixelData[1];
-      },
-      // 3 - RGB
-      // 0: 0, 1: 1, 2: 2, 3: 0xff
-      function(pxData, pixelData, pxPos, maxBit) {
-        pxData[pxPos] = pixelData[0];
-        pxData[pxPos + 1] = pixelData[1];
-        pxData[pxPos + 2] = pixelData[2];
-        pxData[pxPos + 3] = maxBit;
-      },
-      // 4 - RGBA
-      // 0: 0, 1: 1, 2: 2, 3: 3
-      function(pxData, pixelData, pxPos) {
-        pxData[pxPos] = pixelData[0];
-        pxData[pxPos + 1] = pixelData[1];
-        pxData[pxPos + 2] = pixelData[2];
-        pxData[pxPos + 3] = pixelData[3];
-      }
-    ];
-    function bitRetriever(data, depth) {
-      let leftOver = [];
-      let i = 0;
-      function split() {
-        if (i === data.length) {
-          throw new Error("Ran out of data");
-        }
-        let byte = data[i];
-        i++;
-        let byte8, byte7, byte6, byte5, byte4, byte3, byte2, byte1;
-        switch (depth) {
-          default:
-            throw new Error("unrecognised depth");
-          case 16:
-            byte2 = data[i];
-            i++;
-            leftOver.push((byte << 8) + byte2);
-            break;
-          case 4:
-            byte2 = byte & 15;
-            byte1 = byte >> 4;
-            leftOver.push(byte1, byte2);
-            break;
-          case 2:
-            byte4 = byte & 3;
-            byte3 = byte >> 2 & 3;
-            byte2 = byte >> 4 & 3;
-            byte1 = byte >> 6 & 3;
-            leftOver.push(byte1, byte2, byte3, byte4);
-            break;
-          case 1:
-            byte8 = byte & 1;
-            byte7 = byte >> 1 & 1;
-            byte6 = byte >> 2 & 1;
-            byte5 = byte >> 3 & 1;
-            byte4 = byte >> 4 & 1;
-            byte3 = byte >> 5 & 1;
-            byte2 = byte >> 6 & 1;
-            byte1 = byte >> 7 & 1;
-            leftOver.push(byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8);
-            break;
-        }
-      }
-      return {
-        get: function(count) {
-          while (leftOver.length < count) {
-            split();
-          }
-          let returner = leftOver.slice(0, count);
-          leftOver = leftOver.slice(count);
-          return returner;
-        },
-        resetAfterLine: function() {
-          leftOver.length = 0;
-        },
-        end: function() {
-          if (i !== data.length) {
-            throw new Error("extra data found");
-          }
-        }
-      };
-    }
-    function mapImage8Bit(image, pxData, getPxPos, bpp, data, rawPos) {
-      let imageWidth = image.width;
-      let imageHeight = image.height;
-      let imagePass = image.index;
-      for (let y = 0; y < imageHeight; y++) {
-        for (let x = 0; x < imageWidth; x++) {
-          let pxPos = getPxPos(x, y, imagePass);
-          pixelBppMapper[bpp](pxData, data, pxPos, rawPos);
-          rawPos += bpp;
-        }
-      }
-      return rawPos;
-    }
-    function mapImageCustomBit(image, pxData, getPxPos, bpp, bits, maxBit) {
-      let imageWidth = image.width;
-      let imageHeight = image.height;
-      let imagePass = image.index;
-      for (let y = 0; y < imageHeight; y++) {
-        for (let x = 0; x < imageWidth; x++) {
-          let pixelData = bits.get(bpp);
-          let pxPos = getPxPos(x, y, imagePass);
-          pixelBppCustomMapper[bpp](pxData, pixelData, pxPos, maxBit);
-        }
-        bits.resetAfterLine();
-      }
-    }
-    exports2.dataToBitMap = function(data, bitmapInfo) {
-      let width = bitmapInfo.width;
-      let height = bitmapInfo.height;
-      let depth = bitmapInfo.depth;
-      let bpp = bitmapInfo.bpp;
-      let interlace = bitmapInfo.interlace;
-      let bits;
-      if (depth !== 8) {
-        bits = bitRetriever(data, depth);
-      }
-      let pxData;
-      if (depth <= 8) {
-        pxData = Buffer.alloc(width * height * 4);
-      } else {
-        pxData = new Uint16Array(width * height * 4);
-      }
-      let maxBit = Math.pow(2, depth) - 1;
-      let rawPos = 0;
-      let images;
-      let getPxPos;
-      if (interlace) {
-        images = interlaceUtils.getImagePasses(width, height);
-        getPxPos = interlaceUtils.getInterlaceIterator(width, height);
-      } else {
-        let nonInterlacedPxPos = 0;
-        getPxPos = function() {
-          let returner = nonInterlacedPxPos;
-          nonInterlacedPxPos += 4;
-          return returner;
-        };
-        images = [{ width, height }];
-      }
-      for (let imageIndex = 0; imageIndex < images.length; imageIndex++) {
-        if (depth === 8) {
-          rawPos = mapImage8Bit(
-            images[imageIndex],
-            pxData,
-            getPxPos,
-            bpp,
-            data,
-            rawPos
-          );
-        } else {
-          mapImageCustomBit(
-            images[imageIndex],
-            pxData,
-            getPxPos,
-            bpp,
-            bits,
-            maxBit
-          );
-        }
-      }
-      if (depth === 8) {
-        if (rawPos !== data.length) {
-          throw new Error("extra data found");
-        }
-      } else {
-        bits.end();
-      }
-      return pxData;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/format-normaliser.js
-var require_format_normaliser = __commonJS({
-  "node_modules/pngjs/lib/format-normaliser.js"(exports2, module2) {
-    "use strict";
-    function dePalette(indata, outdata, width, height, palette) {
-      let pxPos = 0;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let color = palette[indata[pxPos]];
-          if (!color) {
-            throw new Error("index " + indata[pxPos] + " not in palette");
-          }
-          for (let i = 0; i < 4; i++) {
-            outdata[pxPos + i] = color[i];
-          }
-          pxPos += 4;
-        }
-      }
-    }
-    function replaceTransparentColor(indata, outdata, width, height, transColor) {
-      let pxPos = 0;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let makeTrans = false;
-          if (transColor.length === 1) {
-            if (transColor[0] === indata[pxPos]) {
-              makeTrans = true;
-            }
-          } else if (transColor[0] === indata[pxPos] && transColor[1] === indata[pxPos + 1] && transColor[2] === indata[pxPos + 2]) {
-            makeTrans = true;
-          }
-          if (makeTrans) {
-            for (let i = 0; i < 4; i++) {
-              outdata[pxPos + i] = 0;
-            }
-          }
-          pxPos += 4;
-        }
-      }
-    }
-    function scaleDepth(indata, outdata, width, height, depth) {
-      let maxOutSample = 255;
-      let maxInSample = Math.pow(2, depth) - 1;
-      let pxPos = 0;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          for (let i = 0; i < 4; i++) {
-            outdata[pxPos + i] = Math.floor(
-              indata[pxPos + i] * maxOutSample / maxInSample + 0.5
-            );
-          }
-          pxPos += 4;
-        }
-      }
-    }
-    module2.exports = function(indata, imageData, skipRescale = false) {
-      let depth = imageData.depth;
-      let width = imageData.width;
-      let height = imageData.height;
-      let colorType = imageData.colorType;
-      let transColor = imageData.transColor;
-      let palette = imageData.palette;
-      let outdata = indata;
-      if (colorType === 3) {
-        dePalette(indata, outdata, width, height, palette);
-      } else {
-        if (transColor) {
-          replaceTransparentColor(indata, outdata, width, height, transColor);
-        }
-        if (depth !== 8 && !skipRescale) {
-          if (depth === 16) {
-            outdata = Buffer.alloc(width * height * 4);
-          }
-          scaleDepth(indata, outdata, width, height, depth);
-        }
-      }
-      return outdata;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/parser-async.js
-var require_parser_async = __commonJS({
-  "node_modules/pngjs/lib/parser-async.js"(exports2, module2) {
-    "use strict";
-    var util = require("util");
-    var zlib = require("zlib");
-    var ChunkStream = require_chunkstream();
-    var FilterAsync = require_filter_parse_async();
-    var Parser = require_parser();
-    var bitmapper = require_bitmapper();
-    var formatNormaliser = require_format_normaliser();
-    var ParserAsync = module2.exports = function(options) {
-      ChunkStream.call(this);
-      this._parser = new Parser(options, {
-        read: this.read.bind(this),
-        error: this._handleError.bind(this),
-        metadata: this._handleMetaData.bind(this),
-        gamma: this.emit.bind(this, "gamma"),
-        palette: this._handlePalette.bind(this),
-        transColor: this._handleTransColor.bind(this),
-        finished: this._finished.bind(this),
-        inflateData: this._inflateData.bind(this),
-        simpleTransparency: this._simpleTransparency.bind(this),
-        headersFinished: this._headersFinished.bind(this)
-      });
-      this._options = options;
-      this.writable = true;
-      this._parser.start();
-    };
-    util.inherits(ParserAsync, ChunkStream);
-    ParserAsync.prototype._handleError = function(err) {
-      this.emit("error", err);
-      this.writable = false;
-      this.destroy();
-      if (this._inflate && this._inflate.destroy) {
-        this._inflate.destroy();
-      }
-      if (this._filter) {
-        this._filter.destroy();
-        this._filter.on("error", function() {
-        });
-      }
-      this.errord = true;
-    };
-    ParserAsync.prototype._inflateData = function(data) {
-      if (!this._inflate) {
-        if (this._bitmapInfo.interlace) {
-          this._inflate = zlib.createInflate();
-          this._inflate.on("error", this.emit.bind(this, "error"));
-          this._filter.on("complete", this._complete.bind(this));
-          this._inflate.pipe(this._filter);
-        } else {
-          let rowSize = (this._bitmapInfo.width * this._bitmapInfo.bpp * this._bitmapInfo.depth + 7 >> 3) + 1;
-          let imageSize = rowSize * this._bitmapInfo.height;
-          let chunkSize = Math.max(imageSize, zlib.Z_MIN_CHUNK);
-          this._inflate = zlib.createInflate({ chunkSize });
-          let leftToInflate = imageSize;
-          let emitError = this.emit.bind(this, "error");
-          this._inflate.on("error", function(err) {
-            if (!leftToInflate) {
-              return;
-            }
-            emitError(err);
-          });
-          this._filter.on("complete", this._complete.bind(this));
-          let filterWrite = this._filter.write.bind(this._filter);
-          this._inflate.on("data", function(chunk) {
-            if (!leftToInflate) {
-              return;
-            }
-            if (chunk.length > leftToInflate) {
-              chunk = chunk.slice(0, leftToInflate);
-            }
-            leftToInflate -= chunk.length;
-            filterWrite(chunk);
-          });
-          this._inflate.on("end", this._filter.end.bind(this._filter));
-        }
-      }
-      this._inflate.write(data);
-    };
-    ParserAsync.prototype._handleMetaData = function(metaData) {
-      this._metaData = metaData;
-      this._bitmapInfo = Object.create(metaData);
-      this._filter = new FilterAsync(this._bitmapInfo);
-    };
-    ParserAsync.prototype._handleTransColor = function(transColor) {
-      this._bitmapInfo.transColor = transColor;
-    };
-    ParserAsync.prototype._handlePalette = function(palette) {
-      this._bitmapInfo.palette = palette;
-    };
-    ParserAsync.prototype._simpleTransparency = function() {
-      this._metaData.alpha = true;
-    };
-    ParserAsync.prototype._headersFinished = function() {
-      this.emit("metadata", this._metaData);
-    };
-    ParserAsync.prototype._finished = function() {
-      if (this.errord) {
-        return;
-      }
-      if (!this._inflate) {
-        this.emit("error", "No Inflate block");
-      } else {
-        this._inflate.end();
-      }
-    };
-    ParserAsync.prototype._complete = function(filteredData) {
-      if (this.errord) {
-        return;
-      }
-      let normalisedBitmapData;
-      try {
-        let bitmapData = bitmapper.dataToBitMap(filteredData, this._bitmapInfo);
-        normalisedBitmapData = formatNormaliser(
-          bitmapData,
-          this._bitmapInfo,
-          this._options.skipRescale
-        );
-        bitmapData = null;
-      } catch (ex) {
-        this._handleError(ex);
-        return;
-      }
-      this.emit("parsed", normalisedBitmapData);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/bitpacker.js
-var require_bitpacker = __commonJS({
-  "node_modules/pngjs/lib/bitpacker.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    module2.exports = function(dataIn, width, height, options) {
-      let outHasAlpha = [constants.COLORTYPE_COLOR_ALPHA, constants.COLORTYPE_ALPHA].indexOf(
-        options.colorType
-      ) !== -1;
-      if (options.colorType === options.inputColorType) {
-        let bigEndian = (function() {
-          let buffer = new ArrayBuffer(2);
-          new DataView(buffer).setInt16(
-            0,
-            256,
-            true
-            /* littleEndian */
-          );
-          return new Int16Array(buffer)[0] !== 256;
-        })();
-        if (options.bitDepth === 8 || options.bitDepth === 16 && bigEndian) {
-          return dataIn;
-        }
-      }
-      let data = options.bitDepth !== 16 ? dataIn : new Uint16Array(dataIn.buffer);
-      let maxValue = 255;
-      let inBpp = constants.COLORTYPE_TO_BPP_MAP[options.inputColorType];
-      if (inBpp === 4 && !options.inputHasAlpha) {
-        inBpp = 3;
-      }
-      let outBpp = constants.COLORTYPE_TO_BPP_MAP[options.colorType];
-      if (options.bitDepth === 16) {
-        maxValue = 65535;
-        outBpp *= 2;
-      }
-      let outData = Buffer.alloc(width * height * outBpp);
-      let inIndex = 0;
-      let outIndex = 0;
-      let bgColor = options.bgColor || {};
-      if (bgColor.red === void 0) {
-        bgColor.red = maxValue;
-      }
-      if (bgColor.green === void 0) {
-        bgColor.green = maxValue;
-      }
-      if (bgColor.blue === void 0) {
-        bgColor.blue = maxValue;
-      }
-      function getRGBA() {
-        let red;
-        let green;
-        let blue;
-        let alpha = maxValue;
-        switch (options.inputColorType) {
-          case constants.COLORTYPE_COLOR_ALPHA:
-            alpha = data[inIndex + 3];
-            red = data[inIndex];
-            green = data[inIndex + 1];
-            blue = data[inIndex + 2];
-            break;
-          case constants.COLORTYPE_COLOR:
-            red = data[inIndex];
-            green = data[inIndex + 1];
-            blue = data[inIndex + 2];
-            break;
-          case constants.COLORTYPE_ALPHA:
-            alpha = data[inIndex + 1];
-            red = data[inIndex];
-            green = red;
-            blue = red;
-            break;
-          case constants.COLORTYPE_GRAYSCALE:
-            red = data[inIndex];
-            green = red;
-            blue = red;
-            break;
-          default:
-            throw new Error(
-              "input color type:" + options.inputColorType + " is not supported at present"
-            );
-        }
-        if (options.inputHasAlpha) {
-          if (!outHasAlpha) {
-            alpha /= maxValue;
-            red = Math.min(
-              Math.max(Math.round((1 - alpha) * bgColor.red + alpha * red), 0),
-              maxValue
-            );
-            green = Math.min(
-              Math.max(Math.round((1 - alpha) * bgColor.green + alpha * green), 0),
-              maxValue
-            );
-            blue = Math.min(
-              Math.max(Math.round((1 - alpha) * bgColor.blue + alpha * blue), 0),
-              maxValue
-            );
-          }
-        }
-        return { red, green, blue, alpha };
-      }
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          let rgba = getRGBA(data, inIndex);
-          switch (options.colorType) {
-            case constants.COLORTYPE_COLOR_ALPHA:
-            case constants.COLORTYPE_COLOR:
-              if (options.bitDepth === 8) {
-                outData[outIndex] = rgba.red;
-                outData[outIndex + 1] = rgba.green;
-                outData[outIndex + 2] = rgba.blue;
-                if (outHasAlpha) {
-                  outData[outIndex + 3] = rgba.alpha;
-                }
-              } else {
-                outData.writeUInt16BE(rgba.red, outIndex);
-                outData.writeUInt16BE(rgba.green, outIndex + 2);
-                outData.writeUInt16BE(rgba.blue, outIndex + 4);
-                if (outHasAlpha) {
-                  outData.writeUInt16BE(rgba.alpha, outIndex + 6);
-                }
-              }
-              break;
-            case constants.COLORTYPE_ALPHA:
-            case constants.COLORTYPE_GRAYSCALE: {
-              let grayscale = (rgba.red + rgba.green + rgba.blue) / 3;
-              if (options.bitDepth === 8) {
-                outData[outIndex] = grayscale;
-                if (outHasAlpha) {
-                  outData[outIndex + 1] = rgba.alpha;
-                }
-              } else {
-                outData.writeUInt16BE(grayscale, outIndex);
-                if (outHasAlpha) {
-                  outData.writeUInt16BE(rgba.alpha, outIndex + 2);
-                }
-              }
-              break;
-            }
-            default:
-              throw new Error("unrecognised color Type " + options.colorType);
-          }
-          inIndex += inBpp;
-          outIndex += outBpp;
-        }
-      }
-      return outData;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/filter-pack.js
-var require_filter_pack = __commonJS({
-  "node_modules/pngjs/lib/filter-pack.js"(exports2, module2) {
-    "use strict";
-    var paethPredictor = require_paeth_predictor();
-    function filterNone(pxData, pxPos, byteWidth, rawData, rawPos) {
-      for (let x = 0; x < byteWidth; x++) {
-        rawData[rawPos + x] = pxData[pxPos + x];
-      }
-    }
-    function filterSumNone(pxData, pxPos, byteWidth) {
-      let sum = 0;
-      let length = pxPos + byteWidth;
-      for (let i = pxPos; i < length; i++) {
-        sum += Math.abs(pxData[i]);
-      }
-      return sum;
-    }
-    function filterSub(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let val = pxData[pxPos + x] - left;
-        rawData[rawPos + x] = val;
-      }
-    }
-    function filterSumSub(pxData, pxPos, byteWidth, bpp) {
-      let sum = 0;
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let val = pxData[pxPos + x] - left;
-        sum += Math.abs(val);
-      }
-      return sum;
-    }
-    function filterUp(pxData, pxPos, byteWidth, rawData, rawPos) {
-      for (let x = 0; x < byteWidth; x++) {
-        let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
-        let val = pxData[pxPos + x] - up;
-        rawData[rawPos + x] = val;
-      }
-    }
-    function filterSumUp(pxData, pxPos, byteWidth) {
-      let sum = 0;
-      let length = pxPos + byteWidth;
-      for (let x = pxPos; x < length; x++) {
-        let up = pxPos > 0 ? pxData[x - byteWidth] : 0;
-        let val = pxData[x] - up;
-        sum += Math.abs(val);
-      }
-      return sum;
-    }
-    function filterAvg(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
-        let val = pxData[pxPos + x] - (left + up >> 1);
-        rawData[rawPos + x] = val;
-      }
-    }
-    function filterSumAvg(pxData, pxPos, byteWidth, bpp) {
-      let sum = 0;
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
-        let val = pxData[pxPos + x] - (left + up >> 1);
-        sum += Math.abs(val);
-      }
-      return sum;
-    }
-    function filterPaeth(pxData, pxPos, byteWidth, rawData, rawPos, bpp) {
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
-        let upleft = pxPos > 0 && x >= bpp ? pxData[pxPos + x - (byteWidth + bpp)] : 0;
-        let val = pxData[pxPos + x] - paethPredictor(left, up, upleft);
-        rawData[rawPos + x] = val;
-      }
-    }
-    function filterSumPaeth(pxData, pxPos, byteWidth, bpp) {
-      let sum = 0;
-      for (let x = 0; x < byteWidth; x++) {
-        let left = x >= bpp ? pxData[pxPos + x - bpp] : 0;
-        let up = pxPos > 0 ? pxData[pxPos + x - byteWidth] : 0;
-        let upleft = pxPos > 0 && x >= bpp ? pxData[pxPos + x - (byteWidth + bpp)] : 0;
-        let val = pxData[pxPos + x] - paethPredictor(left, up, upleft);
-        sum += Math.abs(val);
-      }
-      return sum;
-    }
-    var filters = {
-      0: filterNone,
-      1: filterSub,
-      2: filterUp,
-      3: filterAvg,
-      4: filterPaeth
-    };
-    var filterSums = {
-      0: filterSumNone,
-      1: filterSumSub,
-      2: filterSumUp,
-      3: filterSumAvg,
-      4: filterSumPaeth
-    };
-    module2.exports = function(pxData, width, height, options, bpp) {
-      let filterTypes;
-      if (!("filterType" in options) || options.filterType === -1) {
-        filterTypes = [0, 1, 2, 3, 4];
-      } else if (typeof options.filterType === "number") {
-        filterTypes = [options.filterType];
-      } else {
-        throw new Error("unrecognised filter types");
-      }
-      if (options.bitDepth === 16) {
-        bpp *= 2;
-      }
-      let byteWidth = width * bpp;
-      let rawPos = 0;
-      let pxPos = 0;
-      let rawData = Buffer.alloc((byteWidth + 1) * height);
-      let sel = filterTypes[0];
-      for (let y = 0; y < height; y++) {
-        if (filterTypes.length > 1) {
-          let min = Infinity;
-          for (let i = 0; i < filterTypes.length; i++) {
-            let sum = filterSums[filterTypes[i]](pxData, pxPos, byteWidth, bpp);
-            if (sum < min) {
-              sel = filterTypes[i];
-              min = sum;
-            }
-          }
-        }
-        rawData[rawPos] = sel;
-        rawPos++;
-        filters[sel](pxData, pxPos, byteWidth, rawData, rawPos, bpp);
-        rawPos += byteWidth;
-        pxPos += byteWidth;
-      }
-      return rawData;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/packer.js
-var require_packer = __commonJS({
-  "node_modules/pngjs/lib/packer.js"(exports2, module2) {
-    "use strict";
-    var constants = require_constants();
-    var CrcStream = require_crc();
-    var bitPacker = require_bitpacker();
-    var filter = require_filter_pack();
-    var zlib = require("zlib");
-    var Packer = module2.exports = function(options) {
-      this._options = options;
-      options.deflateChunkSize = options.deflateChunkSize || 32 * 1024;
-      options.deflateLevel = options.deflateLevel != null ? options.deflateLevel : 9;
-      options.deflateStrategy = options.deflateStrategy != null ? options.deflateStrategy : 3;
-      options.inputHasAlpha = options.inputHasAlpha != null ? options.inputHasAlpha : true;
-      options.deflateFactory = options.deflateFactory || zlib.createDeflate;
-      options.bitDepth = options.bitDepth || 8;
-      options.colorType = typeof options.colorType === "number" ? options.colorType : constants.COLORTYPE_COLOR_ALPHA;
-      options.inputColorType = typeof options.inputColorType === "number" ? options.inputColorType : constants.COLORTYPE_COLOR_ALPHA;
-      if ([
-        constants.COLORTYPE_GRAYSCALE,
-        constants.COLORTYPE_COLOR,
-        constants.COLORTYPE_COLOR_ALPHA,
-        constants.COLORTYPE_ALPHA
-      ].indexOf(options.colorType) === -1) {
-        throw new Error(
-          "option color type:" + options.colorType + " is not supported at present"
-        );
-      }
-      if ([
-        constants.COLORTYPE_GRAYSCALE,
-        constants.COLORTYPE_COLOR,
-        constants.COLORTYPE_COLOR_ALPHA,
-        constants.COLORTYPE_ALPHA
-      ].indexOf(options.inputColorType) === -1) {
-        throw new Error(
-          "option input color type:" + options.inputColorType + " is not supported at present"
-        );
-      }
-      if (options.bitDepth !== 8 && options.bitDepth !== 16) {
-        throw new Error(
-          "option bit depth:" + options.bitDepth + " is not supported at present"
-        );
-      }
-    };
-    Packer.prototype.getDeflateOptions = function() {
-      return {
-        chunkSize: this._options.deflateChunkSize,
-        level: this._options.deflateLevel,
-        strategy: this._options.deflateStrategy
-      };
-    };
-    Packer.prototype.createDeflate = function() {
-      return this._options.deflateFactory(this.getDeflateOptions());
-    };
-    Packer.prototype.filterData = function(data, width, height) {
-      let packedData = bitPacker(data, width, height, this._options);
-      let bpp = constants.COLORTYPE_TO_BPP_MAP[this._options.colorType];
-      let filteredData = filter(packedData, width, height, this._options, bpp);
-      return filteredData;
-    };
-    Packer.prototype._packChunk = function(type, data) {
-      let len = data ? data.length : 0;
-      let buf = Buffer.alloc(len + 12);
-      buf.writeUInt32BE(len, 0);
-      buf.writeUInt32BE(type, 4);
-      if (data) {
-        data.copy(buf, 8);
-      }
-      buf.writeInt32BE(
-        CrcStream.crc32(buf.slice(4, buf.length - 4)),
-        buf.length - 4
-      );
-      return buf;
-    };
-    Packer.prototype.packGAMA = function(gamma) {
-      let buf = Buffer.alloc(4);
-      buf.writeUInt32BE(Math.floor(gamma * constants.GAMMA_DIVISION), 0);
-      return this._packChunk(constants.TYPE_gAMA, buf);
-    };
-    Packer.prototype.packIHDR = function(width, height) {
-      let buf = Buffer.alloc(13);
-      buf.writeUInt32BE(width, 0);
-      buf.writeUInt32BE(height, 4);
-      buf[8] = this._options.bitDepth;
-      buf[9] = this._options.colorType;
-      buf[10] = 0;
-      buf[11] = 0;
-      buf[12] = 0;
-      return this._packChunk(constants.TYPE_IHDR, buf);
-    };
-    Packer.prototype.packIDAT = function(data) {
-      return this._packChunk(constants.TYPE_IDAT, data);
-    };
-    Packer.prototype.packIEND = function() {
-      return this._packChunk(constants.TYPE_IEND, null);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/packer-async.js
-var require_packer_async = __commonJS({
-  "node_modules/pngjs/lib/packer-async.js"(exports2, module2) {
-    "use strict";
-    var util = require("util");
-    var Stream = require("stream");
-    var constants = require_constants();
-    var Packer = require_packer();
-    var PackerAsync = module2.exports = function(opt) {
-      Stream.call(this);
-      let options = opt || {};
-      this._packer = new Packer(options);
-      this._deflate = this._packer.createDeflate();
-      this.readable = true;
-    };
-    util.inherits(PackerAsync, Stream);
-    PackerAsync.prototype.pack = function(data, width, height, gamma) {
-      this.emit("data", Buffer.from(constants.PNG_SIGNATURE));
-      this.emit("data", this._packer.packIHDR(width, height));
-      if (gamma) {
-        this.emit("data", this._packer.packGAMA(gamma));
-      }
-      let filteredData = this._packer.filterData(data, width, height);
-      this._deflate.on("error", this.emit.bind(this, "error"));
-      this._deflate.on(
-        "data",
-        function(compressedData) {
-          this.emit("data", this._packer.packIDAT(compressedData));
-        }.bind(this)
-      );
-      this._deflate.on(
-        "end",
-        function() {
-          this.emit("data", this._packer.packIEND());
-          this.emit("end");
-        }.bind(this)
-      );
-      this._deflate.end(filteredData);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/sync-inflate.js
-var require_sync_inflate = __commonJS({
-  "node_modules/pngjs/lib/sync-inflate.js"(exports2, module2) {
-    "use strict";
-    var assert = require("assert").ok;
-    var zlib = require("zlib");
-    var util = require("util");
-    var kMaxLength = require("buffer").kMaxLength;
-    function Inflate(opts) {
-      if (!(this instanceof Inflate)) {
-        return new Inflate(opts);
-      }
-      if (opts && opts.chunkSize < zlib.Z_MIN_CHUNK) {
-        opts.chunkSize = zlib.Z_MIN_CHUNK;
-      }
-      zlib.Inflate.call(this, opts);
-      this._offset = this._offset === void 0 ? this._outOffset : this._offset;
-      this._buffer = this._buffer || this._outBuffer;
-      if (opts && opts.maxLength != null) {
-        this._maxLength = opts.maxLength;
-      }
-    }
-    function createInflate(opts) {
-      return new Inflate(opts);
-    }
-    function _close(engine, callback) {
-      if (callback) {
-        process.nextTick(callback);
-      }
-      if (!engine._handle) {
-        return;
-      }
-      engine._handle.close();
-      engine._handle = null;
-    }
-    Inflate.prototype._processChunk = function(chunk, flushFlag, asyncCb) {
-      if (typeof asyncCb === "function") {
-        return zlib.Inflate._processChunk.call(this, chunk, flushFlag, asyncCb);
-      }
-      let self = this;
-      let availInBefore = chunk && chunk.length;
-      let availOutBefore = this._chunkSize - this._offset;
-      let leftToInflate = this._maxLength;
-      let inOff = 0;
-      let buffers = [];
-      let nread = 0;
-      let error;
-      this.on("error", function(err) {
-        error = err;
-      });
-      function handleChunk(availInAfter, availOutAfter) {
-        if (self._hadError) {
-          return;
-        }
-        let have = availOutBefore - availOutAfter;
-        assert(have >= 0, "have should not go down");
-        if (have > 0) {
-          let out = self._buffer.slice(self._offset, self._offset + have);
-          self._offset += have;
-          if (out.length > leftToInflate) {
-            out = out.slice(0, leftToInflate);
-          }
-          buffers.push(out);
-          nread += out.length;
-          leftToInflate -= out.length;
-          if (leftToInflate === 0) {
-            return false;
-          }
-        }
-        if (availOutAfter === 0 || self._offset >= self._chunkSize) {
-          availOutBefore = self._chunkSize;
-          self._offset = 0;
-          self._buffer = Buffer.allocUnsafe(self._chunkSize);
-        }
-        if (availOutAfter === 0) {
-          inOff += availInBefore - availInAfter;
-          availInBefore = availInAfter;
-          return true;
-        }
-        return false;
-      }
-      assert(this._handle, "zlib binding closed");
-      let res;
-      do {
-        res = this._handle.writeSync(
-          flushFlag,
-          chunk,
-          // in
-          inOff,
-          // in_off
-          availInBefore,
-          // in_len
-          this._buffer,
-          // out
-          this._offset,
-          //out_off
-          availOutBefore
-        );
-        res = res || this._writeState;
-      } while (!this._hadError && handleChunk(res[0], res[1]));
-      if (this._hadError) {
-        throw error;
-      }
-      if (nread >= kMaxLength) {
-        _close(this);
-        throw new RangeError(
-          "Cannot create final Buffer. It would be larger than 0x" + kMaxLength.toString(16) + " bytes"
-        );
-      }
-      let buf = Buffer.concat(buffers, nread);
-      _close(this);
-      return buf;
-    };
-    util.inherits(Inflate, zlib.Inflate);
-    function zlibBufferSync(engine, buffer) {
-      if (typeof buffer === "string") {
-        buffer = Buffer.from(buffer);
-      }
-      if (!(buffer instanceof Buffer)) {
-        throw new TypeError("Not a string or buffer");
-      }
-      let flushFlag = engine._finishFlushFlag;
-      if (flushFlag == null) {
-        flushFlag = zlib.Z_FINISH;
-      }
-      return engine._processChunk(buffer, flushFlag);
-    }
-    function inflateSync(buffer, opts) {
-      return zlibBufferSync(new Inflate(opts), buffer);
-    }
-    module2.exports = exports2 = inflateSync;
-    exports2.Inflate = Inflate;
-    exports2.createInflate = createInflate;
-    exports2.inflateSync = inflateSync;
-  }
-});
-
-// node_modules/pngjs/lib/sync-reader.js
-var require_sync_reader = __commonJS({
-  "node_modules/pngjs/lib/sync-reader.js"(exports2, module2) {
-    "use strict";
-    var SyncReader = module2.exports = function(buffer) {
-      this._buffer = buffer;
-      this._reads = [];
-    };
-    SyncReader.prototype.read = function(length, callback) {
-      this._reads.push({
-        length: Math.abs(length),
-        // if length < 0 then at most this length
-        allowLess: length < 0,
-        func: callback
-      });
-    };
-    SyncReader.prototype.process = function() {
-      while (this._reads.length > 0 && this._buffer.length) {
-        let read = this._reads[0];
-        if (this._buffer.length && (this._buffer.length >= read.length || read.allowLess)) {
-          this._reads.shift();
-          let buf = this._buffer;
-          this._buffer = buf.slice(read.length);
-          read.func.call(this, buf.slice(0, read.length));
-        } else {
-          break;
-        }
-      }
-      if (this._reads.length > 0) {
-        throw new Error("There are some read requests waitng on finished stream");
-      }
-      if (this._buffer.length > 0) {
-        throw new Error("unrecognised content at end of stream");
-      }
-    };
-  }
-});
-
-// node_modules/pngjs/lib/filter-parse-sync.js
-var require_filter_parse_sync = __commonJS({
-  "node_modules/pngjs/lib/filter-parse-sync.js"(exports2) {
-    "use strict";
-    var SyncReader = require_sync_reader();
-    var Filter = require_filter_parse();
-    exports2.process = function(inBuffer, bitmapInfo) {
-      let outBuffers = [];
-      let reader = new SyncReader(inBuffer);
-      let filter = new Filter(bitmapInfo, {
-        read: reader.read.bind(reader),
-        write: function(bufferPart) {
-          outBuffers.push(bufferPart);
-        },
-        complete: function() {
-        }
-      });
-      filter.start();
-      reader.process();
-      return Buffer.concat(outBuffers);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/parser-sync.js
-var require_parser_sync = __commonJS({
-  "node_modules/pngjs/lib/parser-sync.js"(exports2, module2) {
-    "use strict";
-    var hasSyncZlib = true;
-    var zlib = require("zlib");
-    var inflateSync = require_sync_inflate();
-    if (!zlib.deflateSync) {
-      hasSyncZlib = false;
-    }
-    var SyncReader = require_sync_reader();
-    var FilterSync = require_filter_parse_sync();
-    var Parser = require_parser();
-    var bitmapper = require_bitmapper();
-    var formatNormaliser = require_format_normaliser();
-    module2.exports = function(buffer, options) {
-      if (!hasSyncZlib) {
-        throw new Error(
-          "To use the sync capability of this library in old node versions, please pin pngjs to v2.3.0"
-        );
-      }
-      let err;
-      function handleError(_err_) {
-        err = _err_;
-      }
-      let metaData;
-      function handleMetaData(_metaData_) {
-        metaData = _metaData_;
-      }
-      function handleTransColor(transColor) {
-        metaData.transColor = transColor;
-      }
-      function handlePalette(palette) {
-        metaData.palette = palette;
-      }
-      function handleSimpleTransparency() {
-        metaData.alpha = true;
-      }
-      let gamma;
-      function handleGamma(_gamma_) {
-        gamma = _gamma_;
-      }
-      let inflateDataList = [];
-      function handleInflateData(inflatedData2) {
-        inflateDataList.push(inflatedData2);
-      }
-      let reader = new SyncReader(buffer);
-      let parser = new Parser(options, {
-        read: reader.read.bind(reader),
-        error: handleError,
-        metadata: handleMetaData,
-        gamma: handleGamma,
-        palette: handlePalette,
-        transColor: handleTransColor,
-        inflateData: handleInflateData,
-        simpleTransparency: handleSimpleTransparency
-      });
-      parser.start();
-      reader.process();
-      if (err) {
-        throw err;
-      }
-      let inflateData = Buffer.concat(inflateDataList);
-      inflateDataList.length = 0;
-      let inflatedData;
-      if (metaData.interlace) {
-        inflatedData = zlib.inflateSync(inflateData);
-      } else {
-        let rowSize = (metaData.width * metaData.bpp * metaData.depth + 7 >> 3) + 1;
-        let imageSize = rowSize * metaData.height;
-        inflatedData = inflateSync(inflateData, {
-          chunkSize: imageSize,
-          maxLength: imageSize
-        });
-      }
-      inflateData = null;
-      if (!inflatedData || !inflatedData.length) {
-        throw new Error("bad png - invalid inflate data response");
-      }
-      let unfilteredData = FilterSync.process(inflatedData, metaData);
-      inflateData = null;
-      let bitmapData = bitmapper.dataToBitMap(unfilteredData, metaData);
-      unfilteredData = null;
-      let normalisedBitmapData = formatNormaliser(
-        bitmapData,
-        metaData,
-        options.skipRescale
-      );
-      metaData.data = normalisedBitmapData;
-      metaData.gamma = gamma || 0;
-      return metaData;
-    };
-  }
-});
-
-// node_modules/pngjs/lib/packer-sync.js
-var require_packer_sync = __commonJS({
-  "node_modules/pngjs/lib/packer-sync.js"(exports2, module2) {
-    "use strict";
-    var hasSyncZlib = true;
-    var zlib = require("zlib");
-    if (!zlib.deflateSync) {
-      hasSyncZlib = false;
-    }
-    var constants = require_constants();
-    var Packer = require_packer();
-    module2.exports = function(metaData, opt) {
-      if (!hasSyncZlib) {
-        throw new Error(
-          "To use the sync capability of this library in old node versions, please pin pngjs to v2.3.0"
-        );
-      }
-      let options = opt || {};
-      let packer = new Packer(options);
-      let chunks = [];
-      chunks.push(Buffer.from(constants.PNG_SIGNATURE));
-      chunks.push(packer.packIHDR(metaData.width, metaData.height));
-      if (metaData.gamma) {
-        chunks.push(packer.packGAMA(metaData.gamma));
-      }
-      let filteredData = packer.filterData(
-        metaData.data,
-        metaData.width,
-        metaData.height
-      );
-      let compressedData = zlib.deflateSync(
-        filteredData,
-        packer.getDeflateOptions()
-      );
-      filteredData = null;
-      if (!compressedData || !compressedData.length) {
-        throw new Error("bad png - invalid compressed data response");
-      }
-      chunks.push(packer.packIDAT(compressedData));
-      chunks.push(packer.packIEND());
-      return Buffer.concat(chunks);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/png-sync.js
-var require_png_sync = __commonJS({
-  "node_modules/pngjs/lib/png-sync.js"(exports2) {
-    "use strict";
-    var parse = require_parser_sync();
-    var pack = require_packer_sync();
-    exports2.read = function(buffer, options) {
-      return parse(buffer, options || {});
-    };
-    exports2.write = function(png, options) {
-      return pack(png, options);
-    };
-  }
-});
-
-// node_modules/pngjs/lib/png.js
-var require_png = __commonJS({
-  "node_modules/pngjs/lib/png.js"(exports2) {
-    "use strict";
-    var util = require("util");
-    var Stream = require("stream");
-    var Parser = require_parser_async();
-    var Packer = require_packer_async();
-    var PNGSync = require_png_sync();
-    var PNG = exports2.PNG = function(options) {
-      Stream.call(this);
-      options = options || {};
-      this.width = options.width | 0;
-      this.height = options.height | 0;
-      this.data = this.width > 0 && this.height > 0 ? Buffer.alloc(4 * this.width * this.height) : null;
-      if (options.fill && this.data) {
-        this.data.fill(0);
-      }
-      this.gamma = 0;
-      this.readable = this.writable = true;
-      this._parser = new Parser(options);
-      this._parser.on("error", this.emit.bind(this, "error"));
-      this._parser.on("close", this._handleClose.bind(this));
-      this._parser.on("metadata", this._metadata.bind(this));
-      this._parser.on("gamma", this._gamma.bind(this));
-      this._parser.on(
-        "parsed",
-        function(data) {
-          this.data = data;
-          this.emit("parsed", data);
-        }.bind(this)
-      );
-      this._packer = new Packer(options);
-      this._packer.on("data", this.emit.bind(this, "data"));
-      this._packer.on("end", this.emit.bind(this, "end"));
-      this._parser.on("close", this._handleClose.bind(this));
-      this._packer.on("error", this.emit.bind(this, "error"));
-    };
-    util.inherits(PNG, Stream);
-    PNG.sync = PNGSync;
-    PNG.prototype.pack = function() {
-      if (!this.data || !this.data.length) {
-        this.emit("error", "No data provided");
-        return this;
-      }
-      process.nextTick(
-        function() {
-          this._packer.pack(this.data, this.width, this.height, this.gamma);
-        }.bind(this)
-      );
-      return this;
-    };
-    PNG.prototype.parse = function(data, callback) {
-      if (callback) {
-        let onParsed, onError;
-        onParsed = function(parsedData) {
-          this.removeListener("error", onError);
-          this.data = parsedData;
-          callback(null, this);
-        }.bind(this);
-        onError = function(err) {
-          this.removeListener("parsed", onParsed);
-          callback(err, null);
-        }.bind(this);
-        this.once("parsed", onParsed);
-        this.once("error", onError);
-      }
-      this.end(data);
-      return this;
-    };
-    PNG.prototype.write = function(data) {
-      this._parser.write(data);
-      return true;
-    };
-    PNG.prototype.end = function(data) {
-      this._parser.end(data);
-    };
-    PNG.prototype._metadata = function(metadata) {
-      this.width = metadata.width;
-      this.height = metadata.height;
-      this.emit("metadata", metadata);
-    };
-    PNG.prototype._gamma = function(gamma) {
-      this.gamma = gamma;
-    };
-    PNG.prototype._handleClose = function() {
-      if (!this._parser.writable && !this._packer.readable) {
-        this.emit("close");
-      }
-    };
-    PNG.bitblt = function(src, dst, srcX, srcY, width, height, deltaX, deltaY) {
-      srcX |= 0;
-      srcY |= 0;
-      width |= 0;
-      height |= 0;
-      deltaX |= 0;
-      deltaY |= 0;
-      if (srcX > src.width || srcY > src.height || srcX + width > src.width || srcY + height > src.height) {
-        throw new Error("bitblt reading outside image");
-      }
-      if (deltaX > dst.width || deltaY > dst.height || deltaX + width > dst.width || deltaY + height > dst.height) {
-        throw new Error("bitblt writing outside image");
-      }
-      for (let y = 0; y < height; y++) {
-        src.data.copy(
-          dst.data,
-          (deltaY + y) * dst.width + deltaX << 2,
-          (srcY + y) * src.width + srcX << 2,
-          (srcY + y) * src.width + srcX + width << 2
-        );
-      }
-    };
-    PNG.prototype.bitblt = function(dst, srcX, srcY, width, height, deltaX, deltaY) {
-      PNG.bitblt(this, dst, srcX, srcY, width, height, deltaX, deltaY);
-      return this;
-    };
-    PNG.adjustGamma = function(src) {
-      if (src.gamma) {
-        for (let y = 0; y < src.height; y++) {
-          for (let x = 0; x < src.width; x++) {
-            let idx = src.width * y + x << 2;
-            for (let i = 0; i < 3; i++) {
-              let sample = src.data[idx + i] / 255;
-              sample = Math.pow(sample, 1 / 2.2 / src.gamma);
-              src.data[idx + i] = Math.round(sample * 255);
-            }
-          }
-        }
-        src.gamma = 0;
-      }
-    };
-    PNG.prototype.adjustGamma = function() {
-      PNG.adjustGamma(this);
-    };
-  }
-});
-
-// node_modules/pixelmatch/index.js
-var pixelmatch_exports = {};
-__export(pixelmatch_exports, {
-  default: () => pixelmatch
-});
-function pixelmatch(img1, img2, output, width, height, options = {}) {
-  const {
-    threshold = 0.1,
-    alpha = 0.1,
-    aaColor = [255, 255, 0],
-    diffColor = [255, 0, 0],
-    includeAA,
-    diffColorAlt,
-    diffMask
-  } = options;
-  if (!isPixelData(img1) || !isPixelData(img2) || output && !isPixelData(output))
-    throw new Error("Image data: Uint8Array, Uint8ClampedArray or Buffer expected.");
-  if (img1.length !== img2.length || output && output.length !== img1.length)
-    throw new Error("Image sizes do not match.");
-  if (img1.length !== width * height * 4) throw new Error("Image data size does not match width/height.");
-  const len = width * height;
-  const a32 = new Uint32Array(img1.buffer, img1.byteOffset, len);
-  const b32 = new Uint32Array(img2.buffer, img2.byteOffset, len);
-  let identical = true;
-  for (let i = 0; i < len; i++) {
-    if (a32[i] !== b32[i]) {
-      identical = false;
-      break;
-    }
-  }
-  if (identical) {
-    if (output && !diffMask) {
-      for (let i = 0; i < len; i++) drawGrayPixel(img1, 4 * i, alpha, output);
-    }
-    return 0;
-  }
-  const maxDelta = 35215 * threshold * threshold;
-  const [aaR, aaG, aaB] = aaColor;
-  const [diffR, diffG, diffB] = diffColor;
-  const [altR, altG, altB] = diffColorAlt || diffColor;
-  let diff = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x;
-      const pos = i * 4;
-      const delta = a32[i] === b32[i] ? 0 : colorDelta(img1, img2, pos, pos, false);
-      if (Math.abs(delta) > maxDelta) {
-        const isAA = antialiased(img1, x, y, width, height, a32, b32) || antialiased(img2, x, y, width, height, b32, a32);
-        if (!includeAA && isAA) {
-          if (output && !diffMask) drawPixel(output, pos, aaR, aaG, aaB);
-        } else {
-          if (output) {
-            if (delta < 0) {
-              drawPixel(output, pos, altR, altG, altB);
-            } else {
-              drawPixel(output, pos, diffR, diffG, diffB);
-            }
-          }
-          diff++;
-        }
-      } else if (output && !diffMask) {
-        drawGrayPixel(img1, pos, alpha, output);
-      }
-    }
-  }
-  return diff;
+// packages/vault/src/keychain.ts
+function getKeychain(service) {
+  return new NodeKeychain(service);
 }
-function isPixelData(arr) {
-  return ArrayBuffer.isView(arr) && arr.BYTES_PER_ELEMENT === 1;
-}
-function antialiased(img, x1, y1, width, height, a32, b32) {
-  const x0 = Math.max(x1 - 1, 0);
-  const y0 = Math.max(y1 - 1, 0);
-  const x2 = Math.min(x1 + 1, width - 1);
-  const y2 = Math.min(y1 + 1, height - 1);
-  const pos = y1 * width + x1;
-  let zeroes = x1 === x0 || x1 === x2 || y1 === y0 || y1 === y2 ? 1 : 0;
-  let min = 0;
-  let max = 0;
-  let minX = 0;
-  let minY = 0;
-  let maxX = 0;
-  let maxY = 0;
-  for (let x = x0; x <= x2; x++) {
-    for (let y = y0; y <= y2; y++) {
-      if (x === x1 && y === y1) continue;
-      const delta = colorDelta(img, img, pos * 4, (y * width + x) * 4, true);
-      if (delta === 0) {
-        zeroes++;
-        if (zeroes > 2) return false;
-      } else if (delta < min) {
-        min = delta;
-        minX = x;
-        minY = y;
-      } else if (delta > max) {
-        max = delta;
-        maxX = x;
-        maxY = y;
-      }
-    }
-  }
-  if (min === 0 || max === 0) return false;
-  return hasManySiblings(a32, minX, minY, width, height) && hasManySiblings(b32, minX, minY, width, height) || hasManySiblings(a32, maxX, maxY, width, height) && hasManySiblings(b32, maxX, maxY, width, height);
-}
-function hasManySiblings(img, x1, y1, width, height) {
-  const x0 = Math.max(x1 - 1, 0);
-  const y0 = Math.max(y1 - 1, 0);
-  const x2 = Math.min(x1 + 1, width - 1);
-  const y2 = Math.min(y1 + 1, height - 1);
-  const val = img[y1 * width + x1];
-  let zeroes = x1 === x0 || x1 === x2 || y1 === y0 || y1 === y2 ? 1 : 0;
-  for (let x = x0; x <= x2; x++) {
-    for (let y = y0; y <= y2; y++) {
-      if (x === x1 && y === y1) continue;
-      zeroes += +(val === img[y * width + x]);
-      if (zeroes > 2) return true;
-    }
-  }
-  return false;
-}
-function colorDelta(img1, img2, k, m, yOnly) {
-  const r1 = img1[k];
-  const g1 = img1[k + 1];
-  const b1 = img1[k + 2];
-  const a1 = img1[k + 3];
-  const r2 = img2[m];
-  const g2 = img2[m + 1];
-  const b2 = img2[m + 2];
-  const a2 = img2[m + 3];
-  let dr = r1 - r2;
-  let dg = g1 - g2;
-  let db2 = b1 - b2;
-  const da = a1 - a2;
-  if (!dr && !dg && !db2 && !da) return 0;
-  if (a1 < 255 || a2 < 255) {
-    const rb = 48 + 159 * (k % 2);
-    const gb = 48 + 159 * ((k / 1.618033988749895 | 0) % 2);
-    const bb = 48 + 159 * ((k / 2.618033988749895 | 0) % 2);
-    dr = (r1 * a1 - r2 * a2 - rb * da) / 255;
-    dg = (g1 * a1 - g2 * a2 - gb * da) / 255;
-    db2 = (b1 * a1 - b2 * a2 - bb * da) / 255;
-  }
-  const y = dr * 0.29889531 + dg * 0.58662247 + db2 * 0.11448223;
-  if (yOnly) return y;
-  const i = dr * 0.59597799 - dg * 0.2741761 - db2 * 0.32180189;
-  const q = dr * 0.21147017 - dg * 0.52261711 + db2 * 0.31114694;
-  const delta = 0.5053 * y * y + 0.299 * i * i + 0.1957 * q * q;
-  return y > 0 ? -delta : delta;
-}
-function drawPixel(output, pos, r, g, b) {
-  output[pos + 0] = r;
-  output[pos + 1] = g;
-  output[pos + 2] = b;
-  output[pos + 3] = 255;
-}
-function drawGrayPixel(img, i, alpha, output) {
-  const val = 255 + (img[i] * 0.29889531 + img[i + 1] * 0.58662247 + img[i + 2] * 0.11448223 - 255) * alpha * img[i + 3] / 255;
-  drawPixel(output, i, val, val, val);
-}
-var init_pixelmatch = __esm({
-  "node_modules/pixelmatch/index.js"() {
-  }
-});
-
-// node_modules/node-cron/dist/esm/create-id.js
-var require_create_id = __commonJS({
-  "node_modules/node-cron/dist/esm/create-id.js"(exports2) {
+var NodeKeychain;
+var init_keychain = __esm({
+  "packages/vault/src/keychain.ts"() {
     "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.createID = createID;
-    var node_crypto_1 = __importDefault(require("node:crypto"));
-    function createID(prefix = "", length = 16) {
-      const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      const values = node_crypto_1.default.randomBytes(length);
-      const id = Array.from(values, (v) => charset[v % charset.length]).join("");
-      return prefix ? `${prefix}-${id}` : id;
-    }
-  }
-});
-
-// node_modules/node-cron/dist/esm/logger.js
-var require_logger = __commonJS({
-  "node_modules/node-cron/dist/esm/logger.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    var levelColors = {
-      INFO: "\x1B[36m",
-      WARN: "\x1B[33m",
-      ERROR: "\x1B[31m",
-      DEBUG: "\x1B[35m"
-    };
-    var GREEN = "\x1B[32m";
-    var RESET = "\x1B[0m";
-    function log(level, message, extra) {
-      const timestamp = (/* @__PURE__ */ new Date()).toISOString();
-      const color = levelColors[level] ?? "";
-      const prefix = `[${timestamp}] [PID: ${process.pid}] ${GREEN}[NODE-CRON]${GREEN} ${color}[${level}]${RESET}`;
-      const output = `${prefix} ${message}`;
-      switch (level) {
-        case "ERROR":
-          console.error(output, extra ?? "");
-          break;
-        case "DEBUG":
-          console.debug(output, extra ?? "");
-          break;
-        case "WARN":
-          console.warn(output);
-          break;
-        case "INFO":
-        default:
-          console.info(output);
-          break;
+    NodeKeychain = class {
+      service;
+      useNative = false;
+      keytar = null;
+      constructor(service) {
+        this.service = service;
+        this.tryLoadKeytar();
       }
-    }
-    var logger = {
-      info(message) {
-        log("INFO", message);
-      },
-      warn(message) {
-        log("WARN", message);
-      },
-      error(message, err) {
-        if (message instanceof Error) {
-          log("ERROR", message.message, message);
-        } else {
-          log("ERROR", message, err);
-        }
-      },
-      debug(message, err) {
-        if (message instanceof Error) {
-          log("DEBUG", message.message, message);
-        } else {
-          log("DEBUG", message, err);
-        }
-      }
-    };
-    exports2.default = logger;
-  }
-});
-
-// node_modules/node-cron/dist/esm/promise/tracked-promise.js
-var require_tracked_promise = __commonJS({
-  "node_modules/node-cron/dist/esm/promise/tracked-promise.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.TrackedPromise = void 0;
-    var TrackedPromise = class {
-      promise;
-      error;
-      state;
-      value;
-      constructor(executor) {
-        this.state = "pending";
-        this.promise = new Promise((resolve, reject) => {
-          executor((value) => {
-            this.state = "fulfilled";
-            this.value = value;
-            resolve(value);
-          }, (error) => {
-            this.state = "rejected";
-            this.error = error;
-            reject(error);
-          });
-        });
-      }
-      getPromise() {
-        return this.promise;
-      }
-      getState() {
-        return this.state;
-      }
-      isPending() {
-        return this.state === "pending";
-      }
-      isFulfilled() {
-        return this.state === "fulfilled";
-      }
-      isRejected() {
-        return this.state === "rejected";
-      }
-      getValue() {
-        return this.value;
-      }
-      getError() {
-        return this.error;
-      }
-      then(onfulfilled, onrejected) {
-        return this.promise.then(onfulfilled, onrejected);
-      }
-      catch(onrejected) {
-        return this.promise.catch(onrejected);
-      }
-      finally(onfinally) {
-        return this.promise.finally(onfinally);
-      }
-    };
-    exports2.TrackedPromise = TrackedPromise;
-  }
-});
-
-// node_modules/node-cron/dist/esm/scheduler/runner.js
-var require_runner = __commonJS({
-  "node_modules/node-cron/dist/esm/scheduler/runner.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.Runner = void 0;
-    var create_id_1 = require_create_id();
-    var logger_1 = __importDefault(require_logger());
-    var tracked_promise_1 = require_tracked_promise();
-    function emptyOnFn() {
-    }
-    function emptyHookFn() {
-      return true;
-    }
-    function defaultOnError(date, error) {
-      logger_1.default.error("Task failed with error!", error);
-    }
-    var Runner = class {
-      timeMatcher;
-      onMatch;
-      noOverlap;
-      maxExecutions;
-      maxRandomDelay;
-      runCount;
-      running;
-      heartBeatTimeout;
-      onMissedExecution;
-      onOverlap;
-      onError;
-      beforeRun;
-      onFinished;
-      onMaxExecutions;
-      constructor(timeMatcher, onMatch, options) {
-        this.timeMatcher = timeMatcher;
-        this.onMatch = onMatch;
-        this.noOverlap = options == void 0 || options.noOverlap === void 0 ? false : options.noOverlap;
-        this.maxExecutions = options?.maxExecutions;
-        this.maxRandomDelay = options?.maxRandomDelay || 0;
-        this.onMissedExecution = options?.onMissedExecution || emptyOnFn;
-        this.onOverlap = options?.onOverlap || emptyOnFn;
-        this.onError = options?.onError || defaultOnError;
-        this.onFinished = options?.onFinished || emptyHookFn;
-        this.beforeRun = options?.beforeRun || emptyHookFn;
-        this.onMaxExecutions = options?.onMaxExecutions || emptyOnFn;
-        this.runCount = 0;
-        this.running = false;
-      }
-      start() {
-        this.running = true;
-        let lastExecution;
-        let expectedNextExecution;
-        const scheduleNextHeartBeat = (currentDate) => {
-          if (this.running) {
-            clearTimeout(this.heartBeatTimeout);
-            this.heartBeatTimeout = setTimeout(heartBeat, getDelay(this.timeMatcher, currentDate));
-          }
-        };
-        const runTask = (date) => {
-          return new Promise(async (resolve) => {
-            const execution = {
-              id: (0, create_id_1.createID)("exec"),
-              reason: "scheduled"
-            };
-            const shouldExecute = await this.beforeRun(date, execution);
-            const randomDelay = Math.floor(Math.random() * this.maxRandomDelay);
-            if (shouldExecute) {
-              setTimeout(async () => {
-                try {
-                  this.runCount++;
-                  execution.startedAt = /* @__PURE__ */ new Date();
-                  const result = await this.onMatch(date, execution);
-                  execution.finishedAt = /* @__PURE__ */ new Date();
-                  execution.result = result;
-                  this.onFinished(date, execution);
-                  if (this.maxExecutions && this.runCount >= this.maxExecutions) {
-                    this.onMaxExecutions(date);
-                    this.stop();
-                  }
-                } catch (error) {
-                  execution.finishedAt = /* @__PURE__ */ new Date();
-                  execution.error = error;
-                  this.onError(date, error, execution);
-                }
-                resolve(true);
-              }, randomDelay);
-            }
-          });
-        };
-        const checkAndRun = (date) => {
-          return new tracked_promise_1.TrackedPromise(async (resolve, reject) => {
-            try {
-              if (this.timeMatcher.match(date)) {
-                await runTask(date);
-              }
-              resolve(true);
-            } catch (err) {
-              reject(err);
-            }
-          });
-        };
-        const heartBeat = async () => {
-          const currentDate = nowWithoutMs();
-          if (expectedNextExecution && expectedNextExecution.getTime() < currentDate.getTime()) {
-            while (expectedNextExecution.getTime() < currentDate.getTime()) {
-              logger_1.default.warn(`missed execution at ${expectedNextExecution}! Possible blocking IO or high CPU user at the same process used by node-cron.`);
-              expectedNextExecution = this.timeMatcher.getNextMatch(expectedNextExecution);
-              runAsync(this.onMissedExecution, expectedNextExecution, defaultOnError);
-            }
-          }
-          if (lastExecution && lastExecution.getState() === "pending") {
-            runAsync(this.onOverlap, currentDate, defaultOnError);
-            if (this.noOverlap) {
-              logger_1.default.warn("task still running, new execution blocked by overlap prevention!");
-              expectedNextExecution = this.timeMatcher.getNextMatch(currentDate);
-              scheduleNextHeartBeat(currentDate);
-              return;
-            }
-          }
-          lastExecution = checkAndRun(currentDate);
-          expectedNextExecution = this.timeMatcher.getNextMatch(currentDate);
-          scheduleNextHeartBeat(currentDate);
-        };
-        this.heartBeatTimeout = setTimeout(() => {
-          heartBeat();
-        }, getDelay(this.timeMatcher, nowWithoutMs()));
-      }
-      nextRun() {
-        return this.timeMatcher.getNextMatch(/* @__PURE__ */ new Date());
-      }
-      stop() {
-        this.running = false;
-        if (this.heartBeatTimeout) {
-          clearTimeout(this.heartBeatTimeout);
-          this.heartBeatTimeout = void 0;
-        }
-      }
-      isStarted() {
-        return !!this.heartBeatTimeout && this.running;
-      }
-      isStopped() {
-        return !this.isStarted();
-      }
-      async execute() {
-        const date = /* @__PURE__ */ new Date();
-        const execution = {
-          id: (0, create_id_1.createID)("exec"),
-          reason: "invoked"
-        };
+      /**
+       * Try to load keytar
+       */
+      async tryLoadKeytar() {
         try {
-          const shouldExecute = await this.beforeRun(date, execution);
-          if (shouldExecute) {
-            this.runCount++;
-            execution.startedAt = /* @__PURE__ */ new Date();
-            const result = await this.onMatch(date, execution);
-            execution.finishedAt = /* @__PURE__ */ new Date();
-            execution.result = result;
-            this.onFinished(date, execution);
-          }
-        } catch (error) {
-          execution.finishedAt = /* @__PURE__ */ new Date();
-          execution.error = error;
-          this.onError(date, error, execution);
+          this.keytar = await import("keytar");
+          this.useNative = true;
+        } catch {
+          console.warn("keytar not available, using in-memory storage");
+          this.useNative = false;
         }
       }
-    };
-    exports2.Runner = Runner;
-    async function runAsync(fn, date, onError) {
-      try {
-        await fn(date);
-      } catch (error) {
-        onError(date, error);
-      }
-    }
-    function getDelay(timeMatcher, currentDate) {
-      const maxDelay = 864e5;
-      const nextRun = timeMatcher.getNextMatch(currentDate);
-      const now = /* @__PURE__ */ new Date();
-      const delay = nextRun.getTime() - now.getTime();
-      if (delay > maxDelay) {
-        return maxDelay;
-      }
-      return Math.max(0, delay);
-    }
-    function nowWithoutMs() {
-      const date = /* @__PURE__ */ new Date();
-      date.setMilliseconds(0);
-      return date;
-    }
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/convertion/month-names-conversion.js
-var require_month_names_conversion = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/convertion/month-names-conversion.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.default = /* @__PURE__ */ (() => {
-      const months = [
-        "january",
-        "february",
-        "march",
-        "april",
-        "may",
-        "june",
-        "july",
-        "august",
-        "september",
-        "october",
-        "november",
-        "december"
-      ];
-      const shortMonths = [
-        "jan",
-        "feb",
-        "mar",
-        "apr",
-        "may",
-        "jun",
-        "jul",
-        "aug",
-        "sep",
-        "oct",
-        "nov",
-        "dec"
-      ];
-      function convertMonthName(expression, items) {
-        for (let i = 0; i < items.length; i++) {
-          expression = expression.replace(new RegExp(items[i], "gi"), i + 1);
+      /**
+       * Get a password from keychain
+       */
+      async getPassword(service, account) {
+        if (this.useNative && this.keytar) {
+          return this.keytar.getPassword(service, account || this.service);
         }
-        return expression;
+        return this.getFromMemory(service, account);
       }
-      function interprete(monthExpression) {
-        monthExpression = convertMonthName(monthExpression, months);
-        monthExpression = convertMonthName(monthExpression, shortMonths);
-        return monthExpression;
-      }
-      return interprete;
-    })();
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/convertion/week-day-names-conversion.js
-var require_week_day_names_conversion = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/convertion/week-day-names-conversion.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.default = /* @__PURE__ */ (() => {
-      const weekDays = [
-        "sunday",
-        "monday",
-        "tuesday",
-        "wednesday",
-        "thursday",
-        "friday",
-        "saturday"
-      ];
-      const shortWeekDays = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-      function convertWeekDayName(expression, items) {
-        for (let i = 0; i < items.length; i++) {
-          expression = expression.replace(new RegExp(items[i], "gi"), i);
-        }
-        return expression;
-      }
-      function convertWeekDays(expression) {
-        expression = expression.replace("7", "0");
-        expression = convertWeekDayName(expression, weekDays);
-        return convertWeekDayName(expression, shortWeekDays);
-      }
-      return convertWeekDays;
-    })();
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/convertion/asterisk-to-range-conversion.js
-var require_asterisk_to_range_conversion = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/convertion/asterisk-to-range-conversion.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.default = /* @__PURE__ */ (() => {
-      function convertAsterisk(expression, replecement) {
-        if (expression.indexOf("*") !== -1) {
-          return expression.replace("*", replecement);
-        }
-        return expression;
-      }
-      function convertAsterisksToRanges(expressions) {
-        expressions[0] = convertAsterisk(expressions[0], "0-59");
-        expressions[1] = convertAsterisk(expressions[1], "0-59");
-        expressions[2] = convertAsterisk(expressions[2], "0-23");
-        expressions[3] = convertAsterisk(expressions[3], "1-31");
-        expressions[4] = convertAsterisk(expressions[4], "1-12");
-        expressions[5] = convertAsterisk(expressions[5], "0-6");
-        return expressions;
-      }
-      return convertAsterisksToRanges;
-    })();
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/convertion/range-conversion.js
-var require_range_conversion = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/convertion/range-conversion.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.default = /* @__PURE__ */ (() => {
-      function replaceWithRange(expression, text, init, end, stepTxt) {
-        const step = parseInt(stepTxt);
-        const numbers = [];
-        let last = parseInt(end);
-        let first = parseInt(init);
-        if (first > last) {
-          last = parseInt(init);
-          first = parseInt(end);
-        }
-        for (let i = first; i <= last; i += step) {
-          numbers.push(i);
-        }
-        return expression.replace(new RegExp(text, "i"), numbers.join());
-      }
-      function convertRange(expression) {
-        const rangeRegEx = /(\d+)-(\d+)(\/(\d+)|)/;
-        let match = rangeRegEx.exec(expression);
-        while (match !== null && match.length > 0) {
-          expression = replaceWithRange(expression, match[0], match[1], match[2], match[4] || "1");
-          match = rangeRegEx.exec(expression);
-        }
-        return expression;
-      }
-      function convertAllRanges(expressions) {
-        for (let i = 0; i < expressions.length; i++) {
-          expressions[i] = convertRange(expressions[i]);
-        }
-        return expressions;
-      }
-      return convertAllRanges;
-    })();
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/convertion/index.js
-var require_convertion = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/convertion/index.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    var month_names_conversion_1 = __importDefault(require_month_names_conversion());
-    var week_day_names_conversion_1 = __importDefault(require_week_day_names_conversion());
-    var asterisk_to_range_conversion_1 = __importDefault(require_asterisk_to_range_conversion());
-    var range_conversion_1 = __importDefault(require_range_conversion());
-    exports2.default = /* @__PURE__ */ (() => {
-      function appendSeccondExpression(expressions) {
-        if (expressions.length === 5) {
-          return ["0"].concat(expressions);
-        }
-        return expressions;
-      }
-      function removeSpaces(str) {
-        return str.replace(/\s{2,}/g, " ").trim();
-      }
-      function normalizeIntegers(expressions) {
-        for (let i = 0; i < expressions.length; i++) {
-          const numbers = expressions[i].split(",");
-          for (let j = 0; j < numbers.length; j++) {
-            numbers[j] = parseInt(numbers[j]);
-          }
-          expressions[i] = numbers;
-        }
-        return expressions;
-      }
-      function interprete(expression) {
-        let expressions = removeSpaces(`${expression}`).split(" ");
-        expressions = appendSeccondExpression(expressions);
-        expressions[4] = (0, month_names_conversion_1.default)(expressions[4]);
-        expressions[5] = (0, week_day_names_conversion_1.default)(expressions[5]);
-        expressions = (0, asterisk_to_range_conversion_1.default)(expressions);
-        expressions = (0, range_conversion_1.default)(expressions);
-        expressions = normalizeIntegers(expressions);
-        return expressions;
-      }
-      return interprete;
-    })();
-  }
-});
-
-// node_modules/node-cron/dist/esm/time/localized-time.js
-var require_localized_time = __commonJS({
-  "node_modules/node-cron/dist/esm/time/localized-time.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.LocalizedTime = void 0;
-    var LocalizedTime = class {
-      timestamp;
-      parts;
-      timezone;
-      constructor(date, timezone) {
-        this.timestamp = date.getTime();
-        this.timezone = timezone;
-        this.parts = buildDateParts(date, timezone);
-      }
-      toDate() {
-        return new Date(this.timestamp);
-      }
-      toISO() {
-        const gmt = this.parts.gmt.replace(/^GMT/, "");
-        const offset = gmt ? gmt : "Z";
-        const pad = (n) => String(n).padStart(2, "0");
-        return `${this.parts.year}-${pad(this.parts.month)}-${pad(this.parts.day)}T${pad(this.parts.hour)}:${pad(this.parts.minute)}:${pad(this.parts.second)}.${String(this.parts.milisecond).padStart(3, "0")}` + offset;
-      }
-      getParts() {
-        return this.parts;
-      }
-      set(field, value) {
-        this.parts[field] = value;
-        const newDate = new Date(this.toISO());
-        this.timestamp = newDate.getTime();
-        this.parts = buildDateParts(newDate, this.timezone);
-      }
-    };
-    exports2.LocalizedTime = LocalizedTime;
-    function buildDateParts(date, timezone) {
-      const dftOptions = {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        weekday: "short",
-        hour12: false
-      };
-      if (timezone) {
-        dftOptions.timeZone = timezone;
-      }
-      const dateFormat = new Intl.DateTimeFormat("en-US", dftOptions);
-      const parts = dateFormat.formatToParts(date).filter((part) => {
-        return part.type !== "literal";
-      }).reduce((acc, part) => {
-        acc[part.type] = part.value;
-        return acc;
-      }, {});
-      return {
-        day: parseInt(parts.day),
-        month: parseInt(parts.month),
-        year: parseInt(parts.year),
-        hour: parts.hour === "24" ? 0 : parseInt(parts.hour),
-        minute: parseInt(parts.minute),
-        second: parseInt(parts.second),
-        milisecond: date.getMilliseconds(),
-        weekday: parts.weekday,
-        gmt: getTimezoneGMT(date, timezone)
-      };
-    }
-    function getTimezoneGMT(date, timezone) {
-      const utcDate = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
-      const tzDate = new Date(date.toLocaleString("en-US", { timeZone: timezone }));
-      let offsetInMinutes = (utcDate.getTime() - tzDate.getTime()) / 6e4;
-      const sign = offsetInMinutes <= 0 ? "+" : "-";
-      offsetInMinutes = Math.abs(offsetInMinutes);
-      if (offsetInMinutes === 0)
-        return "Z";
-      const hours = Math.floor(offsetInMinutes / 60).toString().padStart(2, "0");
-      const minutes = Math.floor(offsetInMinutes % 60).toString().padStart(2, "0");
-      return `GMT${sign}${hours}:${minutes}`;
-    }
-  }
-});
-
-// node_modules/node-cron/dist/esm/time/matcher-walker.js
-var require_matcher_walker = __commonJS({
-  "node_modules/node-cron/dist/esm/time/matcher-walker.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.MatcherWalker = void 0;
-    var convertion_1 = __importDefault(require_convertion());
-    var localized_time_1 = require_localized_time();
-    var time_matcher_1 = require_time_matcher();
-    var week_day_names_conversion_1 = __importDefault(require_week_day_names_conversion());
-    var MatcherWalker = class {
-      cronExpression;
-      baseDate;
-      pattern;
-      expressions;
-      timeMatcher;
-      timezone;
-      constructor(cronExpression, baseDate, timezone) {
-        this.cronExpression = cronExpression;
-        this.baseDate = baseDate;
-        this.timeMatcher = new time_matcher_1.TimeMatcher(cronExpression, timezone);
-        this.timezone = timezone;
-        this.expressions = (0, convertion_1.default)(cronExpression);
-      }
-      isMatching() {
-        return this.timeMatcher.match(this.baseDate);
-      }
-      matchNext() {
-        const findNextDateIgnoringWeekday = () => {
-          const baseDate = new Date(this.baseDate.getTime());
-          baseDate.setMilliseconds(0);
-          const localTime = new localized_time_1.LocalizedTime(baseDate, this.timezone);
-          const dateParts = localTime.getParts();
-          const date2 = new localized_time_1.LocalizedTime(localTime.toDate(), this.timezone);
-          const seconds = this.expressions[0];
-          const nextSecond = availableValue(seconds, dateParts.second);
-          if (nextSecond) {
-            date2.set("second", nextSecond);
-            if (this.timeMatcher.match(date2.toDate())) {
-              return date2;
-            }
-          }
-          date2.set("second", seconds[0]);
-          const minutes = this.expressions[1];
-          const nextMinute = availableValue(minutes, dateParts.minute);
-          if (nextMinute) {
-            date2.set("minute", nextMinute);
-            if (this.timeMatcher.match(date2.toDate())) {
-              return date2;
-            }
-          }
-          date2.set("minute", minutes[0]);
-          const hours = this.expressions[2];
-          const nextHour = availableValue(hours, dateParts.hour);
-          if (nextHour) {
-            date2.set("hour", nextHour);
-            if (this.timeMatcher.match(date2.toDate())) {
-              return date2;
-            }
-          }
-          date2.set("hour", hours[0]);
-          const days = this.expressions[3];
-          const nextDay = availableValue(days, dateParts.day);
-          if (nextDay) {
-            date2.set("day", nextDay);
-            if (this.timeMatcher.match(date2.toDate())) {
-              return date2;
-            }
-          }
-          date2.set("day", days[0]);
-          const months = this.expressions[4];
-          const nextMonth = availableValue(months, dateParts.month);
-          if (nextMonth) {
-            date2.set("month", nextMonth);
-            if (this.timeMatcher.match(date2.toDate())) {
-              return date2;
-            }
-          }
-          date2.set("year", date2.getParts().year + 1);
-          date2.set("month", months[0]);
-          return date2;
-        };
-        const date = findNextDateIgnoringWeekday();
-        const weekdays = this.expressions[5];
-        let currentWeekday = parseInt((0, week_day_names_conversion_1.default)(date.getParts().weekday));
-        while (!(weekdays.indexOf(currentWeekday) > -1)) {
-          date.set("year", date.getParts().year + 1);
-          currentWeekday = parseInt((0, week_day_names_conversion_1.default)(date.getParts().weekday));
-        }
-        return date;
-      }
-    };
-    exports2.MatcherWalker = MatcherWalker;
-    function availableValue(values, currentValue) {
-      const availableValues = values.sort((a, b) => a - b).filter((s) => s > currentValue);
-      if (availableValues.length > 0)
-        return availableValues[0];
-      return false;
-    }
-  }
-});
-
-// node_modules/node-cron/dist/esm/time/time-matcher.js
-var require_time_matcher = __commonJS({
-  "node_modules/node-cron/dist/esm/time/time-matcher.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.TimeMatcher = void 0;
-    var index_1 = __importDefault(require_convertion());
-    var week_day_names_conversion_1 = __importDefault(require_week_day_names_conversion());
-    var localized_time_1 = require_localized_time();
-    var matcher_walker_1 = require_matcher_walker();
-    function matchValue(allowedValues, value) {
-      return allowedValues.indexOf(value) !== -1;
-    }
-    var TimeMatcher = class {
-      timezone;
-      pattern;
-      expressions;
-      constructor(pattern, timezone) {
-        this.timezone = timezone;
-        this.pattern = pattern;
-        this.expressions = (0, index_1.default)(pattern);
-      }
-      match(date) {
-        const localizedTime = new localized_time_1.LocalizedTime(date, this.timezone);
-        const parts = localizedTime.getParts();
-        const runOnSecond = matchValue(this.expressions[0], parts.second);
-        const runOnMinute = matchValue(this.expressions[1], parts.minute);
-        const runOnHour = matchValue(this.expressions[2], parts.hour);
-        const runOnDay = matchValue(this.expressions[3], parts.day);
-        const runOnMonth = matchValue(this.expressions[4], parts.month);
-        const runOnWeekDay = matchValue(this.expressions[5], parseInt((0, week_day_names_conversion_1.default)(parts.weekday)));
-        return runOnSecond && runOnMinute && runOnHour && runOnDay && runOnMonth && runOnWeekDay;
-      }
-      getNextMatch(date) {
-        const walker = new matcher_walker_1.MatcherWalker(this.pattern, date, this.timezone);
-        const next = walker.matchNext();
-        return next.toDate();
-      }
-    };
-    exports2.TimeMatcher = TimeMatcher;
-  }
-});
-
-// node_modules/node-cron/dist/esm/tasks/state-machine.js
-var require_state_machine = __commonJS({
-  "node_modules/node-cron/dist/esm/tasks/state-machine.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.StateMachine = void 0;
-    var allowedTransitions = {
-      "stopped": ["stopped", "idle", "destroyed"],
-      "idle": ["idle", "running", "stopped", "destroyed"],
-      "running": ["running", "idle", "stopped", "destroyed"],
-      "destroyed": ["destroyed"]
-    };
-    var StateMachine = class {
-      state;
-      constructor(initial = "stopped") {
-        this.state = initial;
-      }
-      changeState(state) {
-        if (allowedTransitions[this.state].includes(state)) {
-          this.state = state;
-        } else {
-          throw new Error(`invalid transition from ${this.state} to ${state}`);
-        }
-      }
-    };
-    exports2.StateMachine = StateMachine;
-  }
-});
-
-// node_modules/node-cron/dist/esm/tasks/inline-scheduled-task.js
-var require_inline_scheduled_task = __commonJS({
-  "node_modules/node-cron/dist/esm/tasks/inline-scheduled-task.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.InlineScheduledTask = void 0;
-    var events_1 = __importDefault(require("events"));
-    var runner_1 = require_runner();
-    var time_matcher_1 = require_time_matcher();
-    var create_id_1 = require_create_id();
-    var state_machine_1 = require_state_machine();
-    var logger_1 = __importDefault(require_logger());
-    var localized_time_1 = require_localized_time();
-    var TaskEmitter = class extends events_1.default {
-    };
-    var InlineScheduledTask = class {
-      emitter;
-      cronExpression;
-      timeMatcher;
-      runner;
-      id;
-      name;
-      stateMachine;
-      timezone;
-      constructor(cronExpression, taskFn, options) {
-        this.emitter = new TaskEmitter();
-        this.cronExpression = cronExpression;
-        this.id = (0, create_id_1.createID)("task", 12);
-        this.name = options?.name || this.id;
-        this.timezone = options?.timezone;
-        this.timeMatcher = new time_matcher_1.TimeMatcher(cronExpression, options?.timezone);
-        this.stateMachine = new state_machine_1.StateMachine();
-        const runnerOptions = {
-          timezone: options?.timezone,
-          noOverlap: options?.noOverlap,
-          maxExecutions: options?.maxExecutions,
-          maxRandomDelay: options?.maxRandomDelay,
-          beforeRun: (date, execution) => {
-            if (execution.reason === "scheduled") {
-              this.changeState("running");
-            }
-            this.emitter.emit("execution:started", this.createContext(date, execution));
-            return true;
-          },
-          onFinished: (date, execution) => {
-            if (execution.reason === "scheduled") {
-              this.changeState("idle");
-            }
-            this.emitter.emit("execution:finished", this.createContext(date, execution));
-            return true;
-          },
-          onError: (date, error, execution) => {
-            logger_1.default.error(error);
-            this.emitter.emit("execution:failed", this.createContext(date, execution));
-            this.changeState("idle");
-          },
-          onOverlap: (date) => {
-            this.emitter.emit("execution:overlap", this.createContext(date));
-          },
-          onMissedExecution: (date) => {
-            this.emitter.emit("execution:missed", this.createContext(date));
-          },
-          onMaxExecutions: (date) => {
-            this.emitter.emit("execution:maxReached", this.createContext(date));
-            this.destroy();
-          }
-        };
-        this.runner = new runner_1.Runner(this.timeMatcher, (date, execution) => {
-          return taskFn(this.createContext(date, execution));
-        }, runnerOptions);
-      }
-      getNextRun() {
-        if (this.stateMachine.state !== "stopped") {
-          return this.runner.nextRun();
-        }
-        return null;
-      }
-      changeState(state) {
-        if (this.runner.isStarted()) {
-          this.stateMachine.changeState(state);
-        }
-      }
-      start() {
-        if (this.runner.isStopped()) {
-          this.runner.start();
-          this.stateMachine.changeState("idle");
-          this.emitter.emit("task:started", this.createContext(/* @__PURE__ */ new Date()));
-        }
-      }
-      stop() {
-        if (this.runner.isStarted()) {
-          this.runner.stop();
-          this.stateMachine.changeState("stopped");
-          this.emitter.emit("task:stopped", this.createContext(/* @__PURE__ */ new Date()));
-        }
-      }
-      getStatus() {
-        return this.stateMachine.state;
-      }
-      destroy() {
-        if (this.stateMachine.state === "destroyed")
+      /**
+       * Set a password in keychain
+       */
+      async setPassword(service, account, password) {
+        if (this.useNative && this.keytar) {
+          await this.keytar.setPassword(service, account, password);
           return;
-        this.stop();
-        this.stateMachine.changeState("destroyed");
-        this.emitter.emit("task:destroyed", this.createContext(/* @__PURE__ */ new Date()));
+        }
+        this.setInMemory(service, account, password);
       }
-      execute() {
-        return new Promise((resolve, reject) => {
-          const onFail = (context) => {
-            this.off("execution:finished", onFail);
-            reject(context.execution?.error);
-          };
-          const onFinished = (context) => {
-            this.off("execution:failed", onFail);
-            resolve(context.execution?.result);
-          };
-          this.once("execution:finished", onFinished);
-          this.once("execution:failed", onFail);
-          this.runner.execute();
-        });
+      /**
+       * Delete a password from keychain
+       */
+      async deletePassword(service, account) {
+        if (this.useNative && this.keytar) {
+          return this.keytar.deletePassword(service, account);
+        }
+        return this.deleteFromMemory(service, account);
       }
-      on(event, fun) {
-        this.emitter.on(event, fun);
+      /**
+       * Find passwords in keychain
+       */
+      async findPasswords(service) {
+        if (this.useNative && this.keytar) {
+          const credentials = await this.keytar.findCredentials(service);
+          return credentials;
+        }
+        return this.findFromMemory(service);
       }
-      off(event, fun) {
-        this.emitter.off(event, fun);
+      // In-memory fallback storage
+      memory = /* @__PURE__ */ new Map();
+      getMemoryKey(service, account) {
+        return `${service}:${account}`;
       }
-      once(event, fun) {
-        this.emitter.once(event, fun);
+      getFromMemory(service, account) {
+        const key = this.getMemoryKey(service, account || this.service);
+        return this.memory.get(key) || null;
       }
-      createContext(executionDate, execution) {
-        const localTime = new localized_time_1.LocalizedTime(executionDate, this.timezone);
-        const ctx = {
-          date: localTime.toDate(),
-          dateLocalIso: localTime.toISO(),
-          triggeredAt: /* @__PURE__ */ new Date(),
-          task: this,
-          execution
+      setInMemory(service, account, password) {
+        const key = this.getMemoryKey(service, account);
+        this.memory.set(key, password);
+      }
+      deleteFromMemory(service, account) {
+        const key = this.getMemoryKey(service, account);
+        return this.memory.delete(key);
+      }
+      findFromMemory(service) {
+        const results = [];
+        const prefix = `${service}:`;
+        for (const [key, password] of this.memory.entries()) {
+          if (key.startsWith(prefix)) {
+            const account = key.slice(prefix.length);
+            results.push({ account, password });
+          }
+        }
+        return results;
+      }
+    };
+  }
+});
+
+// packages/vault/src/vault.ts
+var vault_exports = {};
+__export(vault_exports, {
+  Vault: () => Vault,
+  createVault: () => createVault,
+  deleteCredential: () => deleteCredential,
+  getCredential: () => getCredential,
+  listCredentials: () => listCredentials,
+  storeCredential: () => storeCredential,
+  vault: () => vault
+});
+function createVault(config) {
+  return new Vault(config);
+}
+async function storeCredential(credential) {
+  return vault.store(credential);
+}
+async function getCredential(id) {
+  return vault.get(id);
+}
+async function listCredentials() {
+  return vault.list();
+}
+async function deleteCredential(id) {
+  return vault.delete(id);
+}
+var DEFAULT_CONFIG, Vault, vault;
+var init_vault = __esm({
+  "packages/vault/src/vault.ts"() {
+    "use strict";
+    init_keychain();
+    DEFAULT_CONFIG = {
+      serviceName: "ghostrun",
+      useKeychain: true,
+      fallbackToFile: true,
+      encryptionKey: ""
+      // Will use machine-derived key if not provided
+    };
+    Vault = class {
+      config;
+      keychain = null;
+      credentials = /* @__PURE__ */ new Map();
+      isInitialized = false;
+      constructor(config = {}) {
+        this.config = { ...DEFAULT_CONFIG, ...config };
+      }
+      /**
+       * Initialize the vault
+       */
+      async initialize() {
+        if (this.isInitialized) return;
+        if (this.config.useKeychain) {
+          try {
+            this.keychain = getKeychain(this.config.serviceName);
+          } catch (error) {
+            console.warn("Keychain not available, falling back to file storage:", error);
+            this.keychain = null;
+          }
+        }
+        await this.loadCredentials();
+        this.isInitialized = true;
+      }
+      /**
+       * Store a credential
+       */
+      async store(credential) {
+        await this.ensureInitialized();
+        const now = /* @__PURE__ */ new Date();
+        const newCredential = {
+          ...credential,
+          id: crypto.randomUUID(),
+          createdAt: now,
+          updatedAt: now
         };
-        return ctx;
-      }
-    };
-    exports2.InlineScheduledTask = InlineScheduledTask;
-  }
-});
-
-// node_modules/node-cron/dist/esm/task-registry.js
-var require_task_registry = __commonJS({
-  "node_modules/node-cron/dist/esm/task-registry.js"(exports2) {
-    "use strict";
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.TaskRegistry = void 0;
-    var tasks = /* @__PURE__ */ new Map();
-    var TaskRegistry = class {
-      add(task) {
-        if (this.has(task.id)) {
-          throw Error(`task ${task.id} already registred!`);
+        if (this.keychain && credential.password) {
+          await this.keychain.setPassword(
+            this.config.serviceName,
+            newCredential.id,
+            credential.password
+          );
         }
-        tasks.set(task.id, task);
-        task.on("task:destroyed", () => {
-          this.remove(task);
-        });
+        const credentialForStorage = { ...newCredential, password: void 0 };
+        this.credentials.set(newCredential.id, credentialForStorage);
+        await this.persistCredentials();
+        return newCredential;
       }
-      get(taskId) {
-        return tasks.get(taskId);
-      }
-      remove(task) {
-        if (this.has(task.id)) {
-          task?.destroy();
-          tasks.delete(task.id);
+      /**
+       * Get a credential
+       */
+      async get(id) {
+        await this.ensureInitialized();
+        const credential = this.credentials.get(id);
+        if (!credential) return null;
+        if (this.keychain) {
+          try {
+            const password = await this.keychain.getPassword(
+              this.config.serviceName,
+              id
+            );
+            return { ...credential, password: password || void 0 };
+          } catch {
+            return credential;
+          }
         }
+        return credential;
       }
-      all() {
-        return tasks;
-      }
-      has(taskId) {
-        return tasks.has(taskId);
-      }
-      killAll() {
-        tasks.forEach((id) => this.remove(id));
-      }
-    };
-    exports2.TaskRegistry = TaskRegistry;
-  }
-});
-
-// node_modules/node-cron/dist/esm/pattern/validation/pattern-validation.js
-var require_pattern_validation = __commonJS({
-  "node_modules/node-cron/dist/esm/pattern/validation/pattern-validation.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    var index_1 = __importDefault(require_convertion());
-    var validationRegex = /^(?:\d+|\*|\*\/\d+)$/;
-    function isValidExpression(expression, min, max) {
-      const options = expression;
-      for (const option of options) {
-        const optionAsInt = parseInt(option, 10);
-        if (!Number.isNaN(optionAsInt) && (optionAsInt < min || optionAsInt > max) || !validationRegex.test(option))
-          return false;
-      }
-      return true;
-    }
-    function isInvalidSecond(expression) {
-      return !isValidExpression(expression, 0, 59);
-    }
-    function isInvalidMinute(expression) {
-      return !isValidExpression(expression, 0, 59);
-    }
-    function isInvalidHour(expression) {
-      return !isValidExpression(expression, 0, 23);
-    }
-    function isInvalidDayOfMonth(expression) {
-      return !isValidExpression(expression, 1, 31);
-    }
-    function isInvalidMonth(expression) {
-      return !isValidExpression(expression, 1, 12);
-    }
-    function isInvalidWeekDay(expression) {
-      return !isValidExpression(expression, 0, 7);
-    }
-    function validateFields(patterns, executablePatterns) {
-      if (isInvalidSecond(executablePatterns[0]))
-        throw new Error(`${patterns[0]} is a invalid expression for second`);
-      if (isInvalidMinute(executablePatterns[1]))
-        throw new Error(`${patterns[1]} is a invalid expression for minute`);
-      if (isInvalidHour(executablePatterns[2]))
-        throw new Error(`${patterns[2]} is a invalid expression for hour`);
-      if (isInvalidDayOfMonth(executablePatterns[3]))
-        throw new Error(`${patterns[3]} is a invalid expression for day of month`);
-      if (isInvalidMonth(executablePatterns[4]))
-        throw new Error(`${patterns[4]} is a invalid expression for month`);
-      if (isInvalidWeekDay(executablePatterns[5]))
-        throw new Error(`${patterns[5]} is a invalid expression for week day`);
-    }
-    function validate(pattern) {
-      if (typeof pattern !== "string")
-        throw new TypeError("pattern must be a string!");
-      const patterns = pattern.split(" ");
-      const executablePatterns = (0, index_1.default)(pattern);
-      if (patterns.length === 5)
-        patterns.unshift("0");
-      validateFields(patterns, executablePatterns);
-    }
-    exports2.default = validate;
-  }
-});
-
-// node_modules/node-cron/dist/esm/tasks/background-scheduled-task/background-scheduled-task.js
-var require_background_scheduled_task = __commonJS({
-  "node_modules/node-cron/dist/esm/tasks/background-scheduled-task/background-scheduled-task.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    var path_1 = require("path");
-    var child_process_1 = require("child_process");
-    var create_id_1 = require_create_id();
-    var stream_1 = require("stream");
-    var state_machine_1 = require_state_machine();
-    var localized_time_1 = require_localized_time();
-    var logger_1 = __importDefault(require_logger());
-    var time_matcher_1 = require_time_matcher();
-    var daemonPath = (0, path_1.resolve)(__dirname, "daemon.js");
-    var TaskEmitter = class extends stream_1.EventEmitter {
-    };
-    var BackgroundScheduledTask = class {
-      emitter;
-      id;
-      name;
-      cronExpression;
-      taskPath;
-      options;
-      forkProcess;
-      stateMachine;
-      constructor(cronExpression, taskPath, options) {
-        this.cronExpression = cronExpression;
-        this.taskPath = taskPath;
-        this.options = options;
-        this.id = (0, create_id_1.createID)("task");
-        this.name = options?.name || this.id;
-        this.emitter = new TaskEmitter();
-        this.stateMachine = new state_machine_1.StateMachine("stopped");
-        this.on("task:stopped", () => {
-          this.forkProcess?.kill();
-          this.forkProcess = void 0;
-          this.stateMachine.changeState("stopped");
-        });
-        this.on("task:destroyed", () => {
-          this.forkProcess?.kill();
-          this.forkProcess = void 0;
-          this.stateMachine.changeState("destroyed");
-        });
-      }
-      getNextRun() {
-        if (this.stateMachine.state !== "stopped") {
-          const timeMatcher = new time_matcher_1.TimeMatcher(this.cronExpression, this.options?.timezone);
-          return timeMatcher.getNextMatch(/* @__PURE__ */ new Date());
+      /**
+       * Get credential by name
+       */
+      async getByName(name) {
+        await this.ensureInitialized();
+        for (const credential of this.credentials.values()) {
+          if (credential.name === name) {
+            return this.get(credential.id);
+          }
         }
         return null;
       }
-      start() {
-        return new Promise((resolve, reject) => {
-          if (this.forkProcess) {
-            return resolve(void 0);
-          }
-          const timeout = setTimeout(() => {
-            reject(new Error("Start operation timed out"));
-          }, 5e3);
-          try {
-            this.forkProcess = (0, child_process_1.fork)(daemonPath);
-            this.forkProcess.on("error", (err) => {
-              clearTimeout(timeout);
-              reject(new Error(`Error on daemon: ${err.message}`));
-            });
-            this.forkProcess.on("exit", (code, signal) => {
-              if (code !== 0 && signal !== "SIGTERM") {
-                const erro = new Error(`node-cron daemon exited with code ${code || signal}`);
-                logger_1.default.error(erro);
-                clearTimeout(timeout);
-                reject(erro);
-              }
-            });
-            this.forkProcess.on("message", (message) => {
-              if (message.jsonError) {
-                if (message.context?.execution) {
-                  message.context.execution.error = deserializeError(message.jsonError);
-                  delete message.jsonError;
-                }
-              }
-              if (message.context?.task?.state) {
-                this.stateMachine.changeState(message.context?.task?.state);
-              }
-              if (message.context) {
-                const execution = message.context?.execution;
-                delete execution?.hasError;
-                const context = this.createContext(new Date(message.context.date), execution);
-                this.emitter.emit(message.event, context);
-              }
-            });
-            this.once("task:started", () => {
-              this.stateMachine.changeState("idle");
-              clearTimeout(timeout);
-              resolve(void 0);
-            });
-            this.forkProcess.send({
-              command: "task:start",
-              path: this.taskPath,
-              cron: this.cronExpression,
-              options: this.options
-            });
-          } catch (error) {
-            reject(error);
-          }
-        });
+      /**
+       * List all credentials (without passwords)
+       */
+      async list() {
+        await this.ensureInitialized();
+        return Array.from(this.credentials.values());
       }
-      stop() {
-        return new Promise((resolve, reject) => {
-          if (!this.forkProcess) {
-            return resolve(void 0);
-          }
-          const timeoutId = setTimeout(() => {
-            clearTimeout(timeoutId);
-            reject(new Error("Stop operation timed out"));
-          }, 5e3);
-          const cleanupAndResolve = () => {
-            clearTimeout(timeoutId);
-            this.off("task:stopped", onStopped);
-            this.forkProcess = void 0;
-            resolve(void 0);
-          };
-          const onStopped = () => {
-            cleanupAndResolve();
-          };
-          this.once("task:stopped", onStopped);
-          this.forkProcess.send({
-            command: "task:stop"
-          });
-        });
-      }
-      getStatus() {
-        return this.stateMachine.state;
-      }
-      destroy() {
-        return new Promise((resolve, reject) => {
-          if (!this.forkProcess) {
-            return resolve(void 0);
-          }
-          const timeoutId = setTimeout(() => {
-            clearTimeout(timeoutId);
-            reject(new Error("Destroy operation timed out"));
-          }, 5e3);
-          const onDestroy = () => {
-            clearTimeout(timeoutId);
-            this.off("task:destroyed", onDestroy);
-            resolve(void 0);
-          };
-          this.once("task:destroyed", onDestroy);
-          this.forkProcess.send({
-            command: "task:destroy"
-          });
-        });
-      }
-      execute() {
-        return new Promise((resolve, reject) => {
-          if (!this.forkProcess) {
-            return reject(new Error("Cannot execute background task because it hasn't been started yet. Please initialize the task using the start() method before attempting to execute it."));
-          }
-          const timeoutId = setTimeout(() => {
-            cleanupListeners();
-            reject(new Error("Execution timeout exceeded"));
-          }, 5e3);
-          const cleanupListeners = () => {
-            clearTimeout(timeoutId);
-            this.off("execution:finished", onFinished);
-            this.off("execution:failed", onFail);
-          };
-          const onFinished = (context) => {
-            cleanupListeners();
-            resolve(context.execution?.result);
-          };
-          const onFail = (context) => {
-            cleanupListeners();
-            reject(context.execution?.error || new Error("Execution failed without specific error"));
-          };
-          this.once("execution:finished", onFinished);
-          this.once("execution:failed", onFail);
-          this.forkProcess.send({
-            command: "task:execute"
-          });
-        });
-      }
-      on(event, fun) {
-        this.emitter.on(event, fun);
-      }
-      off(event, fun) {
-        this.emitter.off(event, fun);
-      }
-      once(event, fun) {
-        this.emitter.once(event, fun);
-      }
-      createContext(executionDate, execution) {
-        const localTime = new localized_time_1.LocalizedTime(executionDate, this.options?.timezone);
-        const ctx = {
-          date: localTime.toDate(),
-          dateLocalIso: localTime.toISO(),
-          triggeredAt: /* @__PURE__ */ new Date(),
-          task: this,
-          execution
+      /**
+       * Update a credential
+       */
+      async update(id, updates) {
+        await this.ensureInitialized();
+        const existing = this.credentials.get(id);
+        if (!existing) return null;
+        const updated = {
+          ...existing,
+          ...updates,
+          id: existing.id,
+          createdAt: existing.createdAt,
+          updatedAt: /* @__PURE__ */ new Date()
         };
-        return ctx;
-      }
-    };
-    function deserializeError(str) {
-      const data = JSON.parse(str);
-      const Err = globalThis[data.name] || Error;
-      const err = new Err(data.message);
-      if (data.stack) {
-        err.stack = data.stack;
-      }
-      Object.keys(data).forEach((key) => {
-        if (!["name", "message", "stack"].includes(key)) {
-          err[key] = data[key];
+        if (this.keychain && updates.password) {
+          await this.keychain.setPassword(
+            this.config.serviceName,
+            id,
+            updates.password
+          );
+          updated.password = void 0;
         }
-      });
-      return err;
-    }
-    exports2.default = BackgroundScheduledTask;
-  }
-});
-
-// node_modules/node-cron/dist/esm/node-cron.js
-var require_node_cron = __commonJS({
-  "node_modules/node-cron/dist/esm/node-cron.js"(exports2) {
-    "use strict";
-    var __importDefault = exports2 && exports2.__importDefault || function(mod) {
-      return mod && mod.__esModule ? mod : { "default": mod };
-    };
-    Object.defineProperty(exports2, "__esModule", { value: true });
-    exports2.nodeCron = exports2.getTask = exports2.getTasks = void 0;
-    exports2.schedule = schedule;
-    exports2.createTask = createTask;
-    exports2.solvePath = solvePath;
-    exports2.validate = validate;
-    var inline_scheduled_task_1 = require_inline_scheduled_task();
-    var task_registry_1 = require_task_registry();
-    var pattern_validation_1 = __importDefault(require_pattern_validation());
-    var background_scheduled_task_1 = __importDefault(require_background_scheduled_task());
-    var path_1 = __importDefault(require("path"));
-    var url_1 = require("url");
-    var registry = new task_registry_1.TaskRegistry();
-    function schedule(expression, func, options) {
-      const task = createTask(expression, func, options);
-      task.start();
-      return task;
-    }
-    function createTask(expression, func, options) {
-      let task;
-      if (func instanceof Function) {
-        task = new inline_scheduled_task_1.InlineScheduledTask(expression, func, options);
-      } else {
-        const taskPath = solvePath(func);
-        task = new background_scheduled_task_1.default(expression, taskPath, options);
+        this.credentials.set(id, updated);
+        await this.persistCredentials();
+        return this.get(id);
       }
-      registry.add(task);
-      return task;
-    }
-    function solvePath(filePath) {
-      if (path_1.default.isAbsolute(filePath))
-        return (0, url_1.pathToFileURL)(filePath).href;
-      if (filePath.startsWith("file://"))
-        return filePath;
-      const stackLines = new Error().stack?.split("\n");
-      if (stackLines) {
-        stackLines?.shift();
-        const callerLine = stackLines?.find((line) => {
-          return line.indexOf(__filename) === -1;
-        });
-        const match = callerLine?.match(/(file:\/\/)?(((\/?)(\w:))?([/\\].+)):\d+:\d+/);
-        if (match) {
-          const dir = `${match[5] ?? ""}${path_1.default.dirname(match[6])}`;
-          return (0, url_1.pathToFileURL)(path_1.default.resolve(dir, filePath)).href;
+      /**
+       * Delete a credential
+       */
+      async delete(id) {
+        await this.ensureInitialized();
+        if (this.keychain) {
+          try {
+            await this.keychain.deletePassword(this.config.serviceName, id);
+          } catch {
+          }
+        }
+        const deleted = this.credentials.delete(id);
+        if (deleted) {
+          await this.persistCredentials();
+        }
+        return deleted;
+      }
+      /**
+       * Search credentials
+       */
+      async search(query) {
+        await this.ensureInitialized();
+        const results = [];
+        for (const credential of this.credentials.values()) {
+          let matches = true;
+          if (query.name && !credential.name.toLowerCase().includes(query.name.toLowerCase())) {
+            matches = false;
+          }
+          if (query.url && credential.url && !credential.url.includes(query.url)) {
+            matches = false;
+          }
+          if (query.tag && !credential.tags.includes(query.tag)) {
+            matches = false;
+          }
+          if (matches) {
+            results.push(credential);
+          }
+        }
+        return results;
+      }
+      /**
+       * Ensure vault is initialized
+       */
+      async ensureInitialized() {
+        if (!this.isInitialized) {
+          await this.initialize();
         }
       }
-      throw new Error(`Could not locate task file ${filePath}`);
-    }
-    function validate(expression) {
-      try {
-        (0, pattern_validation_1.default)(expression);
-        return true;
-      } catch (e) {
-        return false;
+      /**
+       * Load credentials from storage
+       */
+      async loadCredentials() {
+        const fs5 = await import("fs");
+        const path5 = await import("path");
+        const configDir = path5.join(process.env.HOME || ".", ".ghostrun", "vault");
+        const metaPath = path5.join(configDir, "credentials.meta.json");
+        if (fs5.existsSync(metaPath)) {
+          try {
+            const content = await fs5.promises.readFile(metaPath, "utf-8");
+            const data = JSON.parse(content);
+            for (const cred of data) {
+              this.credentials.set(cred.id, {
+                ...cred,
+                createdAt: new Date(cred.createdAt),
+                updatedAt: new Date(cred.updatedAt)
+              });
+            }
+          } catch (error) {
+            console.error("Failed to load credentials:", error);
+          }
+        }
       }
-    }
-    exports2.getTasks = registry.all;
-    exports2.getTask = registry.get;
-    exports2.nodeCron = {
-      schedule,
-      createTask,
-      validate,
-      getTasks: exports2.getTasks,
-      getTask: exports2.getTask
+      /**
+       * Persist credentials to storage
+       */
+      async persistCredentials() {
+        const fs5 = await import("fs");
+        const path5 = await import("path");
+        const configDir = path5.join(process.env.HOME || ".", ".ghostrun", "vault");
+        if (!fs5.existsSync(configDir)) {
+          fs5.mkdirSync(configDir, { recursive: true });
+        }
+        const metaPath = path5.join(configDir, "credentials.meta.json");
+        const data = Array.from(this.credentials.values()).map((cred) => ({
+          ...cred,
+          password: void 0
+          // Never write password to file
+        }));
+        await fs5.promises.writeFile(metaPath, JSON.stringify(data, null, 2), "utf-8");
+      }
+      /**
+       * Export credentials (encrypted)
+       */
+      async exportCredentials() {
+        const credentials = await this.list();
+        return JSON.stringify(credentials, null, 2);
+      }
+      /**
+       * Import credentials
+       */
+      async importCredentials(json) {
+        const data = JSON.parse(json);
+        let imported = 0;
+        for (const cred of data) {
+          await this.store(cred);
+          imported++;
+        }
+        return imported;
+      }
     };
-    exports2.default = exports2.nodeCron;
+    vault = createVault();
   }
 });
 
 // ghostrun.ts
 var import_playwright = require("playwright");
 var import_chalk = __toESM(require("chalk"));
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
 var readline = __toESM(require("readline"));
-var import_uuid2 = require("uuid");
+var import_crypto4 = require("crypto");
 
 // packages/database/src/manager.ts
 var fs = __toESM(require("fs"), 1);
 var path = __toESM(require("path"), 1);
 var import_better_sqlite3 = __toESM(require("better-sqlite3"), 1);
-var import_uuid = require("uuid");
+var import_crypto = require("crypto");
 var HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
 var DATA_PATH = path.join(HOME_DIR, ".ghostrun");
-var DB_PATH = path.join(DATA_PATH, "data", "ghostrun.db");
+var DEFAULT_DB_PATH = path.join(DATA_PATH, "data", "ghostrun.db");
 var DatabaseManager = class _DatabaseManager {
   db;
-  constructor() {
-    fs.mkdirSync(path.join(DATA_PATH, "data"), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, "screenshots"), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, "sessions"), { recursive: true });
-    this.db = new import_better_sqlite3.default(DB_PATH);
+  screenshotsBase;
+  sessionsBase;
+  flowSyncHook;
+  setFlowSyncHook(hook) {
+    this.flowSyncHook = hook;
+  }
+  constructor(options = {}) {
+    const dbPath = options.dbPath || DEFAULT_DB_PATH;
+    this.screenshotsBase = options.screenshotsPath || path.join(DATA_PATH, "screenshots");
+    this.sessionsBase = options.sessionsPath || path.join(DATA_PATH, "sessions");
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    fs.mkdirSync(this.screenshotsBase, { recursive: true });
+    fs.mkdirSync(this.sessionsBase, { recursive: true });
+    this.db = new import_better_sqlite3.default(dbPath);
     this.initialize();
     this.runMigrations();
+  }
+  getDbPath() {
+    return this.db.name;
   }
   initialize() {
     this.db.pragma("foreign_keys = ON");
@@ -3763,15 +540,33 @@ var DatabaseManager = class _DatabaseManager {
         completed_at TEXT,
         FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS scrape_runs (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        reason TEXT,
+        max_pages INTEGER NOT NULL DEFAULT 1,
+        selector TEXT,
+        pages_count INTEGER NOT NULL DEFAULT 0,
+        result_path TEXT,
+        run_id TEXT,
+        step_number INTEGER,
+        explore_report_id TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+      );
     `);
   }
   // ---- Flows ----
   createFlow(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const createdBy = data.createdBy || "human";
     this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now, createdBy);
-    return this.getFlow(id);
+    const flow = this.getFlow(id);
+    this.flowSyncHook?.("create", flow);
+    return flow;
   }
   verifyFlow(id) {
     this.db.prepare("UPDATE flows SET verified = 1 WHERE id = ?").run(id);
@@ -3813,10 +608,15 @@ var DatabaseManager = class _DatabaseManager {
     updates.push("updated_at = datetime('now')");
     values.push(id);
     this.db.prepare(`UPDATE flows SET ${updates.join(", ")} WHERE id = ?`).run(...values);
-    return this.getFlow(id);
+    const flow = this.getFlow(id);
+    if (flow) this.flowSyncHook?.("update", flow);
+    return flow;
   }
   deleteFlow(id) {
-    return this.db.prepare("DELETE FROM flows WHERE id = ?").run(id).changes > 0;
+    const flow = this.getFlow(id);
+    const ok = this.db.prepare("DELETE FROM flows WHERE id = ?").run(id).changes > 0;
+    if (ok && flow) this.flowSyncHook?.("delete", flow);
+    return ok;
   }
   mapFlow(r) {
     return {
@@ -3833,7 +633,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Runs ----
   createRun(flowId) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO runs (id, flow_id, status, started_at) VALUES (?, ?, 'running', datetime('now'))`).run(id, flowId);
     return this.getRun(id);
   }
@@ -3891,7 +691,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Steps ----
   createStep(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO steps (id, run_id, step_number, name, action, selector, value, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`).run(id, data.runId, data.stepNumber, data.name, data.action, data.selector || null, data.value || null);
     return this.getStep(id);
   }
@@ -3946,13 +746,13 @@ var DatabaseManager = class _DatabaseManager {
     };
   }
   getScreenshotsPath(runId) {
-    const dir = path.join(DATA_PATH, "screenshots", runId);
+    const dir = path.join(this.screenshotsBase, runId);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
   // ---- Schedules ----
   createSchedule(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO schedules (id, flow_id, name, cron_expression) VALUES (?, ?, ?, ?)`).run(id, data.flowId, data.name, data.cronExpression);
     return this.getSchedule(id);
   }
@@ -4022,6 +822,14 @@ var DatabaseManager = class _DatabaseManager {
       avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER,
       min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT,
       started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT
+    )`,
+    // v8: scrape_runs table
+    `CREATE TABLE IF NOT EXISTS scrape_runs (
+      id TEXT PRIMARY KEY, url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running',
+      reason TEXT, max_pages INTEGER NOT NULL DEFAULT 1, selector TEXT,
+      pages_count INTEGER NOT NULL DEFAULT 0, result_path TEXT, run_id TEXT,
+      step_number INTEGER, explore_report_id TEXT, error_message TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT
     )`
     // --- add new migrations below this line ---
   ];
@@ -4051,7 +859,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Suites ----
   createSuite(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO suites (id, name, description) VALUES (?, ?, ?)`).run(id, data.name, data.description || null);
     return this.getSuite(id);
   }
@@ -4075,7 +883,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   addFlowToSuite(suiteId, flowId) {
     const count = this.db.prepare("SELECT COUNT(*) as c FROM suite_flows WHERE suite_id = ?").get(suiteId).c;
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO suite_flows (id, suite_id, flow_id, order_index) VALUES (?, ?, ?, ?)`).run(id, suiteId, flowId, count);
   }
   removeFlowFromSuite(suiteId, flowId) {
@@ -4090,7 +898,7 @@ var DatabaseManager = class _DatabaseManager {
     if (existing) {
       this.db.prepare("UPDATE baselines SET screenshot_path = ?, captured_at = datetime('now') WHERE id = ?").run(screenshotPath, existing.id);
     } else {
-      this.db.prepare("INSERT INTO baselines (id, flow_id, step_number, screenshot_path) VALUES (?, ?, ?, ?)").run((0, import_uuid.v4)(), flowId, stepNumber, screenshotPath);
+      this.db.prepare("INSERT INTO baselines (id, flow_id, step_number, screenshot_path) VALUES (?, ?, ?, ?)").run((0, import_crypto.randomUUID)(), flowId, stepNumber, screenshotPath);
     }
   }
   getBaseline(flowId, stepNumber) {
@@ -4104,7 +912,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Explore Reports ----
   createExploreReport(url, environment) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO explore_reports (id, url, environment, status) VALUES (?, ?, ?, 'pending')`).run(id, url, environment);
     return this.getExploreReport(id);
   }
@@ -4136,7 +944,7 @@ var DatabaseManager = class _DatabaseManager {
     if (updates.length > 0) this.db.prepare(`UPDATE explore_reports SET ${updates.join(", ")} WHERE id = ?`).run(...values);
   }
   createExploreCandidate(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO explore_candidates (id, report_id, name, description, route, screenshot_path, graph) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, data.reportId, data.name, data.description, data.route, data.screenshotPath || null, JSON.stringify(data.graph));
     return id;
   }
@@ -4146,12 +954,88 @@ var DatabaseManager = class _DatabaseManager {
   confirmExploreCandidate(id) {
     this.db.prepare("UPDATE explore_candidates SET confirmed = 1 WHERE id = ?").run(id);
   }
+  // ---- Scrape Runs ----
+  createScrapeRun(data) {
+    const id = (0, import_crypto.randomUUID)();
+    this.db.prepare(`INSERT INTO scrape_runs
+      (id, url, reason, max_pages, selector, run_id, step_number, explore_report_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      id,
+      data.url,
+      data.reason || null,
+      data.maxPages || 1,
+      data.selector || null,
+      data.runId || null,
+      data.stepNumber || null,
+      data.exploreReportId || null
+    );
+    return this.getScrapeRun(id);
+  }
+  updateScrapeRun(id, data) {
+    const updates = [];
+    const values = [];
+    if (data.status !== void 0) {
+      updates.push("status = ?");
+      values.push(data.status);
+    }
+    if (data.pagesCount !== void 0) {
+      updates.push("pages_count = ?");
+      values.push(data.pagesCount);
+    }
+    if (data.resultPath !== void 0) {
+      updates.push("result_path = ?");
+      values.push(data.resultPath);
+    }
+    if (data.errorMessage !== void 0) {
+      updates.push("error_message = ?");
+      values.push(data.errorMessage);
+    }
+    if (data.status === "complete" || data.status === "failed") updates.push("completed_at = datetime('now')");
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE scrape_runs SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getScrapeRun(id);
+  }
+  getScrapeRun(id) {
+    const r = this.db.prepare("SELECT * FROM scrape_runs WHERE id = ?").get(id);
+    return r ? this.mapScrapeRun(r) : null;
+  }
+  findScrapeRunByPartialId(q) {
+    const rows = this.db.prepare("SELECT * FROM scrape_runs WHERE id LIKE ? ORDER BY created_at DESC").all(q + "%");
+    return rows.length >= 1 ? this.mapScrapeRun(rows[0]) : null;
+  }
+  listScrapeRuns(limit = 20) {
+    return this.db.prepare("SELECT * FROM scrape_runs ORDER BY created_at DESC LIMIT ?").all(limit).map((r) => this.mapScrapeRun(r));
+  }
+  listScrapeRunsForRun(runId) {
+    return this.db.prepare("SELECT * FROM scrape_runs WHERE run_id = ? ORDER BY created_at DESC").all(runId).map((r) => this.mapScrapeRun(r));
+  }
+  listScrapeRunsForExplore(reportId) {
+    return this.db.prepare("SELECT * FROM scrape_runs WHERE explore_report_id = ? ORDER BY created_at DESC").all(reportId).map((r) => this.mapScrapeRun(r));
+  }
+  mapScrapeRun(r) {
+    return {
+      id: r.id,
+      url: r.url,
+      status: r.status,
+      reason: r.reason,
+      maxPages: r.max_pages,
+      selector: r.selector,
+      pagesCount: r.pages_count,
+      resultPath: r.result_path,
+      runId: r.run_id,
+      stepNumber: r.step_number,
+      exploreReportId: r.explore_report_id,
+      errorMessage: r.error_message,
+      createdAt: new Date(r.created_at),
+      completedAt: r.completed_at ? new Date(r.completed_at) : null
+    };
+  }
   close() {
     this.db.close();
   }
   // ---- Run Data (extracted variables) ----
   saveRunData(runId, stepNumber, variableName, value) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare("INSERT OR REPLACE INTO run_data (id, run_id, step_number, variable_name, variable_value) VALUES (?,?,?,?,?)").run(id, runId, stepNumber, variableName, value);
   }
   getRunData(runId) {
@@ -4170,7 +1054,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Environments ----
   createEnvironment(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO environments (id, name, base_url, variables) VALUES (?, ?, ?, ?)`).run(id, data.name, data.baseUrl || null, JSON.stringify(data.variables || {}));
     return this.getEnvironment(id);
   }
@@ -4227,7 +1111,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- API Responses ----
   saveApiResponse(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO api_responses (id, run_id, step_number, method, url, status_code, response_time_ms, response_headers, response_body, error_message) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
       id,
       data.runId,
@@ -4258,7 +1142,7 @@ var DatabaseManager = class _DatabaseManager {
   }
   // ---- Perf Runs ----
   createPerfRun(data) {
-    const id = (0, import_uuid.v4)();
+    const id = (0, import_crypto.randomUUID)();
     this.db.prepare(`INSERT INTO perf_runs (id, flow_id, flow_name, config, status) VALUES (?, ?, ?, ?, 'running')`).run(id, data.flowId, data.flowName, JSON.stringify(data.config));
     return id;
   }
@@ -4349,9 +1233,1632 @@ var DatabaseManager = class _DatabaseManager {
   }
 };
 
+// run-report-v2.ts
+var import_crypto2 = require("crypto");
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function formatReportDuration(ms) {
+  if (!ms) return "\u2014";
+  if (ms >= 1e3) return (ms / 1e3).toFixed(2) + "s";
+  return ms + "ms";
+}
+function computeFlowGraphHash(graph) {
+  if (!graph) return null;
+  return (0, import_crypto2.createHash)("sha256").update(graph).digest("hex").slice(0, 8);
+}
+function computePassRate(runs) {
+  if (runs.length === 0) return 0;
+  const passed = runs.filter((r) => r.status === "passed").length;
+  return Math.round(passed / runs.length * 100);
+}
+function buildRunHistorySparklineHtml(runs, currentRunId) {
+  if (runs.length === 0) return "";
+  const chronological = [...runs].reverse();
+  const passRate = computePassRate(runs);
+  const bars = chronological.map((r) => {
+    const color = r.status === "passed" ? "#56d364" : r.status === "failed" ? "#f85149" : "#484f58";
+    const isCurrent = currentRunId && r.id === currentRunId;
+    return `<span class="history-bar${isCurrent ? " current" : ""}" style="background:${color}" title="${escapeHtml(r.status)}"></span>`;
+  }).join("");
+  return `<section class="panel history-panel" aria-labelledby="history-heading">
+  <h2 id="history-heading">History</h2>
+  <p class="panel-sub">${passRate}% pass rate \xB7 last ${runs.length} run${runs.length === 1 ? "" : "s"} on this flow</p>
+  <div class="history-sparkline" role="img" aria-label="Pass/fail history: ${passRate}% pass rate over ${runs.length} runs">${bars}</div>
+</section>`;
+}
+function buildRepairDiffPreview(proposal) {
+  if (proposal.currentSelector && proposal.proposedSelector) {
+    return `- ${proposal.currentSelector}
++ ${proposal.proposedSelector}`;
+  }
+  if (proposal.currentValue !== void 0 && proposal.proposedValue !== void 0) {
+    return `- ${proposal.currentValue}
++ ${proposal.proposedValue}`;
+  }
+  if (proposal.rationale) return proposal.rationale;
+  return "Review proposal JSON for suggested changes.";
+}
+function buildRepairPanelHtml(proposals) {
+  if (proposals.length === 0) return "";
+  const cards = proposals.map((p) => {
+    const type = p.repairType || "repair";
+    const diff = buildRepairDiffPreview(p);
+    const applyCmd = `ghostrun repair apply ${p.id.slice(0, 8)}`;
+    const showCmd = `ghostrun repair show ${p.id.slice(0, 8)}`;
+    return `<article class="repair-card">
+      <header class="repair-card-header">
+        <span class="repair-type">${escapeHtml(type)}</span>
+        <span class="repair-status">${escapeHtml(p.status)}</span>
+        ${p.stepNumber != null ? `<span class="repair-step">Step ${p.stepNumber}</span>` : ""}
+      </header>
+      <pre class="repair-diff">${escapeHtml(diff)}</pre>
+      <div class="repair-commands">
+        <code>${escapeHtml(showCmd)}</code>
+        <code>${escapeHtml(applyCmd)}</code>
+      </div>
+    </article>`;
+  }).join("\n");
+  return `<section class="panel repair-panel" aria-labelledby="repair-heading">
+  <h2 id="repair-heading">Repair proposals</h2>
+  <p class="panel-sub">${proposals.length} proposal${proposals.length === 1 ? "" : "s"} linked to this run</p>
+  ${cards}
+</section>`;
+}
+function buildNextStepsPanelHtml(params) {
+  const rows = [
+    { label: "Rerun flow", command: params.rerunCommand },
+    { label: "List repairs", command: params.repairListCommand },
+    { label: "Report path", command: params.reportPath }
+  ];
+  if (params.applyRepairCommand) {
+    rows.splice(1, 0, { label: "Apply repair", command: params.applyRepairCommand });
+  }
+  const items = rows.map(
+    (r) => `<li><span class="cmd-label">${escapeHtml(r.label)}</span><code class="cmd-value">${escapeHtml(r.command)}</code></li>`
+  ).join("\n");
+  return `<section class="panel next-steps-panel" aria-labelledby="next-steps-heading">
+  <h2 id="next-steps-heading">Next steps</h2>
+  <ul class="command-list">${items}</ul>
+</section>`;
+}
+function buildIntentBlockHtml(intent) {
+  if (!intent) return "";
+  return `<section class="panel intent-panel" aria-labelledby="intent-heading">
+  <h2 id="intent-heading">Intent</h2>
+  <p class="intent-text">${escapeHtml(intent)}</p>
+</section>`;
+}
+function buildFailurePanelHtml(failure) {
+  const screenshotHtml = failure.screenshotSrc ? `<img class="failure-screenshot" src="${escapeHtml(failure.screenshotSrc)}" alt="Screenshot at failed step ${failure.stepNumber}" />` : '<p class="failure-missing-shot">No screenshot captured for this step.</p>';
+  const selectorHtml = failure.selector ? `<div class="failure-meta-row"><span class="failure-meta-label">Selector</span><code>${escapeHtml(failure.selector)}</code></div>` : "";
+  return `<section class="panel failure-panel" aria-labelledby="failure-heading">
+  <h2 id="failure-heading">Failure</h2>
+  <p class="panel-sub">Step ${failure.stepNumber}: ${escapeHtml(failure.action)} \u2014 ${escapeHtml(failure.name)}</p>
+  ${screenshotHtml}
+  <pre class="failure-error">${escapeHtml(failure.error)}</pre>
+  ${selectorHtml}
+</section>`;
+}
+var RUN_REPORT_V2_STYLES = `
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:32px 40px 48px}
+.report{max-width:960px;margin:0 auto}
+.hero{background:linear-gradient(180deg,#0d1117 0%,#080c10 100%);border:1px solid #30363d;border-radius:14px;padding:24px 28px;margin-bottom:24px}
+.hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.hero h1{font-size:26px;color:#f0f6fc;font-weight:600;line-height:1.25}
+.status-badge{display:inline-block;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.status-badge.passed{background:#122117;color:#56d364;border:1px solid #238636}
+.status-badge.failed{background:#1c0f0f;color:#f85149;border:1px solid #da3633}
+.status-badge.running,.status-badge.other{background:#161b22;color:#e3b341;border:1px solid #484f58}
+.headline{background:#160b0b;border:1px solid #f8514966;border-radius:10px;padding:14px 18px;margin:14px 0 0;color:#ffb4b4;font-size:15px;line-height:1.5}
+.hero-meta{color:#768390;font-size:13px;display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:12px}
+.hero-meta span{white-space:nowrap}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:24px}
+.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:14px 18px}
+.stat-val{font-size:22px;font-weight:600;color:#f0f6fc}
+.stat-label{font-size:11px;color:#768390;text-transform:uppercase;letter-spacing:.05em;margin-top:4px}
+.panel{background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:20px 22px;margin-bottom:20px}
+.panel h2{font-size:15px;color:#f0f6fc;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.panel-sub{color:#768390;font-size:13px;margin-bottom:14px}
+.intent-text{color:#cdd9e5;font-size:15px;line-height:1.55}
+.history-sparkline{display:flex;align-items:flex-end;gap:3px;height:32px;padding:4px 0}
+.history-bar{flex:1;min-width:4px;max-width:14px;height:100%;border-radius:2px;opacity:.85}
+.history-bar.current{outline:2px solid #f0f6fc;outline-offset:1px;opacity:1}
+.repair-card{background:#080c10;border:1px solid #30363d;border-radius:8px;padding:14px 16px;margin-bottom:12px}
+.repair-card:last-child{margin-bottom:0}
+.repair-card-header{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-bottom:10px;font-size:12px}
+.repair-type{color:#39d0d8;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.repair-status{color:#768390}
+.repair-step{color:#e3b341}
+.repair-diff{background:#160b0b;border:1px solid #30363d;border-radius:6px;padding:10px 12px;font-family:ui-monospace,monospace;font-size:12px;color:#ffb4b4;white-space:pre-wrap;margin-bottom:10px}
+.repair-commands{display:flex;flex-wrap:wrap;gap:8px}
+.repair-commands code{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:12px;color:#79c0ff}
+.command-list{list-style:none;display:flex;flex-direction:column;gap:10px}
+.command-list li{display:flex;flex-direction:column;gap:4px}
+.cmd-label{font-size:11px;color:#768390;text-transform:uppercase;letter-spacing:.05em}
+.cmd-value{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:13px;color:#79c0ff;word-break:break-all}
+.failure-screenshot{width:100%;max-height:420px;object-fit:contain;display:block;border-radius:8px;border:1px solid #30363d;background:#000;margin-bottom:14px}
+.failure-missing-shot{color:#768390;font-size:13px;font-style:italic;margin-bottom:14px}
+.failure-error{background:#160b0b;border:1px solid #30363d;border-radius:8px;padding:12px 14px;font-family:ui-monospace,monospace;font-size:13px;color:#f85149;white-space:pre-wrap;margin-bottom:10px}
+.failure-meta-row{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:13px}
+.failure-meta-label{color:#768390;min-width:72px}
+.failure-meta-row code{color:#39d0d8;font-family:ui-monospace,monospace}
+.timeline{margin-bottom:24px}
+.timeline h2{font-size:15px;color:#f0f6fc;text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px}
+.steps{display:flex;flex-direction:column;gap:8px}
+.step{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.step.failed{border-color:#f85149;box-shadow:0 0 0 1px #f8514933}
+.step.passed{border-color:#21262d}
+.step-header{display:flex;align-items:center;gap:10px;padding:12px 16px;font-family:ui-monospace,monospace;font-size:13px}
+.step-icon{font-size:16px;min-width:20px}
+.step-num{color:#768390;min-width:24px}
+.step-action{color:#39d0d8;min-width:120px}
+.step-label{color:#f0f6fc;flex:1}
+.step-dur{color:#768390;font-size:12px;text-align:right}
+.step-error{padding:10px 16px 12px 50px;color:#f85149;font-size:13px;font-family:ui-monospace,monospace;background:#160b0b;border-top:1px solid #30363d}
+.step-screenshot{width:100%;max-height:320px;object-fit:contain;display:block;border-top:1px solid #30363d;background:#000}
+footer.report-footer{margin-top:32px;padding-top:16px;border-top:1px solid #21262d;color:#768390;font-size:12px;display:flex;flex-wrap:wrap;gap:8px 16px}
+`;
+
+// project-scope.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+var import_crypto3 = require("crypto");
+var activePaths = null;
+function resolveProjectRoot(startDir = process.cwd()) {
+  let dir = path2.resolve(startDir);
+  while (true) {
+    const config = path2.join(dir, ".ghostrun", "config.json");
+    if (fs2.existsSync(config)) return dir;
+    const parent = path2.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function buildProjectPaths(root) {
+  const ghostrunPath = path2.join(root, ".ghostrun");
+  return {
+    root,
+    ghostrunPath,
+    configPath: path2.join(ghostrunPath, "config.json"),
+    projectJsonPath: path2.join(ghostrunPath, "project.json"),
+    dbPath: path2.join(ghostrunPath, "data", "ghostrun.db"),
+    screenshotsPath: path2.join(ghostrunPath, "screenshots"),
+    sessionsPath: path2.join(ghostrunPath, "sessions"),
+    flowsBrowser: path2.join(ghostrunPath, "flows", "browser"),
+    flowsApi: path2.join(ghostrunPath, "flows", "api"),
+    flowsGenerated: path2.join(ghostrunPath, "flows", "generated"),
+    fixturesSql: path2.join(ghostrunPath, "fixtures", "sql"),
+    servicesPath: path2.join(ghostrunPath, "services"),
+    webhooksPath: path2.join(ghostrunPath, "services", "webhooks")
+  };
+}
+function initProjectContext(startDir = process.cwd()) {
+  const root = resolveProjectRoot(startDir) || path2.resolve(startDir);
+  activePaths = buildProjectPaths(root);
+  return activePaths;
+}
+function getProjectPaths() {
+  if (!activePaths) return initProjectContext();
+  return activePaths;
+}
+function ensureProjectDirs(paths = getProjectPaths()) {
+  const dirs = [
+    paths.ghostrunPath,
+    path2.dirname(paths.dbPath),
+    paths.screenshotsPath,
+    paths.sessionsPath,
+    paths.flowsBrowser,
+    paths.flowsApi,
+    paths.flowsGenerated,
+    paths.fixturesSql,
+    paths.servicesPath,
+    paths.webhooksPath,
+    path2.join(paths.ghostrunPath, "profiles"),
+    path2.join(paths.ghostrunPath, "proposals", "repairs"),
+    path2.join(paths.ghostrunPath, "runs"),
+    path2.join(paths.ghostrunPath, "reports"),
+    path2.join(paths.ghostrunPath, "auth", "storage-state"),
+    path2.join(paths.ghostrunPath, "auth", "secrets")
+  ];
+  for (const d of dirs) fs2.mkdirSync(d, { recursive: true });
+}
+function ensureProjectJson(projectName) {
+  const paths = getProjectPaths();
+  if (fs2.existsSync(paths.projectJsonPath)) return;
+  const id = (0, import_crypto3.createHash)("sha256").update(paths.root).digest("hex").slice(0, 16);
+  fs2.writeFileSync(
+    paths.projectJsonPath,
+    JSON.stringify({
+      id,
+      name: projectName || path2.basename(paths.root),
+      root: paths.root,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      schemaVersion: "1"
+    }, null, 2)
+  );
+}
+function flowSlug(name) {
+  return name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "flow";
+}
+function flowFilePath(flow, kind = "browser") {
+  const paths = getProjectPaths();
+  const dir = kind === "api" ? paths.flowsApi : kind === "generated" ? paths.flowsGenerated : paths.flowsBrowser;
+  return path2.join(dir, `${flowSlug(flow.name)}-${flow.id.slice(0, 8)}.flow.json`);
+}
+function writeFlowFile(flow) {
+  const paths = getProjectPaths();
+  ensureProjectDirs(paths);
+  let graph;
+  try {
+    graph = JSON.parse(flow.graph);
+  } catch {
+    graph = {};
+  }
+  const kind = flow.createdBy === "agent" ? "generated" : "browser";
+  const filePath = flowFilePath({ id: flow.id, name: flow.name, createdBy: flow.createdBy }, kind);
+  const payload = {
+    version: "1.1.0",
+    exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    flow: {
+      id: flow.id,
+      name: flow.name,
+      description: flow.description,
+      appUrl: flow.appUrl,
+      graph,
+      createdBy: flow.createdBy
+    }
+  };
+  fs2.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+  return filePath;
+}
+function deleteFlowFile(flowId, flowName) {
+  const paths = getProjectPaths();
+  for (const dir of [paths.flowsBrowser, paths.flowsApi, paths.flowsGenerated]) {
+    if (!fs2.existsSync(dir)) continue;
+    for (const f of fs2.readdirSync(dir)) {
+      if (f.includes(flowId.slice(0, 8))) {
+        fs2.unlinkSync(path2.join(dir, f));
+      }
+    }
+  }
+}
+function listFlowFiles() {
+  const paths = getProjectPaths();
+  const out = [];
+  for (const dir of [paths.flowsBrowser, paths.flowsApi, paths.flowsGenerated]) {
+    if (!fs2.existsSync(dir)) continue;
+    out.push(...fs2.readdirSync(dir).filter((f) => f.endsWith(".flow.json")).map((f) => path2.join(dir, f)));
+  }
+  return out;
+}
+function syncFlowsFromDisk(upsert, findByName, update) {
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const filePath of listFlowFiles()) {
+    try {
+      const raw = JSON.parse(fs2.readFileSync(filePath, "utf8"));
+      const f = raw.flow;
+      if (!f?.name || !f.graph) {
+        skipped++;
+        continue;
+      }
+      const existing = findByName(f.name);
+      if (existing) {
+        update(existing.id, {
+          description: f.description || void 0,
+          appUrl: f.appUrl || void 0,
+          graph: f.graph
+        });
+        updated++;
+      } else {
+        upsert({
+          name: f.name,
+          description: f.description || void 0,
+          appUrl: f.appUrl || void 0,
+          graph: f.graph,
+          createdBy: f.createdBy
+        });
+        imported++;
+      }
+    } catch {
+      skipped++;
+    }
+  }
+  return { imported, updated, skipped };
+}
+function copyDevServicesTemplate() {
+  const paths = getProjectPaths();
+  ensureProjectDirs(paths);
+  const dest = path2.join(paths.servicesPath, "dev.compose.yml");
+  if (fs2.existsSync(dest)) return dest;
+  const content = `# GhostRun Service Bridge \u2014 optional local Mailpit, Redis, Postgres
+# All services are optional. Most SaaS QA uses profile auth + shared credentials instead.
+# Usage (Mailpit only): docker compose -f .ghostrun/services/dev.compose.yml --profile mailpit up -d
+services:
+  mailpit:
+    profiles: ["mailpit", "full"]
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+  redis:
+    profiles: ["full"]
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  postgres:
+    profiles: ["full"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ghostrun
+      POSTGRES_PASSWORD: ghostrun
+      POSTGRES_DB: ghostrun_test
+    ports:
+      - "5433:5432"
+`;
+  fs2.writeFileSync(dest, content);
+  return dest;
+}
+function updateProjectGitignore() {
+  const paths = getProjectPaths();
+  const gitignorePath = path2.join(paths.ghostrunPath, ".gitignore");
+  const lines = [
+    "runs/",
+    "reports/",
+    "screenshots/",
+    "sessions/",
+    "data/ghostrun.db",
+    "data/*.db",
+    "auth/secrets/",
+    "auth/storage-state/*.json",
+    "services/webhooks/*.json",
+    "ai/sessions/",
+    "*.local.json",
+    ".env"
+  ];
+  fs2.writeFileSync(gitignorePath, lines.join("\n") + "\n");
+}
+
+// account-scope.ts
+var DEFAULT_SAAS_ACCOUNT_IDS = ["superadmin", "admin", "manager", "guest"];
+function buildDefaultSaaSAccounts(loginFlow, emailDomain = "yourapp.com") {
+  const accounts = {};
+  for (const id of DEFAULT_SAAS_ACCOUNT_IDS) {
+    const secrets = secretNamesForAccount(id);
+    accounts[id] = buildAccountFromSecrets({
+      id,
+      label: id === "superadmin" ? "Super admin" : id.charAt(0).toUpperCase() + id.slice(1),
+      email: `qa-${id}@${emailDomain}`,
+      emailSecret: secrets.email,
+      passwordSecret: secrets.password,
+      loginFlow
+    });
+  }
+  return accounts;
+}
+var DEFAULT_EMAIL_VAR = "testEmail";
+function normalizeAccountId(id) {
+  return id.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "default";
+}
+function listAccountIds(profile) {
+  return Object.keys(profile.accounts || {}).sort();
+}
+function getProfileAccount(profile, accountId) {
+  const key = normalizeAccountId(accountId);
+  return profile.accounts?.[key] || profile.accounts?.[accountId] || null;
+}
+function resolveSelectedAccountKey(profile, argv = []) {
+  if (!profile?.accounts || Object.keys(profile.accounts).length === 0) return null;
+  const flagIdx = argv.indexOf("--account");
+  if (flagIdx !== -1 && argv[flagIdx + 1]) {
+    return normalizeAccountId(argv[flagIdx + 1]);
+  }
+  if (process.env.GHOSTRUN_ACCOUNT) {
+    return normalizeAccountId(process.env.GHOSTRUN_ACCOUNT);
+  }
+  if (profile.defaultAccount) {
+    return normalizeAccountId(profile.defaultAccount);
+  }
+  return null;
+}
+async function resolveAccountEmail(account, runVars, resolveSecret) {
+  const emailVar = account.emailVar || DEFAULT_EMAIL_VAR;
+  if (runVars[emailVar]) return runVars[emailVar];
+  if (account.email) return account.email;
+  if (account.emailSecret) {
+    const fromSecret = await resolveSecret(account.emailSecret);
+    if (fromSecret) return fromSecret;
+  }
+  if (runVars.testEmail) return runVars.testEmail;
+  if (runVars.accountEmail) return runVars.accountEmail;
+  return void 0;
+}
+async function applyProfileAccount(profile, accountId, runVars, resolveSecret) {
+  const account = getProfileAccount(profile, accountId);
+  if (!account) {
+    throw new Error(
+      `Account "${accountId}" not found on profile "${profile.name}". Defined: ${listAccountIds(profile).join(", ") || "(none)"}. Use: ghostrun profile accounts list ${profile.name}`
+    );
+  }
+  if (!account.passwordSecret) {
+    throw new Error(`Account "${accountId}" on profile "${profile.name}" requires passwordSecret`);
+  }
+  const emailVar = account.emailVar || DEFAULT_EMAIL_VAR;
+  const email = await resolveAccountEmail(account, runVars, resolveSecret);
+  runVars.accountType = accountId;
+  runVars.accountLabel = account.label || accountId;
+  if (email) {
+    runVars.accountEmail = email;
+    runVars[emailVar] = email;
+    runVars.testEmail = email;
+    runVars.PROFILE_AUTH_USERNAME = email;
+    runVars.AUTH_USERNAME = email;
+  }
+  const password = await resolveSecret(account.passwordSecret);
+  if (password) {
+    runVars[account.passwordSecret] = password;
+    runVars.PROFILE_AUTH_PASSWORD = password;
+  }
+  for (const [k, v] of Object.entries(account.metadata || {})) {
+    if (!(k in runVars)) runVars[k] = v;
+  }
+  return { accountId, account, email };
+}
+function getEffectiveAuthForAccount(profile, accountId) {
+  const base = profile.auth || { strategy: "none" };
+  if (!accountId) return base;
+  const account = getProfileAccount(profile, accountId);
+  if (!account) return base;
+  return {
+    ...base,
+    loginFlow: account.loginFlow || base.loginFlow,
+    usernameVar: account.emailVar || base.usernameVar || DEFAULT_EMAIL_VAR,
+    usernameSecret: account.emailSecret || base.usernameSecret,
+    passwordSecret: account.passwordSecret || base.passwordSecret,
+    otpSecret: base.otpSecret,
+    otpVar: base.otpVar
+  };
+}
+function buildAccountFromSecrets(opts) {
+  const emailVar = `${normalizeAccountId(opts.id)}Email`;
+  return {
+    label: opts.label || opts.id,
+    email: opts.email,
+    emailVar,
+    emailSecret: opts.emailSecret || `STAGING_${opts.id.replace(/-/g, "_").toUpperCase()}_EMAIL`,
+    passwordSecret: opts.passwordSecret,
+    loginFlow: opts.loginFlow
+  };
+}
+function secretNamesForAccount(accountId) {
+  const slug = accountId.replace(/-/g, "_").toUpperCase();
+  return {
+    email: `STAGING_${slug}_EMAIL`,
+    password: `STAGING_${slug}_PASSWORD`
+  };
+}
+
+// service-bridge.ts
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
+var http = __toESM(require("http"));
+var crypto2 = __toESM(require("crypto"));
+var hookServer = null;
+function isEmailBridgeEnabled(services) {
+  const provider = services?.email?.provider;
+  if (provider === "none") return false;
+  if (services?.email?.apiUrl) return true;
+  if (provider === "mailpit" || provider === "mailhog") return true;
+  return !!process.env.GHOSTRUN_MAILPIT_URL;
+}
+function isWebhookBridgeEnabled(services) {
+  if (services?.webhook?.provider === "none") return false;
+  return services?.webhook?.provider === "local" || !!services?.webhook?.baseUrl;
+}
+function resolveEmailApiUrl(services) {
+  if (!isEmailBridgeEnabled(services)) return null;
+  return services?.email?.apiUrl || process.env.GHOSTRUN_MAILPIT_URL || "http://localhost:8025";
+}
+async function fetchMailpitMessages(apiUrl) {
+  const res = await fetch(`${apiUrl.replace(/\/$/, "")}/api/v1/messages?limit=50`, {
+    signal: AbortSignal.timeout(5e3)
+  });
+  if (!res.ok) throw new Error(`Mailpit API HTTP ${res.status}`);
+  const data = await res.json();
+  return data.messages || [];
+}
+async function fetchMailpitMessage(apiUrl, id) {
+  const res = await fetch(`${apiUrl.replace(/\/$/, "")}/api/v1/message/${id}`, {
+    signal: AbortSignal.timeout(5e3)
+  });
+  if (!res.ok) throw new Error(`Mailpit message ${id} not found`);
+  return res.json();
+}
+function matchEmailMessage(messages, opts) {
+  const toLower = opts.to?.toLowerCase();
+  const sub = opts.subjectContains?.toLowerCase();
+  const from = opts.fromContains?.toLowerCase();
+  for (const m of messages) {
+    if (toLower) {
+      const recipients = (m.To || []).map((t) => t.Address.toLowerCase());
+      if (!recipients.some((r) => r.includes(toLower)) && !m.To?.some((t) => t.Address.toLowerCase() === toLower)) {
+        continue;
+      }
+    }
+    if (sub && !m.Subject.toLowerCase().includes(sub)) continue;
+    if (from && !m.From?.Address?.toLowerCase().includes(from)) continue;
+    return m;
+  }
+  return null;
+}
+function extractFirstUrl(text) {
+  const match = text.match(/https?:\/\/[^\s"'<>]+/i);
+  return match ? match[0].replace(/[).,;]+$/, "") : null;
+}
+function extractOtpCode(text, length = 6) {
+  const match = text.match(new RegExp(`\\b(\\d{${length}})\\b`));
+  return match ? match[1] : null;
+}
+async function waitForEmail(services, opts) {
+  const apiUrl = resolveEmailApiUrl(services);
+  if (!apiUrl) {
+    throw new Error(
+      "email:wait requires profile.services.email (Mailpit). Optional \u2014 use form/storage-state auth with profile secrets instead, or add services.email to your profile."
+    );
+  }
+  const timeout = opts.timeoutMs ?? services?.email?.timeoutMs ?? 3e4;
+  const start = Date.now();
+  let lastError = "";
+  while (Date.now() - start < timeout) {
+    try {
+      const messages = await fetchMailpitMessages(apiUrl);
+      const hit = matchEmailMessage(messages, opts);
+      if (hit) {
+        const full = await fetchMailpitMessage(apiUrl, hit.ID);
+        return { message: hit, body: full.Text || "", html: full.HTML || "" };
+      }
+      lastError = `No matching email (checked ${messages.length} messages)`;
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error(`email:wait timed out after ${timeout}ms \u2014 ${lastError}`);
+}
+function sanitizeInboxSnapshot(messages, limit = 5) {
+  return messages.slice(0, limit).map(
+    (m) => `- [${m.Created}] ${m.Subject} \u2192 ${(m.To || []).map((t) => t.Address).join(", ")}`
+  ).join("\n");
+}
+function webhookStoreDir() {
+  const dir = getProjectPaths().webhooksPath;
+  fs3.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function listWebhookCaptures(limit = 20) {
+  const dir = webhookStoreDir();
+  return fs3.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().reverse().slice(0, limit).map((f) => JSON.parse(fs3.readFileSync(path3.join(dir, f), "utf8")));
+}
+function saveWebhookCapture(capture) {
+  const file = path3.join(webhookStoreDir(), `${capture.receivedAt.replace(/[:.]/g, "-")}-${capture.id.slice(0, 8)}.json`);
+  fs3.writeFileSync(file, JSON.stringify(capture, null, 2));
+}
+function matchWebhookCapture(captures, pathPattern) {
+  const norm = pathPattern.startsWith("/") ? pathPattern : `/${pathPattern}`;
+  return captures.find((c) => c.path === norm || c.path.endsWith(norm)) || null;
+}
+async function waitForWebhook(services, opts) {
+  const timeout = opts.timeoutMs ?? 3e4;
+  const start = Date.now();
+  const pattern = opts.path;
+  while (Date.now() - start < timeout) {
+    const hit = matchWebhookCapture(listWebhookCaptures(50), pattern);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 1e3));
+  }
+  throw new Error(`webhook:wait timed out after ${timeout}ms for path ${pattern}`);
+}
+function startHookCatcher(port = 8787) {
+  return new Promise((resolve3, reject) => {
+    if (hookServer) {
+      resolve3({ port, url: `http://localhost:${port}` });
+      return;
+    }
+    const server = http.createServer((req, res) => {
+      if (req.method === "GET" && (req.url === "/hooks/health" || req.url === "/health")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, service: "ghostrun-hook-catcher" }));
+        return;
+      }
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const capture = {
+          id: `${Date.now()}`,
+          path: req.url || "/",
+          method: req.method || "POST",
+          headers: Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, String(v)])),
+          body: body.slice(0, 65536),
+          receivedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        saveWebhookCapture(capture);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, id: capture.id }));
+      });
+    });
+    server.on("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      hookServer = server;
+      resolve3({ port, url: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+async function runServicesDoctor(services) {
+  const results = [];
+  if (!services || !isEmailBridgeEnabled(services) && !isWebhookBridgeEnabled(services) && !services.postgres?.connectionSecret) {
+    results.push({
+      name: "Service Bridge",
+      ok: true,
+      detail: "Not configured \u2014 using profile auth (form, storage-state, bearer) and env secrets"
+    });
+    return results;
+  }
+  if (isEmailBridgeEnabled(services)) {
+    const apiUrl = resolveEmailApiUrl(services);
+    try {
+      const msgs = await fetchMailpitMessages(apiUrl);
+      results.push({ name: "Mailpit (optional)", ok: true, detail: `${msgs.length} message(s), API ${apiUrl}` });
+    } catch (e) {
+      results.push({
+        name: "Mailpit (optional)",
+        ok: false,
+        detail: `${e instanceof Error ? e.message : e} \u2014 optional: docker compose -f .ghostrun/services/dev.compose.yml up -d mailpit`
+      });
+    }
+  }
+  if (isWebhookBridgeEnabled(services)) {
+    const hookPort = 8787;
+    try {
+      const res = await fetch(`http://127.0.0.1:${hookPort}/hooks/health`, { signal: AbortSignal.timeout(2e3) });
+      results.push({ name: "Hook catcher (optional)", ok: res.ok, detail: `http://127.0.0.1:${hookPort}` });
+    } catch {
+      results.push({
+        name: "Hook catcher (optional)",
+        ok: false,
+        detail: "Not running \u2014 ghostrun services hook --daemon (optional)"
+      });
+    }
+  }
+  if (services?.postgres?.connectionSecret) {
+    const url = process.env[services.postgres.connectionSecret];
+    results.push({
+      name: "Postgres",
+      ok: !!url,
+      detail: url ? "Connection secret env var set" : `Missing env ${services.postgres.connectionSecret}`
+    });
+  }
+  return results;
+}
+async function runSqlFixtures(fixtures, connectionSecret) {
+  const url = process.env[connectionSecret];
+  if (!url) throw new Error(`Environment variable ${connectionSecret} not set for postgres fixtures`);
+  let pg;
+  try {
+    pg = await import("pg");
+  } catch {
+    throw new Error("Install pg for SQL fixtures: npm install pg (or run fixtures manually)");
+  }
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    for (const fixture of fixtures) {
+      if (!fs3.existsSync(fixture)) throw new Error(`Fixture not found: ${fixture}`);
+      const sql = fs3.readFileSync(fixture, "utf8");
+      await client.query(sql);
+    }
+  } finally {
+    await client.end();
+  }
+}
+async function withPgClient(connectionSecret, fn) {
+  const url = process.env[connectionSecret];
+  if (!url) throw new Error(`Environment variable ${connectionSecret} not set for postgres`);
+  let pg;
+  try {
+    pg = await import("pg");
+  } catch {
+    throw new Error("Install pg for db:* actions: npm install pg");
+  }
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    return await fn((sql, params) => client.query(sql, params));
+  } finally {
+    await client.end();
+  }
+}
+async function runDbQuery(connectionSecret, sql, params = []) {
+  return withPgClient(connectionSecret, async (query) => {
+    const result = await query(sql, params);
+    return result.rows || [];
+  });
+}
+async function assertDbQuery(connectionSecret, sql, expected, opts = {}) {
+  const assertType = opts.assertType || "scalar";
+  const rows = await runDbQuery(connectionSecret, sql, opts.params || []);
+  if (assertType === "empty") {
+    if (rows.length !== 0) {
+      throw new Error(`db:assert expected 0 rows, got ${rows.length}: ${JSON.stringify(rows).slice(0, 200)}`);
+    }
+    return;
+  }
+  if (assertType === "count") {
+    const expectedCount = parseInt(expected, 10);
+    if (rows.length !== expectedCount) {
+      throw new Error(`db:assert count expected ${expectedCount}, got ${rows.length}`);
+    }
+    return;
+  }
+  if (assertType === "contains") {
+    const haystack = JSON.stringify(rows);
+    if (!haystack.includes(expected)) {
+      throw new Error(`db:assert contains expected "${expected}" not found in ${haystack.slice(0, 200)}`);
+    }
+    return;
+  }
+  if (rows.length === 0) {
+    throw new Error(`db:assert scalar expected "${expected}" but query returned 0 rows`);
+  }
+  const firstRow = rows[0];
+  const firstVal = Object.values(firstRow)[0];
+  const actual = firstVal === null || firstVal === void 0 ? "" : String(firstVal);
+  if (actual !== expected) {
+    throw new Error(`db:assert scalar expected "${expected}", got "${actual}"`);
+  }
+}
+function getJsonPath(obj, dotPath) {
+  const parts = dotPath.replace(/^\$\.?/, "").split(".").filter(Boolean);
+  let cur = obj;
+  for (const part of parts) {
+    if (cur === null || cur === void 0 || typeof cur !== "object") return void 0;
+    cur = cur[part];
+  }
+  return cur;
+}
+function parseWebhookJson(body) {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
+function assertWebhookPayload(body, assertions) {
+  const parsed = parseWebhookJson(body);
+  for (const a of assertions) {
+    const actual = getJsonPath(parsed, a.path);
+    const op = a.op || (a.expected === void 0 ? "exists" : "equals");
+    if (op === "exists") {
+      if (actual === void 0 || actual === null) {
+        throw new Error(`webhook:assert path "${a.path}" does not exist`);
+      }
+      continue;
+    }
+    const actualStr = actual === null || actual === void 0 ? "" : String(actual);
+    if (op === "contains") {
+      if (!actualStr.includes(a.expected || "")) {
+        throw new Error(`webhook:assert path "${a.path}" expected to contain "${a.expected}", got "${actualStr}"`);
+      }
+    } else if (actualStr !== (a.expected || "")) {
+      throw new Error(`webhook:assert path "${a.path}" expected "${a.expected}", got "${actualStr}"`);
+    }
+  }
+}
+function verifyWebhookSignature(capture, opts) {
+  const headerName = (opts.headerName || "x-webhook-signature").toLowerCase();
+  const algorithm = opts.algorithm || "sha256";
+  const provided = Object.entries(capture.headers).find(([k]) => k.toLowerCase() === headerName)?.[1];
+  if (!provided) {
+    throw new Error(`assert:webhook-signature: header "${opts.headerName || "X-Webhook-Signature"}" not found`);
+  }
+  let signature = provided.trim();
+  if (opts.prefix && signature.startsWith(opts.prefix)) {
+    signature = signature.slice(opts.prefix.length);
+  }
+  const hmac = crypto2.createHmac(algorithm, opts.secret);
+  hmac.update(capture.body, "utf8");
+  const expected = hmac.digest("hex");
+  const normalizedProvided = signature.toLowerCase();
+  const normalizedExpected = expected.toLowerCase();
+  if (normalizedProvided !== normalizedExpected) {
+    throw new Error(`assert:webhook-signature: HMAC ${algorithm} mismatch (header ${headerName})`);
+  }
+}
+function resolveWebhookCapture(captures, opts) {
+  if (opts.path) {
+    const hit = matchWebhookCapture(captures, opts.path);
+    if (!hit) throw new Error(`webhook:assert: no capture for path ${opts.path}`);
+    return hit;
+  }
+  if (opts.body !== void 0) {
+    return {
+      id: "inline",
+      path: "/",
+      method: "POST",
+      headers: {},
+      body: opts.body,
+      receivedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  throw new Error("webhook:assert requires path or a captured webhook body variable");
+}
+
 // ghostrun.ts
 var HOME_DIR2 = process.env.HOME || process.env.USERPROFILE || ".";
-var DATA_PATH2 = path2.join(HOME_DIR2, ".ghostrun");
+var DATA_PATH2 = path4.join(HOME_DIR2, ".ghostrun");
+var GLOBAL_CONFIG_PATH = path4.join(DATA_PATH2, "config.json");
+var SCRAPES_PATH = path4.join(DATA_PATH2, "scrapes");
+function refreshProjectConstants() {
+  const p = getProjectPaths();
+  PROJECT_GHOSTRUN_PATH = p.ghostrunPath;
+  PROJECT_CONFIG_PATH = p.configPath;
+  return { ghostrunPath: p.ghostrunPath, configPath: p.configPath };
+}
+var PROJECT_GHOSTRUN_PATH = path4.join(process.cwd(), ".ghostrun");
+var PROJECT_CONFIG_PATH = path4.join(PROJECT_GHOSTRUN_PATH, "config.json");
+var EVIDENCE_SCHEMA_VERSION = "1.3";
+var LEGACY_COMMAND_MAP = {
+  "repair:list": "ghostrun repair list",
+  "repair:show": "ghostrun repair show <id>",
+  "repair:apply": "ghostrun repair apply <id>",
+  "profile:list": "ghostrun profile list",
+  "profile:show": "ghostrun profile show <name>",
+  "profile:create": "ghostrun profile create <name>",
+  "profile:use": "ghostrun profile use <name>",
+  "profile:set": "ghostrun profile set <name> <key> <value>",
+  "profile:delete": "ghostrun profile delete <name>",
+  "run:show": "ghostrun report show <run-id>",
+  "run:diff": "ghostrun report diff <run1> <run2>",
+  "run:analyze": "ghostrun report analyze <run-id>",
+  "run:list": "ghostrun report list",
+  "flow:list": "ghostrun flow:list",
+  "flow:schedule": 'ghostrun monitor schedule add <id> "<cron>"',
+  "schedule:list": "ghostrun monitor schedule list",
+  "schedule:remove": "ghostrun monitor schedule remove <id>",
+  "learn": "ghostrun author record <url>",
+  "create": 'ghostrun author create "<description>"',
+  "flow:fix": "ghostrun repair (interactive: flow:fix still works)",
+  "baseline:set": "ghostrun baseline:set <flow>",
+  "baseline:show": "ghostrun baseline:show <flow>",
+  "baseline:clear": "ghostrun baseline:clear <flow>",
+  "suite:run": "ghostrun run --suite <name>",
+  "ai:usage": "ghostrun ai usage",
+  "ai:status": "ghostrun ai status",
+  "ai:sessions": "ghostrun ai sessions"
+};
+function rejectLegacyCommand(cmd2) {
+  const replacement = LEGACY_COMMAND_MAP[cmd2];
+  if (!replacement) return;
+  errorMsg(`Command "${cmd2}" was removed in GhostRun v1.3.0.
+  Use: ${replacement}`);
+  process.exit(1);
+}
+function getSchedulerPidPath() {
+  return path4.join(PROJECT_GHOSTRUN_PATH, "scheduler.pid");
+}
+function isProcessRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function defaultConfig() {
+  return {
+    project: {
+      name: path4.basename(process.cwd()),
+      workspaceVersion: "1"
+    },
+    interactionMode: "assist",
+    features: {
+      crawlee: { enabled: false }
+    },
+    ai: {
+      provider: "auto",
+      trackUsage: true,
+      storeSanitizedTranscripts: true
+    },
+    policies: {
+      allowAutoRepairApply: false,
+      allowAiInCi: "summary-only",
+      requireApprovalForFlowMutation: true,
+      requireApprovalForSecretUse: true,
+      autoImproveEnabled: false,
+      maxAutoImproveIterations: 3,
+      maxRepairAttemptsPerRun: 2,
+      maxSameFailureRepeats: 2,
+      visualDiffThresholdPercent: 5
+    },
+    integrations: {
+      github: { enabled: false, labels: ["ghostrun", "qa-failure"], createOn: ["ci-failure"] },
+      linear: { enabled: false, label: "ghostrun", createOn: ["ci-failure"] }
+    }
+  };
+}
+function readSingleConfig(filePath) {
+  try {
+    if (!fs4.existsSync(filePath)) return {};
+    return JSON.parse(fs4.readFileSync(filePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function readConfig() {
+  const base = defaultConfig();
+  const globalConfig = readSingleConfig(GLOBAL_CONFIG_PATH);
+  const projectConfig = readSingleConfig(PROJECT_CONFIG_PATH);
+  return {
+    ...base,
+    ...globalConfig,
+    ...projectConfig,
+    project: { ...base.project, ...globalConfig.project || {}, ...projectConfig.project || {} },
+    features: {
+      ...base.features,
+      ...globalConfig.features || {},
+      ...projectConfig.features || {},
+      crawlee: {
+        ...base.features?.crawlee || {},
+        ...(globalConfig.features || {}).crawlee || {},
+        ...(projectConfig.features || {}).crawlee || {}
+      }
+    },
+    ai: { ...base.ai, ...globalConfig.ai || {}, ...projectConfig.ai || {} },
+    policies: { ...base.policies, ...globalConfig.policies || {}, ...projectConfig.policies || {} },
+    integrations: {
+      ...base.integrations,
+      ...globalConfig.integrations || {},
+      ...projectConfig.integrations || {},
+      github: {
+        ...base.integrations?.github || {},
+        ...(globalConfig.integrations || {}).github || {},
+        ...(projectConfig.integrations || {}).github || {}
+      },
+      linear: {
+        ...base.integrations?.linear || {},
+        ...(globalConfig.integrations || {}).linear || {},
+        ...(projectConfig.integrations || {}).linear || {}
+      }
+    }
+  };
+}
+function writeConfig(config, scope = "project") {
+  const configPath = scope === "global" ? GLOBAL_CONFIG_PATH : PROJECT_CONFIG_PATH;
+  fs4.mkdirSync(path4.dirname(configPath), { recursive: true });
+  fs4.writeFileSync(configPath, JSON.stringify(config, null, 2));
+}
+function ensureProjectWorkspace() {
+  initProjectContext();
+  refreshProjectConstants();
+  const paths = getProjectPaths();
+  ensureProjectDirs(paths);
+  copyDevServicesTemplate();
+  updateProjectGitignore();
+  ensureProjectJson(readConfig().project?.name);
+  if (!fs4.existsSync(PROJECT_CONFIG_PATH)) writeConfig(defaultConfig(), "project");
+  const secretsReadme = path4.join(PROJECT_GHOSTRUN_PATH, "auth", "secrets", "README.txt");
+  if (!fs4.existsSync(secretsReadme)) {
+    fs4.writeFileSync(secretsReadme, [
+      "Store local secret files here (gitignored).",
+      "Prefer environment variables or your CI secret store when possible.",
+      'Example: echo "my-token" > STAGING_API_TOKEN.txt',
+      ""
+    ].join("\n"));
+  }
+}
+function getInteractionMode() {
+  return readConfig().interactionMode || "assist";
+}
+function estimateTokens(text) {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+function shortHash(input) {
+  return (0, import_crypto4.createHash)("sha256").update(input).digest("hex").slice(0, 24);
+}
+function recordAiSession(entry) {
+  ensureProjectWorkspace();
+  const record = {
+    id: (0, import_crypto4.randomUUID)(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    ...entry
+  };
+  const filePath = path4.join(PROJECT_GHOSTRUN_PATH, "ai", "sessions", `${record.timestamp.replace(/[:.]/g, "-")}-${record.id.slice(0, 8)}.json`);
+  fs4.writeFileSync(filePath, JSON.stringify(record, null, 2));
+}
+function listAiSessions(limit = 50) {
+  const dir = path4.join(PROJECT_GHOSTRUN_PATH, "ai", "sessions");
+  if (!fs4.existsSync(dir)) return [];
+  return fs4.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().reverse().slice(0, limit).map((f) => {
+    try {
+      return JSON.parse(fs4.readFileSync(path4.join(dir, f), "utf8"));
+    } catch {
+      return null;
+    }
+  }).filter((x) => Boolean(x));
+}
+function aggregateAiUsage() {
+  const sessions = listAiSessions(5e3);
+  const byProvider = {};
+  let calls = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let estimatedCostUsd = 0;
+  for (const session of sessions) {
+    calls++;
+    inputTokens += session.usage.inputTokens || 0;
+    outputTokens += session.usage.outputTokens || 0;
+    totalTokens += session.usage.totalTokens || 0;
+    estimatedCostUsd += session.usage.estimatedCostUsd || 0;
+    const key = `${session.provider}:${session.model}`;
+    byProvider[key] = byProvider[key] || { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
+    byProvider[key].calls++;
+    byProvider[key].inputTokens += session.usage.inputTokens || 0;
+    byProvider[key].outputTokens += session.usage.outputTokens || 0;
+    byProvider[key].totalTokens += session.usage.totalTokens || 0;
+    byProvider[key].estimatedCostUsd += session.usage.estimatedCostUsd || 0;
+  }
+  return { calls, inputTokens, outputTokens, totalTokens, estimatedCostUsd, byProvider, sessions };
+}
+function getProfilesDir() {
+  ensureProjectWorkspace();
+  return path4.join(PROJECT_GHOSTRUN_PATH, "profiles");
+}
+function profilePath(name) {
+  return path4.join(getProfilesDir(), `${name}.json`);
+}
+function listProfiles() {
+  const dir = getProfilesDir();
+  if (!fs4.existsSync(dir)) return [];
+  return fs4.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().map((f) => {
+    try {
+      return JSON.parse(fs4.readFileSync(path4.join(dir, f), "utf8"));
+    } catch {
+      return null;
+    }
+  }).filter((x) => Boolean(x));
+}
+function getProfile(name) {
+  const filePath = profilePath(name);
+  if (!fs4.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs4.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function saveProfile(profile) {
+  fs4.writeFileSync(profilePath(profile.name), JSON.stringify(profile, null, 2));
+}
+function deleteProfile(name) {
+  const filePath = profilePath(name);
+  if (!fs4.existsSync(filePath)) return false;
+  fs4.unlinkSync(filePath);
+  return true;
+}
+function getSelectedProfileName(argv = process.argv.slice(2)) {
+  const idx = argv.indexOf("--profile");
+  if (idx !== -1 && argv[idx + 1]) return argv[idx + 1];
+  return readConfig().activeProfile || null;
+}
+function getSelectedProfile(argv = process.argv.slice(2)) {
+  const name = getSelectedProfileName(argv);
+  return name ? getProfile(name) : null;
+}
+function getProjectSecretsDir() {
+  ensureProjectWorkspace();
+  const dir = path4.join(PROJECT_GHOSTRUN_PATH, "auth", "secrets");
+  fs4.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function sessionFilePath(name) {
+  return path4.join(DATA_PATH2, "sessions", `${name}.json`);
+}
+function getProjectStorageStateDir() {
+  ensureProjectWorkspace();
+  const dir = path4.join(PROJECT_GHOSTRUN_PATH, "auth", "storage-state");
+  fs4.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function normalizeSecretEnvKey(name) {
+  return name.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
+}
+function errorSignature(message) {
+  return (message || "unknown").replace(/\d+ms/g, "Nms").replace(/[0-9a-f]{8,}/gi, "[id]").slice(0, 160);
+}
+function getRecentFailureRepeatCount(flowId, errorMessage) {
+  const signature = errorSignature(errorMessage);
+  return db.listRuns(flowId, 50).filter(
+    (run) => run.status === "failed" && errorSignature(run.errorMessage || "") === signature
+  ).length;
+}
+function getSelectorRepairAttemptCount(proposal) {
+  return listRepairProposals(500).filter(
+    (item) => item.flowId === proposal.flowId && item.nodeId === proposal.nodeId && item.status === "applied"
+  ).length;
+}
+function getRepairType(proposal) {
+  if (proposal.repairType) return proposal.repairType;
+  if (proposal.proposedSelector) return "selector";
+  if (proposal.proposedValue && ["assert:text", "assert:title", "assert:url", "assert:response", "assert:status"].includes(proposal.action || "")) {
+    return "assertion";
+  }
+  if (proposal.action === "wait" || proposal.action === "wait:ms") return "wait";
+  if (proposal.action === "navigate") return "url";
+  if (proposal.repairType === "visual" || proposal.errorMessage?.includes("[DIFF:")) return "visual";
+  return "config";
+}
+async function postMonitorWebhook(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      console.log(import_chalk.default.yellow(`  notify webhook failed: HTTP ${res.status}`));
+    }
+  } catch (err) {
+    console.log(import_chalk.default.yellow(`  notify webhook error: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+async function postSlackAlert(webhookUrl, text) {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) {
+      console.log(import_chalk.default.yellow(`  Slack notify failed: HTTP ${res.status}`));
+    }
+  } catch (err) {
+    console.log(import_chalk.default.yellow(`  Slack notify error: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+function resolveMonitorNotificationTargets(extraArgs, profile) {
+  const webhookUrl = parseFlagValue(extraArgs, "--notify-webhook") || profile?.metadata?.notifyWebhook || process.env.GHOSTRUN_NOTIFY_WEBHOOK;
+  const slackWebhook = process.env.GHOSTRUN_SLACK_WEBHOOK || profile?.metadata?.slackWebhook;
+  const thresholdRaw = parseFlagValue(extraArgs, "--notify-after") || profile?.metadata?.notifyAfterFailures || "3";
+  const threshold = Math.max(1, parseInt(thresholdRaw, 10) || 3);
+  const disabled = extraArgs.includes("--no-notify") || profile?.metadata?.notifyOnFailure === "false";
+  return {
+    webhookUrl: webhookUrl || void 0,
+    slackWebhook: slackWebhook || void 0,
+    threshold,
+    enabled: !disabled && Boolean(webhookUrl || slackWebhook)
+  };
+}
+async function sendMonitorAlert(opts) {
+  const payload = {
+    event: "ghostrun.monitor.alert",
+    flowId: opts.flow.id,
+    flowName: opts.flow.name,
+    profile: opts.profileName || null,
+    consecutiveFailures: opts.consecutiveFailures,
+    error: opts.error || null,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (opts.webhookUrl) await postMonitorWebhook(opts.webhookUrl, payload);
+  if (opts.slackWebhook) {
+    const text = `:rotating_light: GhostRun monitor alert: *${opts.flow.name}* failed ${opts.consecutiveFailures}x in a row${opts.error ? `
+> ${opts.error}` : ""}`;
+    await postSlackAlert(opts.slackWebhook, text);
+  }
+}
+function buildAuthorContext(profileName) {
+  const hints = [];
+  if (profileName) {
+    const profile = getProfile(profileName);
+    if (profile?.baseUrl) hints.push(`Active profile "${profileName}" baseUrl: ${profile.baseUrl}`);
+    if (profile?.variables && Object.keys(profile.variables).length) {
+      hints.push(`Profile variables: ${Object.keys(profile.variables).join(", ")}`);
+    }
+  }
+  const flows = db.listFlows().slice(0, 8);
+  if (flows.length) {
+    hints.push(`Existing flow patterns: ${flows.map((f) => f.name).join(", ")}`);
+  }
+  const scrapesDir = SCRAPES_PATH;
+  if (fs4.existsSync(scrapesDir)) {
+    const recentScrapes = fs4.readdirSync(scrapesDir).filter((f) => f.endsWith(".json")).sort().reverse().slice(0, 2);
+    for (const file of recentScrapes) {
+      try {
+        const scrape = JSON.parse(fs4.readFileSync(path4.join(scrapesDir, file), "utf8"));
+        const page = scrape.pages?.[0];
+        if (page?.forms?.length) {
+          hints.push(`Recent form selectors on ${page.url}: ${page.forms[0].fields.slice(0, 4).map((f) => f.selector).join(", ")}`);
+        }
+      } catch {
+      }
+    }
+  }
+  return hints.length ? `
+Project context:
+${hints.map((h) => `- ${h}`).join("\n")}` : "";
+}
+function detectFlakyFlows(limit = 10) {
+  const flaky = [];
+  for (const flow of db.listFlows()) {
+    const runs = db.listRuns(flow.id, limit);
+    if (runs.length < 4) continue;
+    const statuses = runs.map((r) => r.status);
+    if (!statuses.includes("passed") || !statuses.includes("failed")) continue;
+    let transitions = 0;
+    for (let i = 1; i < statuses.length; i++) {
+      if (statuses[i] !== statuses[i - 1]) transitions++;
+    }
+    if (transitions >= 2) flaky.push(flow.name);
+  }
+  return flaky;
+}
+async function createFailureRepairProposal(params) {
+  const { action, errorMessage, page, node, flow, runId, stepNum, selectedProfile } = params;
+  if (["assert:text", "assert:title", "assert:url"].includes(action)) {
+    let actualValue = "";
+    if (page) {
+      if (action === "assert:text") {
+        actualValue = await page.evaluate(() => document.body.innerText.slice(0, 500)).catch(() => "");
+      } else if (action === "assert:title") {
+        actualValue = await page.title().catch(() => "");
+      } else if (action === "assert:url") {
+        actualValue = page.url();
+      }
+    }
+    const expected = String(node.value || "");
+    let proposed = expected;
+    if (action === "assert:text" && actualValue) {
+      const lines = actualValue.split("\n").map((l) => l.trim()).filter(Boolean);
+      const candidate = lines.find((l) => l.length > 3 && l.length < 80);
+      if (candidate) proposed = candidate;
+    } else if (action === "assert:title" && actualValue) {
+      proposed = actualValue.split(" ").slice(0, 5).join(" ");
+    } else if (action === "assert:url" && actualValue) {
+      try {
+        proposed = new URL(actualValue).pathname;
+      } catch {
+        proposed = actualValue;
+      }
+    }
+    if (proposed === expected) return null;
+    return createRepairProposal({
+      source: "ai-heal",
+      repairType: "assertion",
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ""),
+      stepNumber: stepNum,
+      action,
+      currentValue: expected,
+      proposedValue: proposed,
+      errorMessage,
+      rationale: `Assertion failed. Expected "${expected}" but observed "${actualValue.slice(0, 120)}". Review whether the expected value should be updated.`
+    });
+  }
+  if (action === "wait" || errorMessage.toLowerCase().includes("timeout")) {
+    return createRepairProposal({
+      source: "ai-heal",
+      repairType: "wait",
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ""),
+      stepNumber: stepNum,
+      action,
+      currentSelector: node.selector,
+      currentValue: "10000",
+      proposedValue: "20000",
+      errorMessage,
+      rationale: "Step timed out waiting for an element. Consider increasing wait time or switching to wait:text / wait:url."
+    });
+  }
+  if (action === "navigate" && /404|net::ERR|Navigation|ENOTFOUND/i.test(errorMessage)) {
+    const profileHint = selectedProfile?.baseUrl ? `Check profile baseUrl (${selectedProfile.baseUrl}) or update the flow URL.` : "Set baseUrl in your active profile.";
+    return createRepairProposal({
+      source: "ai-heal",
+      repairType: "url",
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ""),
+      stepNumber: stepNum,
+      action,
+      currentValue: String(node.url || node.value || ""),
+      proposedValue: selectedProfile?.baseUrl || "",
+      errorMessage,
+      rationale: `Navigation failed. ${profileHint}`
+    });
+  }
+  return null;
+}
+async function resolveSecretValue(ref) {
+  if (!ref) return void 0;
+  const envCandidates = [ref, normalizeSecretEnvKey(ref)];
+  for (const key of envCandidates) {
+    if (process.env[key]) return process.env[key];
+  }
+  const fileCandidates = [
+    path4.join(getProjectSecretsDir(), ref),
+    path4.join(getProjectSecretsDir(), `${ref}.txt`)
+  ];
+  for (const filePath of fileCandidates) {
+    if (!fs4.existsSync(filePath)) continue;
+    const value = fs4.readFileSync(filePath, "utf8").trim();
+    if (value) return value;
+  }
+  try {
+    const vaultModule = await Promise.resolve().then(() => (init_vault(), vault_exports));
+    const vault2 = vaultModule.createVault();
+    const credential = await vault2.getByName(ref);
+    if (credential?.password) return credential.password;
+  } catch {
+  }
+  return void 0;
+}
+function resolveStorageStatePath(profile) {
+  const raw = profile.auth?.storageState?.trim();
+  if (!raw) {
+    const fallback = path4.join(getProjectStorageStateDir(), `${profile.name}.json`);
+    return fs4.existsSync(fallback) ? fallback : void 0;
+  }
+  const filePath = path4.isAbsolute(raw) ? raw : path4.join(process.cwd(), raw);
+  if (fs4.existsSync(filePath)) return filePath;
+  const projectPath = path4.join(getProjectStorageStateDir(), raw.endsWith(".json") ? raw : `${raw}.json`);
+  return fs4.existsSync(projectPath) ? projectPath : void 0;
+}
+async function resolveProfileAuth(profile, runVars, flowId, opts) {
+  const accountId = opts?.accountId ?? null;
+  const auth = getEffectiveAuthForAccount(profile, accountId);
+  const strategy = auth?.strategy || profile.auth?.strategy || "none";
+  if (strategy === "none") return null;
+  const injectedVars = {};
+  const usernameVar = auth?.usernameVar || profile.auth?.usernameVar;
+  const resolvedUsername = profile.auth?.username || (usernameVar ? runVars[usernameVar] : void 0) || runVars.accountEmail || runVars.testEmail || await resolveSecretValue(auth?.usernameSecret || profile.auth?.usernameSecret) || runVars.PROFILE_AUTH_USERNAME || runVars.AUTH_USERNAME;
+  if (resolvedUsername) {
+    injectedVars.PROFILE_AUTH_USERNAME = resolvedUsername;
+    if (usernameVar && !runVars[usernameVar]) {
+      injectedVars[usernameVar] = resolvedUsername;
+    }
+    if (!runVars.testEmail) injectedVars.testEmail = resolvedUsername;
+    if (!runVars.accountEmail) injectedVars.accountEmail = resolvedUsername;
+  }
+  switch (strategy) {
+    case "storage-state": {
+      const storageStatePath = resolveStorageStatePath(profile);
+      if (!storageStatePath) {
+        throw new Error(`Profile "${profile.name}" uses storage-state auth but no storage state file was found.`);
+      }
+      return {
+        strategy: "storage-state",
+        summary: accountId ? `storage-state:${path4.basename(storageStatePath)} (${accountId})` : `storage-state:${path4.basename(storageStatePath)}`,
+        browserContextOptions: { storageState: storageStatePath },
+        injectedVars
+      };
+    }
+    case "basic-auth": {
+      const password = await resolveSecretValue(auth?.passwordSecret || profile.auth?.passwordSecret);
+      if (!resolvedUsername || !password) {
+        throw new Error(`Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ""} needs email and password for basic-auth.`);
+      }
+      injectedVars.PROFILE_AUTH_PASSWORD = password;
+      return {
+        strategy: "basic-auth",
+        summary: accountId ? `basic-auth (${accountId})` : "basic-auth",
+        browserContextOptions: {
+          httpCredentials: { username: resolvedUsername, password }
+        },
+        apiAuth: { type: "basic", username: resolvedUsername, password },
+        injectedVars
+      };
+    }
+    case "bearer-token": {
+      const token = await resolveSecretValue(auth?.tokenSecret || profile.auth?.tokenSecret || auth?.passwordSecret);
+      if (!token) {
+        throw new Error(`Profile "${profile.name}" needs tokenSecret for bearer-token auth.`);
+      }
+      injectedVars.PROFILE_AUTH_TOKEN = token;
+      return {
+        strategy: "bearer-token",
+        summary: accountId ? `bearer-token (${accountId})` : "bearer-token",
+        browserContextOptions: {
+          extraHTTPHeaders: { Authorization: `Bearer ${token}` }
+        },
+        apiAuth: { type: "bearer", token },
+        injectedVars
+      };
+    }
+    case "form": {
+      const loginFlow = auth?.loginFlow || profile.auth?.loginFlow;
+      if (!loginFlow) {
+        throw new Error(`Profile "${profile.name}" uses form auth but has no auth.loginFlow configured.`);
+      }
+      const password = await resolveSecretValue(auth?.passwordSecret || profile.auth?.passwordSecret);
+      if (!resolvedUsername) {
+        throw new Error(
+          `Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ""} needs an email for form login. Set email on the account, emailSecret env var, or variables.testEmail.`
+        );
+      }
+      if (!password) {
+        throw new Error(
+          `Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ""} needs password secret "${auth?.passwordSecret || profile.auth?.passwordSecret}".`
+        );
+      }
+      injectedVars.PROFILE_AUTH_PASSWORD = password;
+      const passKey = auth?.passwordSecret || profile.auth?.passwordSecret;
+      if (passKey && !runVars[passKey]) {
+        injectedVars[passKey] = password;
+      }
+      const sessionLoadName = `profile-auth-${flowId.slice(0, 8)}-${shortHash(`${profile.name}:${accountId || "default"}:${Date.now()}`)}`;
+      const authRun = await executeFlow(loginFlow, { ...runVars, ...injectedVars }, {
+        visible: opts?.visible,
+        quiet: true,
+        ci: opts?.ci,
+        allowAiSummary: false,
+        sessionSave: sessionLoadName,
+        skipProfileAuth: true
+      });
+      if (!authRun.passed) {
+        throw new Error(`Profile login flow failed${accountId ? ` (${accountId})` : ""}: ${authRun.error || "authentication run failed"}`);
+      }
+      return {
+        strategy: "form",
+        summary: accountId ? `form:${loginFlow} (${accountId})` : `form:${loginFlow}`,
+        sessionLoadName,
+        injectedVars
+      };
+    }
+    case "otp-bypass": {
+      const loginFlow = auth?.loginFlow || profile.auth?.loginFlow;
+      if (!loginFlow) {
+        throw new Error(`Profile "${profile.name}" uses otp-bypass auth but has no auth.loginFlow configured.`);
+      }
+      const otpVar = auth?.otpVar || profile.auth?.otpVar || "testOtp";
+      const otpSecret = auth?.otpSecret || profile.auth?.otpSecret || "STAGING_TEST_OTP";
+      const otpFromEnv = await resolveSecretValue(otpSecret);
+      const testOtp = otpFromEnv || process.env[otpSecret] || "000000";
+      injectedVars[otpVar] = testOtp;
+      injectedVars.testOtp = testOtp;
+      injectedVars.PROFILE_AUTH_OTP = testOtp;
+      if (otpSecret && !runVars[otpSecret]) injectedVars[otpSecret] = testOtp;
+      if (resolvedUsername) {
+        injectedVars.testPhone = resolvedUsername;
+        injectedVars.accountPhone = resolvedUsername;
+      }
+      const sessionLoadName = `profile-auth-${flowId.slice(0, 8)}-${shortHash(`${profile.name}:${accountId || "default"}:otp:${Date.now()}`)}`;
+      const authRun = await executeFlow(loginFlow, { ...runVars, ...injectedVars }, {
+        visible: opts?.visible,
+        quiet: true,
+        ci: opts?.ci,
+        allowAiSummary: false,
+        sessionSave: sessionLoadName,
+        skipProfileAuth: true
+      });
+      if (!authRun.passed) {
+        throw new Error(`Profile OTP login flow failed${accountId ? ` (${accountId})` : ""}: ${authRun.error || "authentication run failed"}`);
+      }
+      return {
+        strategy: "otp-bypass",
+        summary: accountId ? `otp-bypass:${loginFlow} (${accountId})` : `otp-bypass:${loginFlow}`,
+        sessionLoadName,
+        injectedVars
+      };
+    }
+    default:
+      return null;
+  }
+}
+function isProductionLike(profile, startUrl) {
+  if (profile?.name?.toLowerCase() === "production") return true;
+  if (profile?.metadata?.tier?.toLowerCase() === "production") return true;
+  if (!startUrl) return false;
+  return getEnvLabel(startUrl).label === "production";
+}
+function getRepairProposalsDir() {
+  ensureProjectWorkspace();
+  return path4.join(PROJECT_GHOSTRUN_PATH, "proposals", "repairs");
+}
+function writeRepairProposal(proposal) {
+  const filePath = path4.join(getRepairProposalsDir(), `${proposal.createdAt.replace(/[:.]/g, "-")}-${proposal.id.slice(0, 8)}.json`);
+  fs4.writeFileSync(filePath, JSON.stringify(proposal, null, 2));
+}
+function countRepairProposalsForRun(runId) {
+  return listRepairProposals(200).filter((p) => p.runId === runId).length;
+}
+function createRepairProposal(data) {
+  const maxAttempts = readConfig().policies?.maxRepairAttemptsPerRun ?? 2;
+  if (data.runId && countRepairProposalsForRun(data.runId) >= maxAttempts) {
+    return null;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const proposal = {
+    id: (0, import_crypto4.randomUUID)(),
+    createdAt: now,
+    updatedAt: now,
+    status: "proposed",
+    ...data
+  };
+  writeRepairProposal(proposal);
+  return proposal;
+}
+function listRepairProposals(limit = 50) {
+  const dir = getRepairProposalsDir();
+  if (!fs4.existsSync(dir)) return [];
+  return fs4.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().reverse().slice(0, limit).map((f) => {
+    try {
+      return JSON.parse(fs4.readFileSync(path4.join(dir, f), "utf8"));
+    } catch {
+      return null;
+    }
+  }).filter((x) => Boolean(x));
+}
+function findRepairProposal(id) {
+  const dir = getRepairProposalsDir();
+  if (!fs4.existsSync(dir)) return null;
+  for (const file of fs4.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().reverse()) {
+    const filePath = path4.join(dir, file);
+    try {
+      const proposal = JSON.parse(fs4.readFileSync(filePath, "utf8"));
+      if (proposal.id.startsWith(id)) return { proposal, filePath };
+    } catch {
+    }
+  }
+  return null;
+}
+function updateRepairProposal(id, updates) {
+  const found = findRepairProposal(id);
+  if (!found) return null;
+  const next = {
+    ...found.proposal,
+    ...updates,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  fs4.writeFileSync(found.filePath, JSON.stringify(next, null, 2));
+  return next;
+}
+function getImproveReportsDir() {
+  ensureProjectWorkspace();
+  return path4.join(PROJECT_GHOSTRUN_PATH, "reports", "improve");
+}
+function saveImproveReport(report) {
+  fs4.mkdirSync(getImproveReportsDir(), { recursive: true });
+  const filePath = path4.join(getImproveReportsDir(), `${report.createdAt.replace(/[:.]/g, "-")}-${report.id.slice(0, 8)}.json`);
+  fs4.writeFileSync(filePath, JSON.stringify(report, null, 2));
+  return filePath;
+}
+function isCrawleeEnabled() {
+  return readConfig().features?.crawlee?.enabled === true;
+}
+function setCrawleeEnabled(enabled) {
+  const config = readConfig();
+  config.features = config.features || {};
+  config.features.crawlee = { ...config.features.crawlee || {}, enabled };
+  writeConfig(config, "project");
+}
+async function loadCrawlee() {
+  try {
+    const dynamicImport = new Function("specifier", "return import(specifier)");
+    return await dynamicImport("crawlee");
+  } catch {
+    throw new Error("Crawlee is not installed. Run: npm install crawlee");
+  }
+}
 function sanitizePII(text) {
   if (!text) return text;
   text = text.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, "[EMAIL]");
@@ -4383,8 +2890,8 @@ function resolveVarsDeep(value, ctx) {
   }
   return value;
 }
-function getJsonPath(obj, path3) {
-  const parts = path3.replace(/^\$\.?/, "").split(/\.|\[(\d+)\]/).filter((p) => p !== void 0 && p !== "");
+function getJsonPath2(obj, path5) {
+  const parts = path5.replace(/^\$\.?/, "").split(/\.|\[(\d+)\]/).filter((p) => p !== void 0 && p !== "");
   let cur = obj;
   for (const part of parts) {
     if (cur === null || cur === void 0) return void 0;
@@ -4411,6 +2918,11 @@ async function executeHttpRequest(node, ctx, runId, stepNumber) {
   } else if (auth?.type === "apikey" && auth.key) {
     const headerName = auth.header || "X-API-Key";
     headers[headerName] = resolveVarsDeep(auth.key, ctx);
+  } else if (!headers["Authorization"] && ctx.profileAuth?.type === "bearer" && ctx.profileAuth.token) {
+    headers["Authorization"] = `Bearer ${ctx.profileAuth.token}`;
+  } else if (!headers["Authorization"] && ctx.profileAuth?.type === "basic" && ctx.profileAuth.username) {
+    const creds = Buffer.from(`${ctx.profileAuth.username}:${ctx.profileAuth.password || ""}`).toString("base64");
+    headers["Authorization"] = `Basic ${creds}`;
   }
   let body;
   if (node.body && ["POST", "PUT", "PATCH"].includes(method)) {
@@ -4472,7 +2984,7 @@ async function executeHttpRequest(node, ctx, runId, stepNumber) {
   const extract = node.extract;
   if (extract && bodyJson) {
     for (const [varName, jsonPath] of Object.entries(extract)) {
-      const val = getJsonPath(bodyJson, jsonPath);
+      const val = getJsonPath2(bodyJson, jsonPath);
       if (val !== void 0) {
         ctx.variables[varName] = String(val);
         db.saveRunData(runId, stepNumber, varName, sanitizePII(String(val)));
@@ -4519,7 +3031,7 @@ Got:      ${gotStr.slice(0, 200)}`);
     }
     case "json:path": {
       const jpath = node.path || "";
-      const val = getJsonPath(lastResp.body, jpath);
+      const val = getJsonPath2(lastResp.body, jpath);
       const exp = resolveVarsDeep(node.expected, ctx);
       if (String(val) !== String(exp)) {
         throw new Error(`JSON path "${jpath}": expected "${exp}", got "${val}"`);
@@ -4528,7 +3040,7 @@ Got:      ${gotStr.slice(0, 200)}`);
     }
     case "json:exists": {
       const jpath = node.path || "";
-      const val = getJsonPath(lastResp.body, jpath);
+      const val = getJsonPath2(lastResp.body, jpath);
       if (val === void 0 || val === null) {
         throw new Error(`JSON path "${jpath}" does not exist in response`);
       }
@@ -4567,7 +3079,7 @@ function executeExtractJson(node, ctx, runId, stepNumber) {
   const jsonPath = node.path;
   if (!varName || !jsonPath) throw new Error("extract:json requires variable and path");
   if (!ctx.lastResponse) throw new Error("extract:json \u2014 no HTTP response in context");
-  const val = getJsonPath(ctx.lastResponse.body, jsonPath);
+  const val = getJsonPath2(ctx.lastResponse.body, jsonPath);
   if (val === void 0) throw new Error(`JSON path "${jsonPath}" not found in response`);
   ctx.variables[varName] = String(val);
   db.saveRunData(runId, stepNumber, varName, sanitizePII(String(val)));
@@ -4606,7 +3118,16 @@ async function runApiStepDirect(node, action, ctx, timeoutMs) {
     "assert:time",
     "set:variable",
     "extract:json",
-    "env:switch"
+    "env:switch",
+    "email:wait",
+    "email:extract-link",
+    "email:extract-otp",
+    "webhook:wait",
+    "webhook:assert",
+    "assert:webhook-signature",
+    "services:seed",
+    "db:query",
+    "db:assert"
   ]);
   if (!API_ONLY_ACTIONS.has(action)) return;
   if (action === "http:request") {
@@ -4662,7 +3183,7 @@ async function runApiStepDirect(node, action, ctx, timeoutMs) {
     const extract = node.extract;
     if (extract && bodyJson) {
       for (const [varName, jp] of Object.entries(extract)) {
-        const val = getJsonPath(bodyJson, jp);
+        const val = getJsonPath2(bodyJson, jp);
         if (val !== void 0) ctx.variables[varName] = String(val);
       }
     }
@@ -4675,7 +3196,7 @@ async function runApiStepDirect(node, action, ctx, timeoutMs) {
     const varName = node.variable;
     const jp = node.path;
     if (varName && jp && ctx.lastResponse) {
-      const val = getJsonPath(ctx.lastResponse.body, jp);
+      const val = getJsonPath2(ctx.lastResponse.body, jp);
       if (val !== void 0) ctx.variables[varName] = String(val);
     }
   }
@@ -4736,7 +3257,7 @@ async function runPerfTest(flowId, config) {
   for (let i = 0; i < config.vus; i++) {
     const delay = Math.round(i * rampDelay);
     vuPromises.push(
-      new Promise((resolve) => setTimeout(resolve, delay)).then(
+      new Promise((resolve3) => setTimeout(resolve3, delay)).then(
         () => runVU(i, apiNodes, baseVars, endTime, samples, config.timeout)
       )
     );
@@ -4985,26 +3506,80 @@ async function callAnthropic(prompt) {
   try {
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
     const client = new Anthropic({ apiKey });
+    const model = "claude-3-5-haiku-20241022";
     const msg = await client.messages.create({
-      model: "claude-3-5-haiku-20241022",
+      model,
       max_tokens: 1024,
       messages: [{ role: "user", content: prompt }]
     });
     const content = msg.content[0];
-    return content.type === "text" ? content.text.trim() : null;
+    const text = content.type === "text" ? content.text.trim() : null;
+    const inputTokens = Number(msg.usage?.input_tokens || 0);
+    const outputTokens = Number(msg.usage?.output_tokens || 0);
+    return {
+      text,
+      model,
+      usage: {
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens
+      }
+    };
   } catch {
     return null;
   }
 }
-async function callAI(prompt) {
+async function callAI(prompt, options) {
+  const startedAt = Date.now();
+  const config = readConfig();
   const provider = process.env.GHOSTRUN_AI_PROVIDER;
+  const interactionMode = getInteractionMode();
+  const promptSanitized = sanitizePII(prompt).slice(0, 4e3);
   if (provider !== "anthropic") {
     const result2 = await callOllama(prompt);
-    if (result2) return { text: result2, provider: process.env.GHOSTRUN_OLLAMA_MODEL || "ollama" };
+    if (result2) {
+      const model = process.env.GHOSTRUN_OLLAMA_MODEL || "ollama";
+      const usage = {
+        inputTokens: estimateTokens(prompt),
+        outputTokens: estimateTokens(result2),
+        totalTokens: estimateTokens(prompt) + estimateTokens(result2)
+      };
+      if (config.ai?.trackUsage !== false) {
+        recordAiSession({
+          mode: options?.mode || "general",
+          provider: "ollama",
+          model,
+          interactionMode,
+          durationMs: Date.now() - startedAt,
+          usage,
+          promptHash: shortHash(promptSanitized),
+          promptPreview: promptSanitized.slice(0, 600),
+          responsePreview: sanitizePII(result2).slice(0, 600),
+          metadata: options?.metadata
+        });
+      }
+      return { text: result2, provider: "ollama", model, usage };
+    }
     if (provider === "ollama") return null;
   }
   const result = await callAnthropic(prompt);
-  if (result) return { text: result, provider: "claude" };
+  if (result?.text) {
+    if (config.ai?.trackUsage !== false) {
+      recordAiSession({
+        mode: options?.mode || "general",
+        provider: "anthropic",
+        model: result.model,
+        interactionMode,
+        durationMs: Date.now() - startedAt,
+        usage: result.usage,
+        promptHash: shortHash(promptSanitized),
+        promptPreview: promptSanitized.slice(0, 600),
+        responsePreview: sanitizePII(result.text).slice(0, 600),
+        metadata: options?.metadata
+      });
+    }
+    return { text: result.text, provider: "anthropic", model: result.model, usage: result.usage };
+  }
   return null;
 }
 function buildFailurePrompt(ctx) {
@@ -5026,6 +3601,9 @@ Error: ${ctx.failedStep.errorMessage}
 
 Error category detected: ${errorType}
 ${selectorHint ? `Selector analysis: ${selectorHint}` : ""}
+${ctx.scrapeContext ? `
+Page scrape context:
+${ctx.scrapeContext}` : ""}
 
 Respond in EXACTLY this format (no extra text, no markdown):
 
@@ -5132,13 +3710,23 @@ function getEnvLabel(url) {
   return { label: "production", color: import_chalk.default.red };
 }
 function askQuestion(question) {
-  return new Promise((resolve) => {
+  return new Promise((resolve3) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question(question, (a) => {
       rl.close();
-      resolve(a.trim());
+      resolve3(a.trim());
     });
   });
+}
+async function confirmAction(question, defaultAnswer = false) {
+  const mode = getInteractionMode();
+  if (mode === "auto") {
+    info(`Auto mode: ${question.trim()} -> ${defaultAnswer ? "yes" : "no"}`);
+    return defaultAnswer;
+  }
+  const answer = (await askQuestion(question)).toLowerCase();
+  if (!answer) return defaultAnswer;
+  return answer === "y" || answer === "yes";
 }
 var RECORDER_SCRIPT = `
 (function() {
@@ -5227,9 +3815,19 @@ function parseVars(argv) {
       i++;
     }
   }
-  const envFile = path2.join(process.cwd(), ".ghostrun.env");
-  if (fs2.existsSync(envFile)) {
-    const lines = fs2.readFileSync(envFile, "utf8").split("\n");
+  const profile = getSelectedProfile(argv);
+  if (profile?.variables) {
+    for (const [key, val] of Object.entries(profile.variables)) {
+      if (!(key in vars)) vars[key] = val;
+    }
+  }
+  if (profile?.baseUrl) {
+    if (!("BASE_URL" in vars)) vars.BASE_URL = profile.baseUrl;
+    if (!("__baseUrl" in vars)) vars.__baseUrl = profile.baseUrl;
+  }
+  const envFile = path4.join(process.cwd(), ".ghostrun.env");
+  if (fs4.existsSync(envFile)) {
+    const lines = fs4.readFileSync(envFile, "utf8").split("\n");
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
@@ -5247,18 +3845,214 @@ function resolveVars(text, vars) {
   return text.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] !== void 0 ? vars[k] : `{{${k}}}`);
 }
 async function loadSession(context, name) {
-  const sessionPath = path2.join(DATA_PATH2, "sessions", `${name}.json`);
-  if (!fs2.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
-  const cookies = JSON.parse(fs2.readFileSync(sessionPath, "utf-8"));
+  const sessionPath = sessionFilePath(name);
+  if (!fs4.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
+  const cookies = JSON.parse(fs4.readFileSync(sessionPath, "utf-8"));
   await context.addCookies(cookies);
   return cookies.length;
 }
 async function saveSession(context, name) {
   const cookies = await context.cookies();
-  const sessionPath = path2.join(DATA_PATH2, "sessions", `${name}.json`);
-  fs2.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
-  fs2.chmodSync(sessionPath, 384);
+  const sessionPath = sessionFilePath(name);
+  fs4.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
+  fs4.chmodSync(sessionPath, 384);
   return cookies.length;
+}
+function parseFlagValue(argv, flag) {
+  const idx = argv.indexOf(flag);
+  return idx >= 0 && argv[idx + 1] && !argv[idx + 1].startsWith("--") ? argv[idx + 1] : void 0;
+}
+function parseNumberFlag(argv, flag, fallback, max) {
+  const raw = parseFlagValue(argv, flag);
+  const n = raw ? parseInt(raw, 10) : fallback;
+  return Math.max(1, Math.min(Number.isFinite(n) ? n : fallback, max));
+}
+function summarizeScrapePage(page) {
+  const pieces = [
+    page.title ? `Title: ${page.title}` : "",
+    page.headings.length ? `Headings: ${page.headings.slice(0, 6).join(" | ")}` : "",
+    page.buttons.length ? `Buttons: ${page.buttons.slice(0, 8).map((b) => b.text).filter(Boolean).join(" | ")}` : "",
+    page.forms.length ? `Forms: ${page.forms.map((f) => f.fields.map((field) => field.label || field.name || field.placeholder || field.type).filter(Boolean).join(", ")).filter(Boolean).join(" | ")}` : "",
+    page.text ? `Text: ${page.text.slice(0, 800)}` : ""
+  ].filter(Boolean);
+  return pieces.join("\n");
+}
+function extractScrapeText(result) {
+  if (!result?.pages?.length) return void 0;
+  return summarizeScrapePage(result.pages[0]);
+}
+async function runCrawleeScrape(url, options = {}) {
+  if (options.requireEnabled !== false && !isCrawleeEnabled()) {
+    throw new Error("Crawlee scraping is not enabled. Run `ghostrun init` and enable website scraping.");
+  }
+  const maxPages = Math.max(1, Math.min(options.maxPages || 1, 100));
+  const reason = options.reason || "manual";
+  const scrape = db.createScrapeRun({
+    url,
+    reason,
+    maxPages,
+    selector: options.selector,
+    runId: options.runId,
+    stepNumber: options.stepNumber,
+    exploreReportId: options.exploreReportId
+  });
+  const scrapeDir = path4.join(SCRAPES_PATH, scrape.id);
+  fs4.mkdirSync(scrapeDir, { recursive: true });
+  const resultPath = path4.join(scrapeDir, "result.json");
+  process.env.CRAWLEE_STORAGE_DIR = path4.join(scrapeDir, "crawlee-storage");
+  const pages = [];
+  try {
+    const crawlee = await loadCrawlee();
+    const { PlaywrightCrawler } = crawlee;
+    if (options.quiet && crawlee.log && crawlee.LogLevel) {
+      crawlee.log.setLevel(crawlee.LogLevel.OFF);
+    }
+    const inputHost = new URL(url).hostname;
+    const allowedHosts = /* @__PURE__ */ new Set([inputHost, inputHost.startsWith("www.") ? inputHost.slice(4) : `www.${inputHost}`]);
+    const crawler = new PlaywrightCrawler({
+      maxRequestsPerCrawl: maxPages,
+      requestHandlerTimeoutSecs: 30,
+      async requestHandler({ request, page, enqueueLinks }) {
+        await page.waitForLoadState("domcontentloaded", { timeout: 15e3 }).catch(() => {
+        });
+        await page.waitForLoadState("networkidle", { timeout: 5e3 }).catch(() => {
+        });
+        await page.waitForSelector("body", { state: "visible", timeout: 5e3 }).catch(() => {
+        });
+        await page.waitForTimeout(500).catch(() => {
+        });
+        const selectedSelector = options.selector || "";
+        const scraped = await page.evaluate((selector) => {
+          function cleanText(value) {
+            return (value || "").replace(/\s+/g, " ").trim();
+          }
+          function bestSelector(el) {
+            if (el.id && !/^\d/.test(el.id)) return `#${CSS.escape(el.id)}`;
+            const testId = el.getAttribute("data-testid") || el.getAttribute("data-test-id") || el.getAttribute("data-cy");
+            if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+            const name = el.name;
+            if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+            const aria = el.getAttribute("aria-label");
+            if (aria) return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
+            const text = cleanText(el.innerText || el.textContent).slice(0, 40);
+            if ((el.tagName === "BUTTON" || el.tagName === "A") && text) return `${el.tagName.toLowerCase()}:has-text("${text.replace(/"/g, '\\"')}")`;
+            return el.tagName.toLowerCase();
+          }
+          function labelFor(input) {
+            const id = input.id;
+            if (id) {
+              const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+              if (label) return cleanText(label.innerText);
+            }
+            const parent = input.closest("label");
+            if (parent) return cleanText(parent.innerText);
+            return "";
+          }
+          function fieldFor(input) {
+            return {
+              type: input.type || input.tagName.toLowerCase(),
+              name: input.name || "",
+              placeholder: input.placeholder || "",
+              label: labelFor(input),
+              selector: bestSelector(input),
+              required: input.required || false
+            };
+          }
+          const forms = Array.from(document.querySelectorAll("form")).slice(0, 10).map((form, i) => {
+            const fields = Array.from(form.querySelectorAll('input:not([type="hidden"]), textarea, select')).slice(0, 30).map(fieldFor);
+            const submit = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+            return {
+              selector: bestSelector(form) || `form:nth-of-type(${i + 1})`,
+              fields,
+              submitText: submit ? cleanText(submit.innerText || submit.value) : "",
+              submitSelector: submit ? bestSelector(submit) : null
+            };
+          }).filter((f) => f.fields.length > 0 || f.submitText);
+          const selected = selector ? Array.from(document.querySelectorAll(selector)).slice(0, 20).map((el) => ({
+            selector,
+            text: cleanText(el.innerText || el.textContent).slice(0, 5e3),
+            html: el.outerHTML.slice(0, 5e3)
+          })) : [];
+          return {
+            url: location.href,
+            title: document.title || "",
+            description: document.querySelector('meta[name="description"]')?.content || "",
+            headings: Array.from(document.querySelectorAll("h1,h2,h3")).slice(0, 20).map((h) => cleanText(h.innerText)).filter(Boolean),
+            links: Array.from(document.querySelectorAll("a[href]")).slice(0, 100).map((a) => ({
+              text: cleanText(a.innerText || a.textContent).slice(0, 120),
+              href: a.href
+            })).filter((a) => a.href),
+            forms,
+            buttons: Array.from(document.querySelectorAll('button, [role="button"], a.btn, a[class*="button"], a[class*="cta"]')).slice(0, 80).map((btn) => ({
+              text: cleanText(btn.innerText || btn.textContent).slice(0, 120),
+              selector: bestSelector(btn)
+            })).filter((b) => b.text),
+            selected,
+            text: cleanText(document.body?.innerText || "").slice(0, 12e3)
+          };
+        }, selectedSelector);
+        pages.push(scraped);
+        await enqueueLinks({
+          strategy: "same-domain",
+          transformRequestFunction: (req) => {
+            try {
+              const host = new URL(req.url).hostname;
+              const noAsset = !req.url.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2|ttf|mp4|webp)(\?|$)/i);
+              return allowedHosts.has(host) && noAsset ? req : false;
+            } catch {
+              return false;
+            }
+          }
+        }).catch(() => {
+        });
+        if (!options.quiet) {
+          console.log(import_chalk.default.gray(`  scraped ${pages.length}/${maxPages}: ${request.loadedUrl || request.url}`));
+        }
+      },
+      failedRequestHandler({ request, error }) {
+        if (!options.quiet) warn(`Scrape skipped ${request.url}: ${error?.message || error}`);
+      }
+    });
+    await crawler.run([url]);
+    const result = {
+      id: scrape.id,
+      url,
+      status: "complete",
+      reason,
+      maxPages,
+      selector: options.selector,
+      pages,
+      resultPath,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    fs4.writeFileSync(resultPath, JSON.stringify(result, null, 2));
+    db.updateScrapeRun(scrape.id, { status: "complete", pagesCount: pages.length, resultPath });
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const result = {
+      id: scrape.id,
+      url,
+      status: "failed",
+      reason,
+      maxPages,
+      selector: options.selector,
+      pages,
+      resultPath,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    fs4.writeFileSync(resultPath, JSON.stringify({ ...result, errorMessage: message }, null, 2));
+    db.updateScrapeRun(scrape.id, { status: "failed", pagesCount: pages.length, resultPath, errorMessage: message });
+    throw new Error(message);
+  }
+}
+function readScrapeResult(resultPath) {
+  if (!resultPath || !fs4.existsSync(resultPath)) return null;
+  try {
+    return JSON.parse(fs4.readFileSync(resultPath, "utf8"));
+  } catch {
+    return null;
+  }
 }
 async function runLearn(url, nameOverride) {
   printLogo();
@@ -5341,13 +4135,13 @@ async function runLearn(url, nameOverride) {
   console.log(import_chalk.default.gray("  Done?       press ") + import_chalk.default.cyan("Enter") + import_chalk.default.gray(" or type ") + import_chalk.default.cyan("done") + import_chalk.default.gray("\n"));
   await page.goto(url);
   if (!browserClosed) {
-    await new Promise((resolve) => {
+    await new Promise((resolve3) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       rl.on("line", (line) => {
         const trimmed = line.trim();
         if (!trimmed || ["done", "stop", "finish"].includes(trimmed.toLowerCase())) {
           rl.close();
-          resolve();
+          resolve3();
           return;
         }
         const assertMatch = trimmed.match(/^a (text|url|el|title):\s*(.+)$/i);
@@ -5363,7 +4157,7 @@ async function runLearn(url, nameOverride) {
 `);
         }
       });
-      rl.on("close", () => resolve());
+      rl.on("close", () => resolve3());
     }).catch(() => {
     });
   }
@@ -5380,7 +4174,7 @@ async function runLearn(url, nameOverride) {
     const nodeId = `step-${i + 1}`;
     let node;
     if (action.type === "navigate") node = { id: nodeId, type: "action", label: `Navigate to ${action.url}`, action: "navigate", url: action.url };
-    else if (action.type === "click") node = { id: nodeId, type: "action", label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: "click", selector: action.selector };
+    else if (action.type === "click") node = { id: nodeId, type: "action", label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: "click", selector: action.selector, intent: action.label ? `Click "${action.label}"` : `Click ${action.selector}` };
     else if (action.type === "fill") node = { id: nodeId, type: "action", label: `Fill ${action.selector}`, action: "fill", selector: action.selector, value: action.value };
     else if (action.type === "select") node = { id: nodeId, type: "action", label: `Select "${action.value}" in ${action.selector}`, action: "select", selector: action.selector, value: action.value };
     else if (action.type === "check") node = { id: nodeId, type: "action", label: `${action.value === "true" ? "Check" : "Uncheck"} ${action.selector}`, action: "check", selector: action.selector, value: action.value };
@@ -5415,7 +4209,13 @@ async function executeFlow(flowId, vars, opts) {
   const log = (s) => {
     if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + "\n");
   };
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const projectConfig = readConfig();
+  const baselineMode = opts?.baseline ?? process.argv.includes("--baseline");
+  const visualThreshold = opts?.visualThreshold ?? (() => {
+    const raw = parseFlagValue(process.argv, "--baseline-threshold");
+    return raw ? parseFloat(raw) : projectConfig.policies?.visualDiffThresholdPercent ?? 5;
+  })();
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) {
     errorMsg("Flow not found: " + flowId);
     process.exit(1);
@@ -5435,12 +4235,52 @@ async function executeFlow(flowId, vars, opts) {
   if (!opts?.jsonOutput && vars && Object.keys(vars).length > 0) {
     console.log(import_chalk.default.gray("  Variables: " + Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(", ")));
   }
-  const startUrl = graph.appUrl || flow.appUrl;
+  const run = db.createRun(flow.id);
+  const screenshotsDir = db.getScreenshotsPath(run.id);
+  const actionNodes = graph.nodes.filter((n) => n.type === "action");
+  let stepNum = 1, failed = false;
+  let failedStepInfo = null;
+  let failureScrapeContext;
+  const scrapeDiagnostics = [];
+  const runStart = Date.now();
+  const runVars = { ...vars || {} };
+  const selectedProfile = getSelectedProfile();
+  let resolvedProfileAuth = null;
+  let profileSessionLoadName = opts?.sessionLoad;
+  let cleanupProfileSession = false;
+  const activeEnv = db.getActiveEnvironment();
+  if (activeEnv) {
+    Object.assign(runVars, activeEnv.variables);
+    if (activeEnv.baseUrl && !runVars["__baseUrl"]) runVars["__baseUrl"] = activeEnv.baseUrl;
+  }
+  if (selectedProfile?.variables) Object.assign(runVars, selectedProfile.variables);
+  const accountKey = selectedProfile ? resolveSelectedAccountKey(selectedProfile, process.argv) : null;
+  if (selectedProfile && accountKey) {
+    try {
+      const applied = await applyProfileAccount(selectedProfile, accountKey, runVars, resolveSecretValue);
+      if (!opts?.jsonOutput && !opts?.quiet) {
+        console.log("  " + import_chalk.default.gray("Account: ") + import_chalk.default.cyan(`${applied.accountId}`) + (applied.email ? import_chalk.default.gray(` (${applied.email})`) : ""));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errorMsg(msg);
+      db.updateRun(run.id, { status: "failed", completedAt: /* @__PURE__ */ new Date(), duration: Date.now() - runStart, errorMessage: msg });
+      return { passed: false, runId: run.id, duration: Date.now() - runStart, extractedData: {}, error: msg };
+    }
+  }
+  if (vars && Object.keys(vars).length > 0) {
+    Object.assign(runVars, vars);
+  }
+  if (selectedProfile?.baseUrl) {
+    if (!runVars["BASE_URL"]) runVars["BASE_URL"] = selectedProfile.baseUrl;
+    if (!runVars["__baseUrl"]) runVars["__baseUrl"] = selectedProfile.baseUrl;
+  }
+  const startUrl = runVars["__baseUrl"] || graph.appUrl || flow.appUrl;
   const { label: envLabel, color: envColor } = getEnvLabel(startUrl || "");
   const creatorIcon = flow.createdBy === "agent" ? import_chalk.default.magenta(" \u{1F916}") : import_chalk.default.blue(" \u{1F464}");
   const verifiedBadge = flow.verified ? import_chalk.default.green(" \u2713") : "";
   const provenanceStr = creatorIcon + verifiedBadge;
-  if (!opts?.jsonOutput) {
+  if (!opts?.jsonOutput && !opts?.quiet) {
     if (envLabel === "production") {
       console.log(import_chalk.default.red("\n  \u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510"));
       console.log(import_chalk.default.red("  \u2502 \u26A0 PRODUCTION ENVIRONMENT            \u2502"));
@@ -5448,33 +4288,97 @@ async function executeFlow(flowId, vars, opts) {
     }
     console.log(import_chalk.default.bold("\n  Running: ") + import_chalk.default.white(flow.name) + provenanceStr);
     if (startUrl) console.log("  " + import_chalk.default.gray("URL: ") + envColor(startUrl));
+    if (selectedProfile?.name) console.log("  " + import_chalk.default.gray("Profile: ") + import_chalk.default.cyan(selectedProfile.name));
   }
-  const run = db.createRun(flow.id);
-  const screenshotsDir = db.getScreenshotsPath(run.id);
-  const actionNodes = graph.nodes.filter((n) => n.type === "action");
-  let stepNum = 1, failed = false;
-  let failedStepInfo = null;
-  const runStart = Date.now();
-  const runVars = { ...vars || {} };
-  const activeEnv = db.getActiveEnvironment();
-  if (activeEnv) {
-    Object.assign(runVars, activeEnv.variables);
-    if (activeEnv.baseUrl && !runVars["__baseUrl"]) runVars["__baseUrl"] = activeEnv.baseUrl;
+  try {
+    if (selectedProfile && !opts?.skipProfileAuth) {
+      resolvedProfileAuth = await resolveProfileAuth(selectedProfile, runVars, flow.id, {
+        ci: opts?.ci,
+        visible: opts?.visible,
+        quiet: opts?.quiet,
+        accountId: accountKey
+      });
+      if (resolvedProfileAuth?.injectedVars) Object.assign(runVars, resolvedProfileAuth.injectedVars);
+      if (!profileSessionLoadName && resolvedProfileAuth?.sessionLoadName) {
+        profileSessionLoadName = resolvedProfileAuth.sessionLoadName;
+        cleanupProfileSession = true;
+      }
+      if (!opts?.jsonOutput && !opts?.quiet && resolvedProfileAuth) {
+        console.log("  " + import_chalk.default.gray("Auth: ") + import_chalk.default.cyan(resolvedProfileAuth.summary));
+      }
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const duration = Date.now() - runStart;
+    db.updateRun(run.id, {
+      status: "failed",
+      completedAt: /* @__PURE__ */ new Date(),
+      duration,
+      errorMessage
+    });
+    writeEvidenceBundle(run.id, { ci: opts?.ci });
+    if (opts?.jsonOutput) {
+      console.log(JSON.stringify({
+        passed: false,
+        runId: run.id,
+        flowId: flow.id,
+        flowName: flow.name,
+        duration,
+        error: errorMessage,
+        extractedData: {},
+        scrapeDiagnostics
+      }));
+    } else {
+      errorMsg(errorMessage);
+    }
+    return { passed: false, runId: run.id, duration, extractedData: {}, error: errorMessage, scrapeDiagnostics };
   }
-  const ctx = { variables: runVars, environmentName: activeEnv?.name };
-  const API_ONLY_ACTIONS = /* @__PURE__ */ new Set(["http:request", "assert:response", "assert:status", "assert:body", "assert:header", "assert:time", "set:variable", "extract:json", "env:switch"]);
+  const ctx = {
+    variables: runVars,
+    environmentName: activeEnv?.name,
+    profileAuth: resolvedProfileAuth?.apiAuth,
+    profileServices: selectedProfile?.services
+  };
+  const API_ONLY_ACTIONS = /* @__PURE__ */ new Set([
+    "http:request",
+    "assert:response",
+    "assert:status",
+    "assert:body",
+    "assert:header",
+    "assert:time",
+    "set:variable",
+    "extract:json",
+    "env:switch",
+    "email:wait",
+    "email:extract-link",
+    "email:extract-otp",
+    "webhook:wait",
+    "webhook:assert",
+    "assert:webhook-signature",
+    "services:seed",
+    "db:query",
+    "db:assert"
+  ]);
   const hasBrowserActions = actionNodes.some((n) => !API_ONLY_ACTIONS.has(n.action));
   let browser = null;
   let browserCtx = null;
   let page = null;
   if (hasBrowserActions) {
     browser = await import_playwright.chromium.launch({ headless: !opts?.visible });
-    browserCtx = await browser.newContext();
+    const videoDir = opts?.video ? path4.join(PROJECT_GHOSTRUN_PATH, "runs", run.id) : void 0;
+    if (videoDir && !fs4.existsSync(videoDir)) fs4.mkdirSync(videoDir, { recursive: true });
+    browserCtx = await browser.newContext({
+      ...resolvedProfileAuth?.browserContextOptions || {},
+      ...videoDir ? { recordVideo: { dir: videoDir } } : {}
+    });
+    if (opts?.trace) {
+      await browserCtx.tracing.start({ screenshots: true, snapshots: true });
+    }
     page = await browserCtx.newPage();
-    if (opts?.sessionLoad) {
+    if (profileSessionLoadName) {
       try {
-        const count = await loadSession(browserCtx, opts.sessionLoad);
-        if (!opts?.quiet) info(`Session: ${import_chalk.default.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+        const count = await loadSession(browserCtx, profileSessionLoadName);
+        if (!opts?.quiet) info(`Session: ${import_chalk.default.cyan(profileSessionLoadName)} loaded (${count} cookies)`);
       } catch (e) {
         warn(String(e));
       }
@@ -5482,15 +4386,15 @@ async function executeFlow(flowId, vars, opts) {
     if (startUrl) await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15e3 });
   }
   let PNG = null;
-  let pixelmatch2 = null;
+  let pixelmatch = null;
   try {
-    const pngjs = await Promise.resolve().then(() => __toESM(require_png()));
+    const pngjs = await import("pngjs");
     PNG = pngjs.PNG;
-    pixelmatch2 = (await Promise.resolve().then(() => (init_pixelmatch(), pixelmatch_exports))).default;
+    pixelmatch = (await import("pixelmatch")).default;
   } catch {
   }
   for (const node of actionNodes) {
-    const label = node.label, action = node.action;
+    const label = node.label || node.action || "Step " + stepNum, action = node.action;
     const barStr = progressBar(stepNum, actionNodes.length);
     log(import_chalk.default.cyan(`
   [${stepNum}/${actionNodes.length}]`) + ` ${barStr} ` + import_chalk.default.white(label));
@@ -5521,27 +4425,47 @@ async function executeFlow(flowId, vars, opts) {
       const isApiAction = API_ONLY_ACTIONS.has(action);
       if (!isApiAction && page) {
         const screenshot = await page.screenshot();
-        const sp = path2.join(screenshotsDir, `step-${stepNum}.png`);
-        fs2.writeFileSync(sp, screenshot);
+        const sp = path4.join(screenshotsDir, `step-${stepNum}.png`);
+        fs4.writeFileSync(sp, screenshot);
         let diffPercent;
         const baseline = db.getBaseline(flow.id, stepNum);
-        if (baseline && PNG && pixelmatch2 && fs2.existsSync(baseline.screenshot_path)) {
+        if (baseline && PNG && pixelmatch && fs4.existsSync(baseline.screenshot_path)) {
           try {
-            const img1 = PNG.sync.read(fs2.readFileSync(baseline.screenshot_path));
+            const img1 = PNG.sync.read(fs4.readFileSync(baseline.screenshot_path));
             const img2 = PNG.sync.read(screenshot);
             const w = Math.min(img1.width, img2.width);
             const h = Math.min(img1.height, img2.height);
             const diff = new PNG({ width: w, height: h });
-            const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
+            const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
             diffPercent = parseFloat((numDiff / (w * h) * 100).toFixed(1));
-            if (diffPercent > 5) {
-              log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}%`));
+            if (diffPercent > visualThreshold) {
+              log(import_chalk.default.yellow(`      ~ visual change: ${diffPercent}% (threshold ${visualThreshold}%)`));
             }
           } catch {
           }
         }
+        if (diffPercent !== void 0 && diffPercent > visualThreshold) {
+          const proposal = createRepairProposal({
+            source: "ai-heal",
+            repairType: "visual",
+            flowId: flow.id,
+            flowName: flow.name,
+            runId: run.id,
+            nodeId: String(node.id || ""),
+            stepNumber: stepNum,
+            action,
+            currentValue: `${diffPercent}%`,
+            proposedValue: `Re-capture baseline: ghostrun baseline:set ${flow.name}`,
+            errorMessage: `[DIFF:${diffPercent}%]`,
+            rationale: `Visual regression on step ${stepNum}: ${diffPercent}% pixel diff exceeds threshold ${visualThreshold}%. Update baseline after intentional UI change with baseline:set.`
+          });
+          if (proposal) log(import_chalk.default.yellow(`      ~ visual repair proposal: ${proposal.id.slice(0, 8)}`));
+          if (baselineMode) {
+            throw new Error(`Visual regression ${diffPercent}% > ${visualThreshold}% on step ${stepNum}`);
+          }
+        }
         db.updateStep(step.id, { status: "passed", duration, screenshotPath: sp, ...diffPercent !== void 0 ? { diffPercent } : {} });
-        if (diffPercent !== void 0 && diffPercent > 5) {
+        if (diffPercent !== void 0 && diffPercent > visualThreshold && !baselineMode) {
           db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
         }
       } else {
@@ -5556,39 +4480,86 @@ async function executeFlow(flowId, vars, opts) {
       }
     } catch (err) {
       const duration = Date.now() - t;
-      let errorMessage = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      const errorMessage = err instanceof Error ? err.message.split("\n")[0] : String(err);
       if (["click", "fill", "select"].includes(action) && page) {
         const healed = await attemptHeal(page, label, node.selector, action);
         if (healed) {
-          try {
-            const healedNode = { ...node, selector: healed };
-            await executeAction(page, action, healedNode, ctx, run.id, stepNum);
-            if (action === "click") await page.waitForLoadState("domcontentloaded", { timeout: 3e3 }).catch(() => {
+          const proposal = createRepairProposal({
+            source: "ai-heal",
+            repairType: "selector",
+            flowId: flow.id,
+            flowName: flow.name,
+            runId: run.id,
+            nodeId: String(node.id || ""),
+            stepNumber: stepNum,
+            action,
+            currentSelector: node.selector,
+            proposedSelector: healed,
+            errorMessage,
+            rationale: "Generated from failed execution using selector repair heuristics and optional AI."
+          });
+          if (proposal) {
+            log(import_chalk.default.yellow(`      ~ repair proposal: ${proposal.id.slice(0, 8)} -> ${healed}`));
+            const autoApply = autoApplySelectorRepairProposal(proposal, {
+              ci: opts?.ci,
+              profile: selectedProfile,
+              startUrl: startUrl || void 0,
+              currentSelector: node.selector
             });
-            const healDuration = Date.now() - t;
-            const screenshot = await page.screenshot();
-            const sp = path2.join(screenshotsDir, `step-${stepNum}.png`);
-            fs2.writeFileSync(sp, screenshot);
-            log(import_chalk.default.yellow(`      ~ healed selector: ${healed}`));
-            db.updateStep(step.id, { status: "passed", duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
-            log(import_chalk.default.green(`      \u2713 passed after heal (${healDuration}ms)`));
-            stepNum++;
-            continue;
-          } catch {
+            if (autoApply.applied) {
+              log(import_chalk.default.green(`      ~ auto-applied selector repair: ${proposal.id.slice(0, 8)}`));
+            } else if (readConfig().policies?.allowAutoRepairApply && getInteractionMode() === "auto") {
+              log(import_chalk.default.gray(`      ~ auto-apply blocked: ${autoApply.reason}`));
+            }
+          } else {
+            log(import_chalk.default.gray(`      ~ repair proposal skipped: run attempt limit reached`));
           }
+        }
+      }
+      if (page) {
+        const extraProposal = await createFailureRepairProposal({
+          action,
+          errorMessage,
+          page,
+          node,
+          flow,
+          runId: run.id,
+          stepNum,
+          selectedProfile
+        });
+        if (extraProposal) {
+          log(import_chalk.default.yellow(`      ~ repair proposal (${extraProposal.repairType}): ${extraProposal.id.slice(0, 8)}`));
         }
       }
       try {
         if (page) {
           const screenshot = await page.screenshot();
-          const sp = path2.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
-          fs2.writeFileSync(sp, screenshot);
+          const sp = path4.join(screenshotsDir, `step-${stepNum}-FAILED.png`);
+          fs4.writeFileSync(sp, screenshot);
           db.updateStep(step.id, { status: "failed", duration, errorMessage, screenshotPath: sp });
         } else {
           db.updateStep(step.id, { status: "failed", duration, errorMessage });
         }
       } catch {
         db.updateStep(step.id, { status: "failed", duration, errorMessage });
+      }
+      if (page && isCrawleeEnabled()) {
+        try {
+          log(import_chalk.default.gray("      \u2192 scraping failed page for diagnostics..."));
+          const scrape = await runCrawleeScrape(page.url(), {
+            maxPages: 1,
+            reason: "run-failure",
+            runId: run.id,
+            stepNumber: stepNum,
+            quiet: true,
+            requireEnabled: false
+          });
+          failureScrapeContext = extractScrapeText(scrape);
+          scrapeDiagnostics.push({ scrapeId: scrape.id, resultPath: scrape.resultPath, reason: scrape.reason });
+          log(import_chalk.default.gray(`      \u2192 scrape diagnostic: ${scrape.id.slice(0, 8)}`));
+        } catch (scrapeErr) {
+          log(import_chalk.default.gray(`      \u2192 scrape diagnostic skipped: ${scrapeErr instanceof Error ? scrapeErr.message : scrapeErr}`));
+        }
       }
       log(import_chalk.default.red(`      \u2717 failed (${duration}ms)`));
       log(import_chalk.default.red(`        \u2514\u2500 ${errorMessage}`));
@@ -5607,13 +4578,33 @@ async function executeFlow(flowId, vars, opts) {
       warn(`Could not save session: ${e}`);
     }
   }
+  let traceOutputPath = null;
+  if (opts?.trace && browserCtx) {
+    traceOutputPath = path4.join(PROJECT_GHOSTRUN_PATH, "runs", run.id, "trace.zip");
+    const traceDir = path4.dirname(traceOutputPath);
+    if (!fs4.existsSync(traceDir)) fs4.mkdirSync(traceDir, { recursive: true });
+    try {
+      await browserCtx.tracing.stop({ path: traceOutputPath });
+    } catch {
+    }
+  }
+  const videoRecordDir = opts?.video ? path4.join(PROJECT_GHOSTRUN_PATH, "runs", run.id) : null;
   if (browser) await browser.close();
+  if (cleanupProfileSession && profileSessionLoadName) {
+    const tempSessionPath = sessionFilePath(profileSessionLoadName);
+    if (fs4.existsSync(tempSessionPath)) {
+      try {
+        fs4.unlinkSync(tempSessionPath);
+      } catch {
+      }
+    }
+  }
   const totalDuration = Date.now() - runStart;
   let summary = null;
-  if (failed && failedStepInfo) {
+  if (failed && failedStepInfo && opts?.allowAiSummary !== false) {
     if (!opts?.jsonOutput) process.stdout.write(import_chalk.default.gray("\n  Analyzing failure...\n"));
     const steps = db.listSteps(run.id);
-    const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map((s) => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo }));
+    const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map((s) => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo, scrapeContext: failureScrapeContext }), { mode: "summary", metadata: { flowId: flow.id, runId: run.id } });
     if (result) {
       summary = result.text;
       if (!opts?.jsonOutput) process.stdout.write(import_chalk.default.gray(`  (via ${result.provider})
@@ -5621,6 +4612,7 @@ async function executeFlow(flowId, vars, opts) {
     }
   }
   db.updateRun(run.id, { status: failed ? "failed" : "passed", completedAt: /* @__PURE__ */ new Date(), duration: totalDuration, errorMessage: failedStepInfo?.errorMessage, summary: summary || void 0 });
+  writeEvidenceBundle(run.id, { ci: opts?.ci });
   const extractedData = {};
   db.getRunData(run.id).forEach((d) => {
     extractedData[d.variableName] = d.variableValue;
@@ -5642,9 +4634,10 @@ async function executeFlow(flowId, vars, opts) {
         errorMessage: s.errorMessage
       })),
       extractedData,
-      summary
+      summary,
+      scrapeDiagnostics
     }));
-    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
+    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage, scrapeDiagnostics };
   }
   divider();
   if (failed) {
@@ -5668,8 +4661,18 @@ async function executeFlow(flowId, vars, opts) {
   }
   info("Run ID: " + import_chalk.default.gray(run.id.slice(0, 8)));
   info("Screenshots: " + import_chalk.default.cyan(screenshotsDir));
+  if (videoRecordDir) {
+    info("Video: " + import_chalk.default.cyan(videoRecordDir));
+  }
+  if (traceOutputPath && fs4.existsSync(traceOutputPath)) {
+    info("Trace: " + import_chalk.default.cyan(traceOutputPath));
+    info("View:  " + import_chalk.default.gray("npx playwright show-trace " + traceOutputPath));
+  }
+  if (scrapeDiagnostics.length > 0) {
+    info("Scrape diagnostic: " + import_chalk.default.cyan(scrapeDiagnostics[0].resultPath || scrapeDiagnostics[0].scrapeId));
+  }
   console.log();
-  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
+  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage, scrapeDiagnostics };
 }
 async function executeAction(page, action, node, ctx, runId, stepNumber) {
   const p = page;
@@ -5991,6 +4994,172 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
       }
       break;
     }
+    case "email:wait": {
+      if (!ctx) throw new Error("email:wait requires execution context");
+      const to = resolveVarsDeep(
+        node.to || node.selector || ctx.variables["accountEmail"] || ctx.variables["testEmail"] || "",
+        ctx
+      );
+      const subjectContains = resolveVarsDeep(node.subject || node.value || "", ctx);
+      const timeoutMs = node.timeoutMs ? parseInt(String(node.timeoutMs), 10) : void 0;
+      const result = await waitForEmail(ctx.profileServices, {
+        to: to || void 0,
+        subjectContains: subjectContains || void 0,
+        timeoutMs
+      });
+      const varName = node.variable || "lastEmailBody";
+      ctx.variables[varName] = result.body;
+      ctx.variables[`${varName}Subject`] = result.message.Subject;
+      ctx.variables[`${varName}Id`] = result.message.ID;
+      if (result.html) ctx.variables[`${varName}Html`] = result.html;
+      node.__extracted = { variable: varName, value: result.body.slice(0, 200) };
+      break;
+    }
+    case "email:extract-link": {
+      if (!ctx) throw new Error("email:extract-link requires execution context");
+      const sourceVar = node.variable || "lastEmailBody";
+      const source = ctx.variables[sourceVar] || ctx.variables[`${sourceVar}Html`] || "";
+      const link = extractFirstUrl(source);
+      if (!link) throw new Error(`email:extract-link: no URL found in ${sourceVar}`);
+      const outVar = node.to || node.selector || "magicLink";
+      ctx.variables[outVar] = link;
+      node.__extracted = { variable: outVar, value: link };
+      break;
+    }
+    case "email:extract-otp": {
+      if (!ctx) throw new Error("email:extract-otp requires execution context");
+      const sourceVar = node.variable || "lastEmailBody";
+      const source = ctx.variables[sourceVar] || "";
+      const length = parseInt(node.value || "6", 10);
+      const code = extractOtpCode(source, length);
+      if (!code) throw new Error(`email:extract-otp: no ${length}-digit code in ${sourceVar}`);
+      const outVar = node.to || "otpCode";
+      ctx.variables[outVar] = code;
+      node.__extracted = { variable: outVar, value: code };
+      break;
+    }
+    case "email:click-link": {
+      if (!page) throw new Error("email:click-link requires a browser page");
+      if (!ctx) throw new Error("email:click-link requires execution context");
+      const linkVar = node.variable || "magicLink";
+      let url = ctx.variables[linkVar];
+      if (!url) {
+        const sourceVar = node.value || "lastEmailBody";
+        url = extractFirstUrl(ctx.variables[sourceVar] || ctx.variables[`${sourceVar}Html`] || "") || "";
+      }
+      if (!url) throw new Error(`email:click-link: set ${linkVar} or run email:extract-link first`);
+      await p.goto(url, { waitUntil: "domcontentloaded", timeout: 2e4 });
+      break;
+    }
+    case "webhook:wait": {
+      if (!ctx) throw new Error("webhook:wait requires execution context");
+      const hookPath = resolveVarsDeep(node.path || node.value || node.selector || "", ctx);
+      if (!hookPath) throw new Error("webhook:wait requires path (value or path field)");
+      const timeoutMs = node.timeoutMs ? parseInt(String(node.timeoutMs), 10) : void 0;
+      const capture = await waitForWebhook(ctx.profileServices, { path: hookPath, timeoutMs });
+      const varName = node.variable || "lastWebhookBody";
+      ctx.variables[varName] = capture.body;
+      ctx.variables[`${varName}Path`] = capture.path;
+      ctx.variables[`${varName}Headers`] = JSON.stringify(capture.headers);
+      ctx.variables[`${varName}CaptureId`] = capture.id;
+      node.__extracted = { variable: varName, value: capture.body.slice(0, 200) };
+      break;
+    }
+    case "webhook:assert": {
+      if (!ctx) throw new Error("webhook:assert requires execution context");
+      const bodyVar = node.variable || "lastWebhookBody";
+      const hookPath = resolveVarsDeep(node.path || "", ctx);
+      const bodyFromVar = ctx.variables[bodyVar];
+      const capture = resolveWebhookCapture(listWebhookCaptures(50), {
+        path: hookPath || void 0,
+        body: bodyFromVar
+      });
+      const assertionsRaw = node.assertions;
+      if (assertionsRaw?.length) {
+        assertWebhookPayload(capture.body, assertionsRaw.map((a) => ({
+          path: resolveVarsDeep(a.path, ctx),
+          expected: a.expected !== void 0 ? resolveVarsDeep(a.expected, ctx) : void 0,
+          op: a.op
+        })));
+      } else {
+        const jsonPath = resolveVarsDeep(node.value || node.path || "", ctx);
+        const expected = resolveVarsDeep(node.expected || "", ctx);
+        if (!jsonPath) throw new Error("webhook:assert requires assertions array or value (JSON path) + expected");
+        assertWebhookPayload(capture.body, [{ path: jsonPath, expected, op: node.op }]);
+      }
+      break;
+    }
+    case "assert:webhook-signature": {
+      if (!ctx) throw new Error("assert:webhook-signature requires execution context");
+      const bodyVar = node.variable || "lastWebhookBody";
+      const hookPath = resolveVarsDeep(node.path || "", ctx);
+      const bodyFromVar = ctx.variables[bodyVar];
+      const headersJson = ctx.variables[`${bodyVar}Headers`];
+      let capture = resolveWebhookCapture(listWebhookCaptures(50), {
+        path: hookPath || void 0,
+        body: bodyFromVar
+      });
+      if (headersJson && bodyFromVar) {
+        try {
+          capture = { ...capture, headers: JSON.parse(headersJson) };
+        } catch {
+        }
+      }
+      const secretRef = node.secretSecret || node.secret || "WEBHOOK_HMAC_SECRET";
+      const secret = await resolveSecretValue(secretRef) || process.env[secretRef];
+      if (!secret) throw new Error(`assert:webhook-signature: secret not found (${secretRef})`);
+      verifyWebhookSignature(capture, {
+        secret,
+        headerName: node.header || "X-Webhook-Signature",
+        algorithm: node.algorithm || "sha256",
+        prefix: node.prefix || void 0
+      });
+      break;
+    }
+    case "db:query": {
+      if (!ctx) throw new Error("db:query requires execution context");
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error("db:query requires profile.services.postgres.connectionSecret");
+      const sql = resolveVarsDeep(node.value || node.sql || "", ctx);
+      if (!sql) throw new Error("db:query requires value or sql field");
+      const paramsRaw = node.params || [];
+      const params = paramsRaw.map((p2) => resolveVarsDeep(p2, ctx));
+      const rows = await runDbQuery(pg.connectionSecret, sql, params);
+      const varName = node.variable || "queryResult";
+      ctx.variables[varName] = JSON.stringify(rows);
+      ctx.variables[`${varName}Count`] = String(rows.length);
+      if (rows.length > 0) {
+        const firstVal = Object.values(rows[0])[0];
+        ctx.variables[`${varName}Scalar`] = firstVal === null || firstVal === void 0 ? "" : String(firstVal);
+      }
+      node.__extracted = { variable: varName, value: JSON.stringify(rows).slice(0, 200) };
+      break;
+    }
+    case "db:assert": {
+      if (!ctx) throw new Error("db:assert requires execution context");
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error("db:assert requires profile.services.postgres.connectionSecret");
+      const sql = resolveVarsDeep(node.value || node.sql || "", ctx);
+      if (!sql) throw new Error("db:assert requires value or sql field");
+      const expected = resolveVarsDeep(node.expected || "", ctx);
+      const assertType = node.assertType || node.assert || "scalar";
+      const paramsRaw = node.params || [];
+      const params = paramsRaw.map((p2) => resolveVarsDeep(p2, ctx));
+      await assertDbQuery(pg.connectionSecret, sql, expected, { assertType, params });
+      break;
+    }
+    case "services:seed": {
+      if (!ctx) throw new Error("services:seed requires execution context");
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error("services:seed requires profile.services.postgres.connectionSecret");
+      const paths = getProjectPaths();
+      const fixtures = (pg.fixtures || []).map(
+        (f) => path4.isAbsolute(f) ? f : path4.join(paths.fixturesSql, f)
+      );
+      if (fixtures.length === 0) throw new Error("services:seed: no fixtures listed in profile.services.postgres.fixtures");
+      await runSqlFixtures(fixtures, pg.connectionSecret);
+      break;
+    }
   }
 }
 async function attemptHeal(page, label, selector, _action) {
@@ -6052,7 +5221,7 @@ Return ONLY the selector string, nothing else. Example formats:
   [data-testid="login-btn"]
   [role="button"]:has-text("Submit")
   a[href*="/login"]`;
-    const result = await callAI(prompt);
+    const result = await callAI(prompt, { mode: "repair", metadata: { selector, step: label } });
     if (result?.text) {
       const healed = result.text.trim().replace(/^['"`]|['"`]$/g, "").split("\n")[0].trim();
       if (healed && !healed.includes(" ") && healed.length < 100) {
@@ -6066,25 +5235,36 @@ Return ONLY the selector string, nothing else. Example formats:
 }
 async function runFlow(id, vars) {
   const visible = process.argv.includes("--visible");
+  const ciMode = process.argv.includes("--ci");
   const outputIdx = process.argv.indexOf("--output");
   const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === "json";
+  const video = process.argv.includes("--video");
+  const trace = process.argv.includes("--trace");
+  const baseline = process.argv.includes("--baseline");
+  const thresholdRaw = parseFlagValue(process.argv, "--baseline-threshold");
+  const visualThreshold = thresholdRaw ? parseFloat(thresholdRaw) : void 0;
+  const config = readConfig();
+  const allowAiSummary = !ciMode || (config.policies?.allowAiInCi || "summary-only") !== "off";
   if (!jsonOutput) {
     printLogo();
     divider();
   }
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) {
     errorMsg("Flow not found: " + id);
     process.exit(1);
   }
-  if (!jsonOutput) console.log(import_chalk.default.bold("\n  Running: ") + import_chalk.default.white(flow.name) + (visible ? import_chalk.default.yellow(" [visible]") : "") + "\n");
-  const result = await executeFlow(id, vars, { visible, jsonOutput });
+  if (!jsonOutput) {
+    console.log(import_chalk.default.bold("\n  Running: ") + import_chalk.default.white(flow.name) + (visible ? import_chalk.default.yellow(" [visible]") : "") + (ciMode ? import_chalk.default.cyan(" [ci]") : "") + (baseline ? import_chalk.default.magenta(" [baseline]") : "") + (video ? import_chalk.default.magenta(" [video]") : "") + (trace ? import_chalk.default.blue(" [trace]") : "") + "\n");
+  }
+  const result = await executeFlow(id, vars, { visible, jsonOutput, ci: ciMode, allowAiSummary, video, trace, baseline, visualThreshold });
+  if (!result?.passed) process.exit(1);
   return result?.runId || null;
 }
 async function runFixFlow(id) {
   printLogo();
   divider();
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) {
     errorMsg("Flow not found: " + id);
     process.exit(1);
@@ -6152,16 +5332,16 @@ async function runFixFlow(id) {
         }, node.selector);
       } catch {
       }
-      const captured = await new Promise((resolve) => {
+      const captured = await new Promise((resolve3) => {
         waitingForFix = true;
-        fixResolve = resolve;
+        fixResolve = resolve3;
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         rl.on("line", (line) => {
           if (line.trim().toLowerCase() === "skip") {
             waitingForFix = false;
             fixResolve = null;
             rl.close();
-            resolve({ type: "skip", timestamp: Date.now() });
+            resolve3({ type: "skip", timestamp: Date.now() });
           }
         });
         const origResolve = fixResolve;
@@ -6224,18 +5404,18 @@ async function runDiff(runId1, runId2) {
   console.log(`  ${import_chalk.default.gray("Run B:")} ${run2.id.slice(0, 8)} ${import_chalk.default.gray("(" + run2.status + ")")}
 `);
   let PNG;
-  let pixelmatch2;
+  let pixelmatch;
   try {
-    const pngjs = await Promise.resolve().then(() => __toESM(require_png()));
+    const pngjs = await import("pngjs");
     PNG = pngjs.PNG;
-    pixelmatch2 = (await Promise.resolve().then(() => (init_pixelmatch(), pixelmatch_exports))).default;
+    pixelmatch = (await import("pixelmatch")).default;
   } catch {
     errorMsg("Missing dependencies. Run: npm install pixelmatch pngjs");
     process.exit(1);
     return;
   }
-  const diffDir = path2.join(DATA_PATH2, "diffs", `${run1.id.slice(0, 8)}_vs_${run2.id.slice(0, 8)}`);
-  fs2.mkdirSync(diffDir, { recursive: true });
+  const diffDir = path4.join(DATA_PATH2, "diffs", `${run1.id.slice(0, 8)}_vs_${run2.id.slice(0, 8)}`);
+  fs4.mkdirSync(diffDir, { recursive: true });
   const maxSteps = Math.max(steps1.length, steps2.length);
   let changed = 0, same = 0, missing = 0;
   console.log(import_chalk.default.gray("  Step  Status    Diff %  Screenshot"));
@@ -6246,21 +5426,21 @@ async function runDiff(runId1, runId2) {
     const name = (s1?.name || s2?.name || `Step ${i}`).slice(0, 30);
     const p1 = s1?.screenshotPath;
     const p2 = s2?.screenshotPath;
-    if (!p1 || !p2 || !fs2.existsSync(p1) || !fs2.existsSync(p2)) {
+    if (!p1 || !p2 || !fs4.existsSync(p1) || !fs4.existsSync(p2)) {
       console.log(`  ${import_chalk.default.gray(String(i).padStart(4))}  ${import_chalk.default.yellow("missing  ")}  ${import_chalk.default.gray("N/A    ")}  ${import_chalk.default.gray(name)}`);
       missing++;
       continue;
     }
     try {
-      const img1 = PNG.sync.read(fs2.readFileSync(p1));
-      const img2 = PNG.sync.read(fs2.readFileSync(p2));
+      const img1 = PNG.sync.read(fs4.readFileSync(p1));
+      const img2 = PNG.sync.read(fs4.readFileSync(p2));
       const w = Math.min(img1.width, img2.width);
       const h = Math.min(img1.height, img2.height);
       const diff = new PNG({ width: w, height: h });
-      const numDiff = pixelmatch2(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
+      const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
       const pct = (numDiff / (w * h) * 100).toFixed(1);
-      const diffPath = path2.join(diffDir, `step-${i}-diff.png`);
-      fs2.writeFileSync(diffPath, PNG.sync.write(diff));
+      const diffPath = path4.join(diffDir, `step-${i}-diff.png`);
+      fs4.writeFileSync(diffPath, PNG.sync.write(diff));
       const isChanged = parseFloat(pct) > 0.5;
       if (isChanged) changed++;
       else same++;
@@ -6321,8 +5501,8 @@ async function runDeleteFlow(id) {
     errorMsg("Flow not found: " + id);
     process.exit(1);
   }
-  const confirm = await askQuestion(`  Delete "${import_chalk.default.yellow(flow.name)}"? (y/N) `);
-  if (confirm.toLowerCase() !== "y") {
+  const confirm = await confirmAction(`  Delete "${import_chalk.default.yellow(flow.name)}"? (y/N) `, false);
+  if (!confirm) {
     warn("Cancelled");
     return;
   }
@@ -6337,18 +5517,18 @@ async function runExportFlow(id) {
     process.exit(1);
   }
   const filename = `${flow.name.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.flow.json`;
-  fs2.writeFileSync(filename, JSON.stringify({ version: "1.0.0", exportedAt: (/* @__PURE__ */ new Date()).toISOString(), flow: { name: flow.name, description: flow.description, appUrl: flow.appUrl, graph: JSON.parse(flow.graph) } }, null, 2));
+  fs4.writeFileSync(filename, JSON.stringify({ version: "1.0.0", exportedAt: (/* @__PURE__ */ new Date()).toISOString(), flow: { name: flow.name, description: flow.description, appUrl: flow.appUrl, graph: JSON.parse(flow.graph) } }, null, 2));
   success(`Exported to ${import_chalk.default.cyan(filename)}`);
   console.log();
 }
 async function runImportFlow(filepath) {
-  if (!fs2.existsSync(filepath)) {
+  if (!fs4.existsSync(filepath)) {
     errorMsg("File not found: " + filepath);
     process.exit(1);
   }
   let data;
   try {
-    data = JSON.parse(fs2.readFileSync(filepath, "utf8"));
+    data = JSON.parse(fs4.readFileSync(filepath, "utf8"));
   } catch {
     errorMsg("Invalid JSON");
     process.exit(1);
@@ -6501,7 +5681,7 @@ async function runFlowFromCurl(curlStr) {
   Flow name [${defaultName}]: `));
   const flowName = name.trim() || defaultName;
   const nodes = [];
-  const nodeId = () => (0, import_uuid2.v4)();
+  const nodeId = () => (0, import_crypto4.randomUUID)();
   const httpNode = {
     id: nodeId(),
     type: "action",
@@ -6520,7 +5700,7 @@ async function runFlowFromCurl(curlStr) {
     nodes.push({ id: nodeId(), type: "action", action: "assert:response", assert: "time", expected: 2e3, label: "Assert response < 2000ms" });
   }
   const graph = { nodes, edges: [] };
-  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, appUrl: null, graph });
+  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, graph });
   console.log();
   success(`Flow created: ${import_chalk.default.white(flowName)}`);
   info(`ID: ${import_chalk.default.gray(created.id.slice(0, 8))}`);
@@ -6583,12 +5763,12 @@ async function runFlowFromSpec(filepath) {
   printLogo();
   divider();
   console.log(import_chalk.default.bold("\n  Import from OpenAPI Spec\n"));
-  if (!fs2.existsSync(filepath)) {
+  if (!fs4.existsSync(filepath)) {
     errorMsg("File not found: " + filepath);
     process.exit(1);
   }
   let spec;
-  const raw = fs2.readFileSync(filepath, "utf8").trim();
+  const raw = fs4.readFileSync(filepath, "utf8").trim();
   if (raw.startsWith("{") || raw.startsWith("[")) {
     try {
       spec = JSON.parse(raw);
@@ -6602,7 +5782,7 @@ async function runFlowFromSpec(filepath) {
   }
   const version = spec.openapi || spec.swagger || "2";
   const specInfo = spec.info || {};
-  const title = specInfo.title || path2.basename(filepath, path2.extname(filepath));
+  const title = specInfo.title || path4.basename(filepath, path4.extname(filepath));
   const servers = spec.servers || [];
   const baseUrl = servers[0]?.url || (spec.host ? `https://${spec.host}${spec.basePath || ""}` : "");
   const paths = spec.paths || {};
@@ -6634,7 +5814,7 @@ async function runFlowFromSpec(filepath) {
   console.log(import_chalk.default.gray("  3 \u2014 Single flow with all endpoints"));
   const choice = (await askQuestion("\n  Choice [1]: ")).trim() || "1";
   const flowsToCreate = [];
-  const nodeId = () => (0, import_uuid2.v4)();
+  const nodeId = () => (0, import_crypto4.randomUUID)();
   function makeHttpNode(method, pathKey, op, bUrl) {
     const resolvedUrl = bUrl ? `${bUrl.replace(/\/$/, "")}${pathKey}` : pathKey;
     const summary = op.summary || `${method.toUpperCase()} ${pathKey}`;
@@ -6708,7 +5888,7 @@ async function runFlowFromSpec(filepath) {
   }
   console.log();
   for (const f of flowsToCreate) {
-    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || null, graph: { nodes: f.nodes, edges: [] } });
+    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || void 0, graph: { nodes: f.nodes, edges: [] } });
     success(`Created: ${import_chalk.default.white(f.name)} ${import_chalk.default.gray("(" + f.nodes.length + " steps, id: " + created.id.slice(0, 8) + ")")}`);
   }
   console.log(import_chalk.default.gray(`
@@ -6765,6 +5945,13 @@ async function runShowRun(id) {
     else if (step.status === "failed" && step.errorMessage) console.log(`         ${import_chalk.default.red("\u2514\u2500 " + step.errorMessage.slice(0, 80))}`);
     if (step.screenshotPath) console.log(`         ${import_chalk.default.gray("\u{1F4F7} " + step.screenshotPath)}`);
   }
+  const scrapeDiagnostics = db.listScrapeRunsForRun(run.id);
+  if (scrapeDiagnostics.length > 0) {
+    console.log(import_chalk.default.bold("\n  Scrape Diagnostics\n"));
+    for (const s of scrapeDiagnostics) {
+      console.log(`    ${import_chalk.default.gray(s.id.slice(0, 8))}  ${import_chalk.default.white(s.reason || "diagnostic")}  ${import_chalk.default.gray(s.resultPath || "")}`);
+    }
+  }
   if (run.status === "failed") {
     let summary = run.summary;
     if (!summary) {
@@ -6775,7 +5962,7 @@ async function runShowRun(id) {
           flowName: flow?.name || "Unknown",
           steps: steps.map((s) => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })),
           failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || "Unknown error" }
-        }));
+        }), { mode: "summary", metadata: { flowId: flow?.id || "", runId: run.id } });
         if (result) {
           summary = result.text;
           db.updateRun(run.id, { summary });
@@ -6801,23 +5988,383 @@ async function runShowRun(id) {
   }
   console.log();
 }
-function escapeHtml(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function buildFailureHeadline(flowName, failedStep) {
+  const err = failedStep.errorMessage.slice(0, 120);
+  return `Step ${failedStep.stepNumber}: ${failedStep.action} failed in "${flowName}" \u2014 ${err}`;
 }
-async function generateRunReport(runId, outFile) {
-  const run = db.findRunByPartialId(runId);
+function getRunEvidenceDir(runId) {
+  return path4.join(PROJECT_GHOSTRUN_PATH, "runs", runId);
+}
+function buildFailureV1(params) {
+  const headline = buildFailureHeadline(params.flowName, {
+    stepNumber: params.failedStep.number,
+    action: params.failedStep.action,
+    name: params.failedStep.name,
+    errorMessage: params.failedStep.error
+  });
+  return {
+    schemaVersion: "1.0",
+    runId: params.runId,
+    flowId: params.flowId,
+    flowName: params.flowName,
+    profile: params.profile,
+    status: params.status,
+    headline,
+    intent: params.failedStep.name,
+    failedStep: params.failedStep,
+    context: {
+      similarFailures30d: params.similarFailures30d ?? 0,
+      repairProposalId: params.repairProposalId
+    },
+    actions: {
+      rerun: `ghostrun run ${params.flowName}${params.profile ? ` --profile ${params.profile}` : ""}`,
+      openReport: "report.html",
+      viewProposals: "ghostrun repair list",
+      ...params.repairProposalId ? { applyRepair: `ghostrun repair apply ${params.repairProposalId.slice(0, 8)}` } : {}
+    },
+    integrations: {}
+  };
+}
+var GITHUB_ISSUE_DEFAULT_LABEL = "ghostrun";
+function githubIssueDedupMarker(runId, flowId) {
+  return `ghostrun-run:${runId}
+ghostrun-flow:${flowId}`;
+}
+function issueBodyHasDedupMarker(body, runId, flowId) {
+  return body.includes(`ghostrun-run:${runId}`) && body.includes(`ghostrun-flow:${flowId}`);
+}
+function shouldCreateGitHubIssue(config, trigger) {
+  const gh = config.integrations?.github;
+  if (!gh?.enabled) return false;
+  const createOn = gh.createOn;
+  if (!createOn?.length) return true;
+  return createOn.includes(trigger);
+}
+function formatGitHubIssueBody(failure, manifest) {
+  const runId = String(failure.runId || manifest.runId || "\u2014");
+  const flowId = String(failure.flowId || manifest.flowId || "\u2014");
+  const flowName = String(failure.flowName || manifest.flowName || "\u2014");
+  const profile = String(failure.profile ?? manifest.profile ?? "\u2014");
+  const failed = failure.failedStep;
+  const actions = failure.actions;
+  const headline = String(failure.headline || "Test failed");
+  const lines = [
+    "## GhostRun failure",
+    "",
+    `**${headline}**`,
+    "",
+    "| | |",
+    "|---|---|",
+    `| Flow | ${flowName} |`,
+    `| Profile | ${profile} |`,
+    `| Run | \`${runId}\` |`,
+    `| Flow ID | \`${flowId}\` |`,
+    "",
+    "### Failed step",
+    "",
+    "```",
+    `Step ${failed?.number ?? "?"}: ${failed?.action ?? "unknown"}`,
+    String(failed?.error || "Unknown error"),
+    "```",
+    "",
+    "### Commands",
+    "",
+    "```bash",
+    actions?.rerun || `ghostrun run ${flowName}`,
+    actions?.viewProposals || "ghostrun repair list",
+    "```",
+    "",
+    "<!-- ghostrun-integration:v1 -->",
+    githubIssueDedupMarker(runId, flowId),
+    "",
+    "_Created by GhostRun `report publish --create-issues`_"
+  ];
+  return lines.join("\n");
+}
+function formatGitHubIssueTitle(failure) {
+  const headline = String(failure.headline || "");
+  const flowName = String(failure.flowName || "flow");
+  const title = headline ? `[GhostRun] ${headline}` : `[GhostRun] ${flowName} failed`;
+  return title.length > 256 ? title.slice(0, 253) + "..." : title;
+}
+function getGitHubToken() {
+  return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+}
+function resolveGitHubIssueLabels(config) {
+  const configured = config.integrations?.github?.labels;
+  if (configured?.length) return configured;
+  return [GITHUB_ISSUE_DEFAULT_LABEL];
+}
+async function githubRestFetch(token, url, init) {
+  return fetch(url, {
+    ...init,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+      ...init?.headers
+    }
+  });
+}
+async function findOpenGitHubIssueForFailure(owner, repo, token, runId, flowId, labels) {
+  const labelParam = labels.map((l) => encodeURIComponent(l)).join(",");
+  const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=100&labels=${labelParam}`;
+  const res = await githubRestFetch(token, url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub issues search failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const issues = await res.json();
+  for (const issue of issues) {
+    if (issue.pull_request) continue;
+    if (issueBodyHasDedupMarker(issue.body || "", runId, flowId)) {
+      return { number: issue.number, html_url: issue.html_url };
+    }
+  }
+  return null;
+}
+function patchFailureGitHubIssueUrl(failurePath, issueUrl) {
+  const failure = JSON.parse(fs4.readFileSync(failurePath, "utf8"));
+  const integrations = failure.integrations || {};
+  integrations.githubIssue = issueUrl;
+  failure.integrations = integrations;
+  fs4.writeFileSync(failurePath, JSON.stringify(failure, null, 2));
+}
+async function createGitHubIssueFromFailure(failure, manifest, config, opts) {
+  const gh = config.integrations?.github;
+  if (!gh?.enabled) return { created: false, skipped: "disabled" };
+  if (!gh.owner || !gh.repo) return { created: false, skipped: "config" };
+  const token = getGitHubToken();
+  if (!token) {
+    throw new Error("GITHUB_TOKEN or GH_TOKEN not set.");
+  }
+  const runId = String(failure.runId || manifest.runId || "");
+  const flowId = String(failure.flowId || manifest.flowId || "");
+  if (!runId || !flowId) {
+    throw new Error("failure.v1.json missing runId or flowId.");
+  }
+  const labels = resolveGitHubIssueLabels(config);
+  const existing = await findOpenGitHubIssueForFailure(
+    gh.owner,
+    gh.repo,
+    token,
+    runId,
+    flowId,
+    labels
+  );
+  if (existing) {
+    const paths2 = [opts?.publishFailurePath, opts?.evidenceFailurePath].filter(
+      (p) => !!p && fs4.existsSync(p)
+    );
+    for (const p of paths2) patchFailureGitHubIssueUrl(p, existing.html_url);
+    return {
+      created: false,
+      skipped: "duplicate",
+      issueUrl: existing.html_url,
+      issueNumber: existing.number
+    };
+  }
+  const body = formatGitHubIssueBody(failure, manifest);
+  const title = formatGitHubIssueTitle(failure);
+  const createRes = await githubRestFetch(
+    token,
+    `https://api.github.com/repos/${gh.owner}/${gh.repo}/issues`,
+    {
+      method: "POST",
+      body: JSON.stringify({ title, body, labels })
+    }
+  );
+  if (!createRes.ok) {
+    const text = await createRes.text();
+    throw new Error(`GitHub issue create failed (${createRes.status}): ${text.slice(0, 300)}`);
+  }
+  const created = await createRes.json();
+  const paths = [opts?.publishFailurePath, opts?.evidenceFailurePath].filter(
+    (p) => !!p && fs4.existsSync(p)
+  );
+  for (const p of paths) patchFailureGitHubIssueUrl(p, created.html_url);
+  return {
+    created: true,
+    issueUrl: created.html_url,
+    issueNumber: created.number
+  };
+}
+function writeEvidenceBundle(runId, opts) {
+  ensureProjectWorkspace();
+  const run = db.getRun(runId);
+  if (!run) return "";
+  const flow = db.getFlow(run.flowId);
+  const steps = db.listSteps(runId);
+  const evidenceDir = getRunEvidenceDir(runId);
+  fs4.mkdirSync(evidenceDir, { recursive: true });
+  const profile = readConfig().activeProfile || null;
+  const flowName = flow?.name || run.flowId;
+  const pkgVersion = (() => {
+    try {
+      const pkgPath = path4.join(path4.dirname(fs4.realpathSync(process.argv[1])), "package.json");
+      return JSON.parse(fs4.readFileSync(pkgPath, "utf8")).version;
+    } catch {
+      return "unknown";
+    }
+  })();
+  const stepsJsonl = steps.map((s) => JSON.stringify({
+    stepNumber: s.stepNumber,
+    name: s.name,
+    action: s.action,
+    status: s.status,
+    duration: s.duration,
+    selector: s.selector,
+    errorMessage: s.errorMessage,
+    screenshot: s.screenshotPath
+  })).join("\n");
+  fs4.writeFileSync(path4.join(evidenceDir, "steps.jsonl"), stepsJsonl + (stepsJsonl ? "\n" : ""));
+  const screenshotRefs = [];
+  for (const step of steps) {
+    if (step.screenshotPath && fs4.existsSync(step.screenshotPath)) {
+      const dest = path4.join(evidenceDir, "screenshots", path4.basename(step.screenshotPath));
+      fs4.mkdirSync(path4.dirname(dest), { recursive: true });
+      fs4.copyFileSync(step.screenshotPath, dest);
+      screenshotRefs.push(path4.relative(evidenceDir, dest));
+    }
+  }
+  const failedStep = steps.find((s) => s.status === "failed");
+  let failurePath;
+  let headline;
+  if (run.status === "failed" && failedStep) {
+    const proposals = listRepairProposals(20).filter((p) => p.runId === runId);
+    const failure = buildFailureV1({
+      runId: run.id,
+      flowId: run.flowId,
+      flowName,
+      profile,
+      status: run.status,
+      durationMs: run.duration || 0,
+      failedStep: {
+        number: failedStep.stepNumber,
+        action: failedStep.action || "unknown",
+        name: failedStep.name,
+        selector: failedStep.selector,
+        durationMs: failedStep.duration || 0,
+        error: failedStep.errorMessage || run.errorMessage || "Unknown error",
+        screenshot: screenshotRefs.find((r) => r.includes(String(failedStep.stepNumber))) || screenshotRefs[0]
+      },
+      repairProposalId: proposals[0]?.id,
+      similarFailures30d: getRecentFailureRepeatCount(run.flowId, failedStep.errorMessage || "")
+    });
+    headline = failure.headline;
+    failurePath = path4.join(evidenceDir, "failure.v1.json");
+    fs4.writeFileSync(failurePath, JSON.stringify(failure, null, 2));
+  }
+  const reportPath = path4.join(evidenceDir, "report.html");
+  generateRunReportSync(runId, reportPath, headline);
+  const manifest = {
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    ghostrunVersion: pkgVersion,
+    publishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    runId: run.id,
+    flowId: run.flowId,
+    flowName,
+    profile,
+    status: run.status,
+    ci: !!opts?.ci,
+    durationMs: run.duration || 0,
+    headline: headline || (run.status === "passed" ? `Flow "${flowName}" passed` : void 0),
+    artifacts: {
+      report: "report.html",
+      steps: "steps.jsonl",
+      failure: failurePath ? "failure.v1.json" : void 0,
+      screenshots: screenshotRefs
+    }
+  };
+  const manifestPath = path4.join(evidenceDir, "manifest.json");
+  fs4.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  return manifestPath;
+}
+function generateRunReportSync(runId, outFile, headlineOverride) {
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
   if (!run) return;
+  const html = buildRunReportHtml(runId, headlineOverride);
+  if (html) fs4.writeFileSync(outFile, html);
+}
+function resolveStepScreenshotSrc(step, evidenceDir) {
+  const bundled = step.screenshotPath ? path4.join(evidenceDir, "screenshots", path4.basename(step.screenshotPath)) : null;
+  if (bundled && fs4.existsSync(bundled)) {
+    return `screenshots/${path4.basename(bundled)}`;
+  }
+  if (step.screenshotPath && fs4.existsSync(step.screenshotPath)) {
+    return `screenshots/${path4.basename(step.screenshotPath)}`;
+  }
+  return null;
+}
+function loadFailureV1ForRun(runId) {
+  const failurePath = path4.join(getRunEvidenceDir(runId), "failure.v1.json");
+  if (!fs4.existsSync(failurePath)) return null;
+  try {
+    return JSON.parse(fs4.readFileSync(failurePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function resolveRepairProposalsForRun(runId, failureV1) {
+  let proposals = listRepairProposals(20).filter((p) => p.runId === runId);
+  if (proposals.length === 0 && failureV1?.context && typeof failureV1.context === "object") {
+    const repairProposalId = failureV1.context.repairProposalId;
+    if (repairProposalId) {
+      const found = findRepairProposal(repairProposalId);
+      if (found) proposals = [found.proposal];
+    }
+  }
+  return proposals.map((p) => ({
+    id: p.id,
+    repairType: getRepairType(p),
+    status: p.status,
+    stepNumber: p.stepNumber,
+    currentSelector: p.currentSelector,
+    proposedSelector: p.proposedSelector,
+    currentValue: p.currentValue,
+    proposedValue: p.proposedValue,
+    rationale: p.rationale,
+    action: p.action
+  }));
+}
+function getGhostrunPkgVersion() {
+  try {
+    const pkgPath = path4.join(path4.dirname(fs4.realpathSync(process.argv[1])), "package.json");
+    return JSON.parse(fs4.readFileSync(pkgPath, "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+}
+function buildRunReportHtml(runId, headlineOverride) {
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) return null;
   const flow = db.getFlow(run.flowId);
   const steps = db.listSteps(run.id);
-  const apiResps = db.getApiResponses ? db.getApiResponses(run.id) : [];
-  const statusColor = run.status === "passed" ? "#56d364" : "#f85149";
-  const durStr = run.duration ? run.duration >= 1e3 ? (run.duration / 1e3).toFixed(2) + "s" : run.duration + "ms" : "\u2014";
+  const scrapeDiagnostics = db.listScrapeRunsForRun(run.id);
+  const evidenceDir = getRunEvidenceDir(run.id);
+  const failureV1 = loadFailureV1ForRun(run.id);
+  const profile = failureV1?.profile ?? readConfig().activeProfile ?? null;
+  const failedStep = steps.find((s) => s.status === "failed");
+  const headline = headlineOverride || failureV1?.headline || (failedStep ? buildFailureHeadline(flow?.name || runId, {
+    stepNumber: failedStep.stepNumber,
+    action: failedStep.action || "step",
+    name: failedStep.name,
+    errorMessage: failedStep.errorMessage || run.errorMessage || "Unknown error"
+  }) : void 0);
+  const statusColor = run.status === "passed" ? "#56d364" : run.status === "failed" ? "#f85149" : "#e3b341";
+  const statusBadgeClass = run.status === "passed" || run.status === "failed" ? run.status : "other";
+  const durStr = formatReportDuration(run.duration);
+  const flowHash = computeFlowGraphHash(flow?.graph);
+  const pkgVersion = getGhostrunPkgVersion();
+  const generatedAt = (/* @__PURE__ */ new Date()).toISOString();
   const stepsHtml = steps.map((step, i) => {
     const icon = step.status === "passed" ? "\u2713" : step.status === "failed" ? "\u2717" : "\u25CB";
     const color = step.status === "passed" ? "#56d364" : step.status === "failed" ? "#f85149" : "#e3b341";
-    const dur = step.duration ? step.duration >= 1e3 ? (step.duration / 1e3).toFixed(2) + "s" : step.duration + "ms" : "\u2014";
+    const dur = formatReportDuration(step.duration);
     const errHtml = step.errorMessage ? `<div class="step-error">${escapeHtml(step.errorMessage)}</div>` : "";
-    const screenshotHtml = step.screenshotPath && fs2.existsSync(step.screenshotPath) ? `<img class="step-screenshot" src="file://${step.screenshotPath}" loading="lazy" />` : "";
+    const shotSrc = resolveStepScreenshotSrc(step, evidenceDir);
+    const screenshotHtml = shotSrc ? `<img class="step-screenshot" src="${escapeHtml(shotSrc)}" loading="lazy" alt="Step ${i + 1} screenshot" />` : "";
     return `<div class="step ${step.status}">
       <div class="step-header">
         <span class="step-icon" style="color:${color}">${icon}</span>
@@ -6829,48 +6376,97 @@ async function generateRunReport(runId, outFile) {
       ${errHtml}${screenshotHtml}
     </div>`;
   }).join("\n");
-  const html = `<!DOCTYPE html>
+  const scrapeHtml = scrapeDiagnostics.length ? `<section class="panel"><h2>Scrape diagnostics</h2>${scrapeDiagnostics.map(
+    (s) => `<div class="step"><div class="step-header"><span class="step-action">${escapeHtml(s.reason || "diagnostic")}</span><span class="step-label">${escapeHtml(s.resultPath || s.id)}</span></div></div>`
+  ).join("\n")}</section>` : "";
+  const headlineHtml = headline ? `<div class="headline">${escapeHtml(headline)}</div>` : "";
+  const historyRuns = db.listRuns(run.flowId, 30);
+  const historyHtml = buildRunHistorySparklineHtml(
+    historyRuns.map((r) => ({ id: r.id, status: r.status })),
+    run.id
+  );
+  const repairProposals = run.status === "failed" ? resolveRepairProposalsForRun(run.id, failureV1) : [];
+  const repairHtml = buildRepairPanelHtml(repairProposals);
+  const flowName = flow?.name || runId;
+  const failureActions = failureV1?.actions;
+  const nextStepsHtml = buildNextStepsPanelHtml({
+    rerunCommand: failureActions?.rerun || `ghostrun run ${flowName}${profile ? ` --profile ${profile}` : ""}`,
+    repairListCommand: failureActions?.viewProposals || "ghostrun repair list",
+    reportPath: failureActions?.openReport || "report.html",
+    applyRepairCommand: failureActions?.applyRepair || (repairProposals[0] ? `ghostrun repair apply ${repairProposals[0].id.slice(0, 8)}` : void 0)
+  });
+  const intent = failureV1?.intent || failedStep?.name || "";
+  const intentHtml = buildIntentBlockHtml(intent);
+  let failurePanelHtml = "";
+  if (run.status === "failed" && failedStep) {
+    const failedShot = resolveStepScreenshotSrc(failedStep, evidenceDir);
+    failurePanelHtml = buildFailurePanelHtml({
+      stepNumber: failedStep.stepNumber,
+      action: failedStep.action || "step",
+      name: failedStep.name,
+      error: failedStep.errorMessage || run.errorMessage || "Unknown error",
+      selector: failedStep.selector,
+      screenshotSrc: failedShot
+    });
+  }
+  const passedCount = steps.filter((s) => s.status === "passed").length;
+  const failedCount = steps.filter((s) => s.status === "failed").length;
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GhostRun Report \u2014 ${escapeHtml(flow?.name || runId)}</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
-h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
-.meta{color:#768390;font-size:13px;margin-bottom:32px}
-.summary{display:flex;gap:24px;margin-bottom:32px;flex-wrap:wrap}
-.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 24px}
-.stat-val{font-size:26px;font-weight:600;color:${statusColor}}
-.stat-label{font-size:12px;color:#768390;text-transform:uppercase;letter-spacing:.05em}
-.steps{display:flex;flex-direction:column;gap:8px}
-.step{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden}
-.step.failed{border-color:#f85149}
-.step.passed{border-color:#21262d}
-.step-header{display:flex;align-items:center;gap:10px;padding:12px 16px;font-family:monospace;font-size:13px}
-.step-icon{font-size:16px;min-width:20px}
-.step-num{color:#768390;min-width:24px}
-.step-action{color:#39d0d8;min-width:140px}
-.step-label{color:#f0f6fc;flex:1}
-.step-dur{color:#768390;font-size:12px;text-align:right}
-.step-error{padding:10px 16px 12px 50px;color:#f85149;font-size:13px;font-family:monospace;background:#160b0b;border-top:1px solid #30363d}
-.step-screenshot{width:100%;max-height:400px;object-fit:contain;display:block;border-top:1px solid #30363d;background:#000}
-footer{margin-top:48px;color:#768390;font-size:12px}
-</style>
+<title>GhostRun Report \u2014 ${escapeHtml(flowName)}</title>
+<style>${RUN_REPORT_V2_STYLES}</style>
 </head>
 <body>
-<h1>${escapeHtml(flow?.name || runId)}</h1>
-<div class="meta">Run ID: ${run.id.slice(0, 8)} &nbsp;\xB7&nbsp; ${new Date(run.startedAt).toLocaleString()}</div>
+<div class="report">
+<section class="hero" aria-labelledby="report-title">
+  <div class="hero-top">
+    <h1 id="report-title">${escapeHtml(flowName)}</h1>
+    <span class="status-badge ${statusBadgeClass}">${run.status.toUpperCase()}</span>
+  </div>
+  ${headlineHtml}
+  <div class="hero-meta">
+    <span>Run ${run.id.slice(0, 8)}</span>
+    <span>${new Date(run.startedAt).toLocaleString()}</span>
+    ${profile ? `<span>Profile ${escapeHtml(profile)}</span>` : ""}
+    <span>Duration ${durStr}</span>
+    ${flowHash ? `<span>Flow hash ${flowHash}</span>` : ""}
+  </div>
+</section>
+
 <div class="summary">
   <div class="stat"><div class="stat-val" style="color:${statusColor}">${run.status.toUpperCase()}</div><div class="stat-label">Status</div></div>
   <div class="stat"><div class="stat-val">${durStr}</div><div class="stat-label">Duration</div></div>
-  <div class="stat"><div class="stat-val">${steps.filter((s) => s.status === "passed").length}</div><div class="stat-label">Passed</div></div>
-  <div class="stat"><div class="stat-val" style="color:${run.status === "failed" ? "#f85149" : "#56d364"}">${steps.filter((s) => s.status === "failed").length}</div><div class="stat-label">Failed</div></div>
+  <div class="stat"><div class="stat-val">${passedCount}</div><div class="stat-label">Passed</div></div>
+  <div class="stat"><div class="stat-val" style="color:${failedCount ? "#f85149" : "#56d364"}">${failedCount}</div><div class="stat-label">Failed</div></div>
 </div>
-<div class="steps">${stepsHtml}</div>
-<footer>Generated by GhostRun \xB7 ${(/* @__PURE__ */ new Date()).toISOString()}</footer>
+
+${nextStepsHtml}
+${failurePanelHtml}
+${intentHtml}
+${repairHtml}
+${historyHtml}
+
+<section class="timeline" aria-labelledby="timeline-heading">
+  <h2 id="timeline-heading">Timeline</h2>
+  <div class="steps">${stepsHtml}</div>
+</section>
+
+${scrapeHtml}
+
+<footer class="report-footer">
+  <span>GhostRun ${escapeHtml(pkgVersion)}</span>
+  <span>Evidence schema ${EVIDENCE_SCHEMA_VERSION}</span>
+  <span>Generated ${generatedAt}</span>
+</footer>
+</div>
 </body></html>`;
-  fs2.writeFileSync(outFile, html);
+}
+async function generateRunReport(runId, outFile) {
+  const html = buildRunReportHtml(runId);
+  if (!html) return;
+  fs4.writeFileSync(outFile, html);
   success(`HTML report: ${import_chalk.default.cyan(outFile)}`);
 }
 async function runAnalyzeRun(id) {
@@ -6887,11 +6483,14 @@ async function runAnalyzeRun(id) {
     return;
   }
   info("Analyzing failure...");
+  const latestScrape = db.listScrapeRunsForRun(run.id)[0];
+  const scrapeContext = extractScrapeText(readScrapeResult(latestScrape?.resultPath || null));
   const result = await callAI(buildFailurePrompt({
     flowName: flow?.name || "Unknown",
     steps: steps.map((s) => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })),
-    failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || "Unknown error" }
-  }));
+    failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || "Unknown error" },
+    scrapeContext
+  }), { mode: "summary", metadata: { flowId: flow?.id || "", runId: run.id } });
   if (result) {
     db.updateRun(run.id, { summary: result.text });
     console.log();
@@ -6904,14 +6503,14 @@ async function runAnalyzeRun(id) {
   }
 }
 async function runScheduleAdd(id, cronExpr) {
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) {
     errorMsg("Flow not found: " + id);
     process.exit(1);
   }
   let nodeCron;
   try {
-    nodeCron = await Promise.resolve().then(() => __toESM(require_node_cron()));
+    nodeCron = await import("node-cron");
   } catch {
     errorMsg("node-cron not installed. Run: npm install node-cron");
     process.exit(1);
@@ -6928,8 +6527,54 @@ async function runScheduleAdd(id, cronExpr) {
   info(`ID:   ${import_chalk.default.gray(schedule.id.slice(0, 8))}`);
   console.log();
   console.log(import_chalk.default.gray("  Start the scheduler daemon with:"));
-  console.log("  " + import_chalk.default.cyan("ghostrun serve"));
+  console.log("  " + import_chalk.default.cyan("ghostrun monitor daemon"));
+  console.log("  " + import_chalk.default.gray("(or: ghostrun serve --daemon)"));
   console.log();
+}
+async function runMonitorCommand(monitorArgs) {
+  const sub = monitorArgs[0];
+  if (!sub) {
+    printLogo();
+    divider();
+    console.log(import_chalk.default.bold("\n  GhostRun Monitor\n"));
+    console.log(`  ${import_chalk.default.cyan("ghostrun monitor <flow> --interval 60s")}     ${import_chalk.default.gray("Poll a flow on an interval")}`);
+    console.log(`  ${import_chalk.default.cyan("ghostrun monitor daemon")}                  ${import_chalk.default.gray("Run cron schedules (PID file)")}`);
+    console.log(`  ${import_chalk.default.cyan("ghostrun monitor schedule list")}             ${import_chalk.default.gray("List cron schedules")}`);
+    console.log(`  ${import_chalk.default.cyan('ghostrun monitor schedule add <id> "<cron>"')} ${import_chalk.default.gray("Add schedule")}`);
+    console.log(`  ${import_chalk.default.cyan("ghostrun monitor schedule remove <id>")}      ${import_chalk.default.gray("Remove schedule")}`);
+    console.log();
+    return;
+  }
+  if (sub === "daemon") {
+    await runServe(["--daemon", ...monitorArgs.slice(1)]);
+    return;
+  }
+  if (sub === "schedule") {
+    const action = monitorArgs[1] || "list";
+    if (action === "list") {
+      await runScheduleList();
+      return;
+    }
+    if (action === "add") {
+      if (!monitorArgs[2] || !monitorArgs[3]) {
+        errorMsg('Usage: ghostrun monitor schedule add <flow-id> "<cron>"');
+        process.exit(1);
+      }
+      await runScheduleAdd(monitorArgs[2], monitorArgs[3]);
+      return;
+    }
+    if (action === "remove") {
+      if (!monitorArgs[2]) {
+        errorMsg("Schedule ID required");
+        process.exit(1);
+      }
+      await runScheduleRemove(monitorArgs[2]);
+      return;
+    }
+    errorMsg("Unknown schedule action. Use: list, add, remove");
+    process.exit(1);
+  }
+  await runMonitor(sub, monitorArgs.slice(1));
 }
 async function runScheduleList() {
   const schedules = db.listSchedules();
@@ -6962,17 +6607,40 @@ async function runScheduleRemove(id) {
 }
 async function runServe(serveArgs = []) {
   const withUI = serveArgs.includes("--ui");
+  const daemon = serveArgs.includes("--daemon");
   const portIdx = serveArgs.indexOf("--port");
   const port = portIdx !== -1 ? parseInt(serveArgs[portIdx + 1], 10) || 3e3 : 3e3;
   if (withUI) {
     await runServeDashboard(port);
     return;
   }
+  ensureProjectWorkspace();
+  const pidPath = getSchedulerPidPath();
+  if (daemon) {
+    if (fs4.existsSync(pidPath)) {
+      const existingPid = parseInt(fs4.readFileSync(pidPath, "utf8"), 10);
+      if (!Number.isNaN(existingPid) && isProcessRunning(existingPid)) {
+        errorMsg(`Scheduler already running (PID ${existingPid}). Stop it first or remove ${pidPath}`);
+        process.exit(1);
+      }
+      fs4.unlinkSync(pidPath);
+    }
+    fs4.writeFileSync(pidPath, String(process.pid));
+    const cleanupPid = () => {
+      try {
+        if (fs4.existsSync(pidPath)) fs4.unlinkSync(pidPath);
+      } catch {
+      }
+    };
+    process.on("SIGINT", cleanupPid);
+    process.on("SIGTERM", cleanupPid);
+    process.on("exit", cleanupPid);
+  }
   printLogo();
   divider();
   let nodeCron;
   try {
-    nodeCron = await Promise.resolve().then(() => __toESM(require_node_cron()));
+    nodeCron = await import("node-cron");
   } catch {
     errorMsg("node-cron not installed. Run: npm install node-cron");
     process.exit(1);
@@ -6981,14 +6649,16 @@ async function runServe(serveArgs = []) {
   const schedules = db.listSchedules();
   if (schedules.length === 0) {
     warn("No schedules configured. Add one first:");
-    info('ghostrun flow:schedule <id> "0 9 * * *"');
+    info('ghostrun monitor schedule add <id> "0 9 * * *"');
     process.exit(0);
   }
   console.log(import_chalk.default.bold(`
   Scheduler started \u2014 ${schedules.length} schedule${schedules.length > 1 ? "s" : ""} active
 `));
+  if (daemon) info(`PID file: ${import_chalk.default.cyan(pidPath)}`);
   schedules.forEach((s) => info(`${s.name} \u2192 ${import_chalk.default.cyan(s.cronExpression)}`));
   console.log(import_chalk.default.gray("\n  Press Ctrl+C to stop.\n"));
+  console.log(import_chalk.default.gray("  Production tip: use GitHub Actions schedule for always-on monitoring.\n"));
   for (const schedule of schedules) {
     nodeCron.schedule(schedule.cronExpression, async () => {
       const ts = (/* @__PURE__ */ new Date()).toLocaleTimeString();
@@ -7013,11 +6683,26 @@ async function runServe(serveArgs = []) {
   });
 }
 async function runServeDashboard(port) {
-  const http = await import("http");
+  const http2 = await import("http");
   const { EventEmitter } = await import("events");
+  const { spawn } = await import("child_process");
   const logBus = new EventEmitter();
   logBus.setMaxListeners(100);
   const sseClients = /* @__PURE__ */ new Set();
+  const commandHistory = [];
+  const allowedDashboardCommands = /* @__PURE__ */ new Set([
+    "status",
+    "flow:list",
+    "run:list",
+    "env:list",
+    "suite:list",
+    "schedule:list",
+    "perf:list",
+    "scrape:list",
+    "store:list",
+    "store",
+    "run"
+  ]);
   function broadcast(event, data) {
     const msg = `event: ${event}
 data: ${JSON.stringify(data)}
@@ -7388,6 +7073,7 @@ data: ${JSON.stringify(data)}
 <div class="tabs">
   <div class="tab active" data-tab="flows">Flows</div>
   <div class="tab" data-tab="runs">Run History</div>
+  <div class="tab" data-tab="commands">Commands</div>
   <div class="tab" data-tab="chat">Chat</div>
 </div>
 <div class="main">
@@ -7439,6 +7125,28 @@ data: ${JSON.stringify(data)}
     </table>
   </div>
 
+  <!-- COMMANDS TAB -->
+  <div id="tab-commands" class="panel-hidden">
+    <div class="section-header"><span class="section-title">CLI Commands</span></div>
+    <div class="log-container" style="height:auto;min-height:180px;margin-bottom:16px;">
+      <div class="log-header">
+        <span class="log-title">Run allowlisted commands through GhostRun</span>
+      </div>
+      <div style="display:flex;gap:10px;padding:14px;align-items:center;flex-wrap:wrap;">
+        <select id="command-select" class="chat-input" style="max-width:220px;"></select>
+        <input id="command-args" class="chat-input" placeholder="optional args, e.g. flow-id --output json" />
+        <button id="command-run" class="chat-send" onclick="runCommand()">Run</button>
+      </div>
+      <pre id="command-output" class="log-body" style="height:180px;white-space:pre-wrap;">Select a command and run it.</pre>
+    </div>
+    <table class="runs-table">
+      <thead>
+        <tr><th>Command</th><th>Status</th><th>Duration</th><th>When</th><th>Output</th></tr>
+      </thead>
+      <tbody id="commands-tbody"></tbody>
+    </table>
+  </div>
+
   <!-- CHAT TAB -->
   <div id="tab-chat" class="panel-hidden">
     <div class="chat-container">
@@ -7463,12 +7171,13 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     const id = t.dataset.tab;
-    ['flows','runs','chat'].forEach(tab => {
+    ['flows','runs','commands','chat'].forEach(tab => {
       const el = document.getElementById('tab-' + tab);
       if (tab === id) el.classList.remove('panel-hidden');
       else el.classList.add('panel-hidden');
     });
     if (id === 'runs') loadRuns();
+    if (id === 'commands') loadCommands();
   });
 });
 
@@ -7512,6 +7221,59 @@ function renderFlows(flows) {
       </td>
     </tr>
   \`).join('');
+}
+
+// \u2500\u2500\u2500 Commands tab \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+async function loadCommands() {
+  const r = await fetch('/api/commands');
+  const data = await r.json();
+  const select = document.getElementById('command-select');
+  select.innerHTML = data.allowed.map(cmd => '<option value="' + cmd + '">' + cmd + '</option>').join('');
+  renderCommandHistory(data.history);
+}
+
+function renderCommandHistory(history) {
+  const tbody = document.getElementById('commands-tbody');
+  window.__commandHistory = history;
+  if (!history.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No dashboard commands run yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = history.map(item => \`
+    <tr>
+      <td>\${item.command} \${(item.args || []).join(' ')}</td>
+      <td>\${badgeHtml(item.status)}</td>
+      <td>\${item.duration ? item.duration + 'ms' : '\u2014'}</td>
+      <td>\${item.startedAt ? timeAgo(item.startedAt) : '\u2014'}</td>
+      <td><button class="btn btn-run" onclick="showCommandOutput('\${item.id}')">Output</button></td>
+    </tr>
+  \`).join('');
+}
+
+async function runCommand() {
+  const command = document.getElementById('command-select').value;
+  const argsText = document.getElementById('command-args').value.trim();
+  const button = document.getElementById('command-run');
+  button.disabled = true;
+  document.getElementById('command-output').textContent = 'Running ' + command + (argsText ? ' ' + argsText : '') + '...';
+  try {
+    const r = await fetch('/api/commands/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ command, args: argsText ? argsText.split(/\\s+/) : [] })
+    });
+    const data = await r.json();
+    document.getElementById('command-output').textContent = data.output || data.error || '(no output)';
+    await loadCommands();
+  } catch (err) {
+    document.getElementById('command-output').textContent = 'Error: ' + err.message;
+  }
+  button.disabled = false;
+}
+
+function showCommandOutput(id) {
+  const item = (window.__commandHistory || []).find(x => x.id === id);
+  document.getElementById('command-output').textContent = item ? item.output : '(not found)';
 }
 
 function badgeHtml(status) {
@@ -7668,16 +7430,109 @@ setInterval(loadFlows, 10000); // refresh every 10s
 </script>
 </body>
 </html>`;
-  const server = http.createServer(async (req, res) => {
+  function parseJsonBody(req) {
+    return new Promise((resolve3, reject) => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk.toString();
+        if (body.length > 64e3) {
+          reject(new Error("Request body too large"));
+          req.destroy();
+        }
+      });
+      req.on("end", () => {
+        try {
+          resolve3(body ? JSON.parse(body) : {});
+        } catch (err) {
+          reject(err);
+        }
+      });
+      req.on("error", reject);
+    });
+  }
+  function normalizeDashboardCommand(command, args2) {
+    let normalizedCommand = command.trim();
+    let normalizedArgs = args2.map((a) => String(a).trim()).filter(Boolean);
+    if (normalizedCommand === "store:list") {
+      normalizedCommand = "store";
+      normalizedArgs = ["list", ...normalizedArgs];
+    }
+    if (!allowedDashboardCommands.has(normalizedCommand)) {
+      throw new Error(`Command is not allowed from the dashboard: ${command}`);
+    }
+    if (normalizedCommand === "store" && normalizedArgs[0] !== "list") {
+      throw new Error("Only `store list` is allowed from the dashboard.");
+    }
+    if (normalizedCommand === "run" && normalizedArgs.length === 0) {
+      throw new Error("Run requires a flow ID or name.");
+    }
+    if (normalizedArgs.length > 8) {
+      throw new Error("Too many arguments.");
+    }
+    for (const arg of normalizedArgs) {
+      if (!/^[\w:./=@-]+$/.test(arg)) {
+        throw new Error(`Argument contains unsupported characters: ${arg}`);
+      }
+    }
+    return { command: normalizedCommand, args: normalizedArgs };
+  }
+  function runDashboardCommand(command, args2) {
+    const normalized = normalizeDashboardCommand(command, args2);
+    const record = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      command: normalized.command === "store" && normalized.args[0] === "list" ? "store:list" : normalized.command,
+      args: normalized.command === "store" && normalized.args[0] === "list" ? normalized.args.slice(1) : normalized.args,
+      status: "running",
+      exitCode: null,
+      duration: null,
+      output: "",
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      completedAt: null
+    };
+    commandHistory.unshift(record);
+    commandHistory.splice(50);
+    return new Promise((resolve3) => {
+      const started = Date.now();
+      const child = spawn(process.execPath, [process.argv[1], normalized.command, ...normalized.args], {
+        cwd: process.cwd(),
+        env: { ...process.env, NO_COLOR: "1" },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let output = "";
+      child.stdout.on("data", (chunk) => {
+        output += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        output += chunk.toString();
+      });
+      child.on("error", (err) => {
+        record.status = "failed";
+        record.exitCode = 1;
+        record.duration = Date.now() - started;
+        record.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        record.output = err.message;
+        resolve3(record);
+      });
+      child.on("close", (code) => {
+        record.exitCode = code;
+        record.status = code === 0 ? "passed" : "failed";
+        record.duration = Date.now() - started;
+        record.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        record.output = output.slice(-2e4);
+        resolve3(record);
+      });
+    });
+  }
+  const server = http2.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
-    const path3 = url.pathname;
+    const path5 = url.pathname;
     res.setHeader("Access-Control-Allow-Origin", "*");
-    if (req.method === "GET" && path3 === "/") {
+    if (req.method === "GET" && path5 === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(DASHBOARD_HTML);
       return;
     }
-    if (req.method === "GET" && path3 === "/api/flows") {
+    if (req.method === "GET" && path5 === "/api/flows") {
       const flows = db.listFlows();
       const runs = db.listRuns(void 0, 500);
       const lastRunMap = {};
@@ -7711,8 +7566,8 @@ setInterval(loadFlows, 10000); // refresh every 10s
       }));
       return;
     }
-    if (req.method === "DELETE" && path3.startsWith("/api/flows/")) {
-      const id = path3.replace("/api/flows/", "");
+    if (req.method === "DELETE" && path5.startsWith("/api/flows/")) {
+      const id = path5.replace("/api/flows/", "");
       try {
         db.deleteFlow(id);
         res.writeHead(200);
@@ -7723,7 +7578,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       }
       return;
     }
-    if (req.method === "GET" && path3 === "/api/runs") {
+    if (req.method === "GET" && path5 === "/api/runs") {
       const flows = db.listFlows();
       const flowMap = {};
       flows.forEach((f) => {
@@ -7735,13 +7590,36 @@ setInterval(loadFlows, 10000); // refresh every 10s
       res.end(JSON.stringify(runsWithName));
       return;
     }
-    if (req.method === "GET" && path3 === "/api/run") {
-      let sendEvent = function(event, data) {
+    if (req.method === "GET" && path5 === "/api/commands") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        allowed: ["status", "flow:list", "run:list", "env:list", "suite:list", "schedule:list", "perf:list", "scrape:list", "store:list", "run"],
+        history: commandHistory
+      }));
+      return;
+    }
+    if (req.method === "POST" && path5 === "/api/commands/run") {
+      try {
+        const body = await parseJsonBody(req);
+        const command = String(body.command || "");
+        const args2 = Array.isArray(body.args) ? body.args.map(String) : [];
+        const result = await runDashboardCommand(command, args2);
+        res.writeHead(result.status === "passed" ? 200 : 400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+    if (req.method === "GET" && path5 === "/api/run") {
+      let sendEvent2 = function(event, data) {
         res.write(`event: ${event}
 data: ${JSON.stringify(data)}
 
 `);
       };
+      var sendEvent = sendEvent2;
       const flowId = url.searchParams.get("id");
       if (!flowId) {
         res.writeHead(400);
@@ -7755,7 +7633,7 @@ data: ${JSON.stringify(data)}
       });
       const flow = db.getFlow(flowId);
       if (!flow) {
-        sendEvent("done", { passed: false, error: "Flow not found", duration: 0 });
+        sendEvent2("done", { passed: false, error: "Flow not found", duration: 0 });
         res.end();
         return;
       }
@@ -7763,23 +7641,23 @@ data: ${JSON.stringify(data)}
       try {
         const parsedGraph = JSON.parse(flow.graph || "{}");
         const nodes = parsedGraph.nodes || [];
-        sendEvent("log", { type: "info", message: `Flow: ${flow.name} (${nodes.length} steps)` });
+        sendEvent2("log", { type: "info", message: `Flow: ${flow.name} (${nodes.length} steps)` });
         const result = await executeFlow(flowId, void 0, {
           onStep: (stepIdx, action, selector) => {
-            sendEvent("log", { type: "step", message: `  [${stepIdx + 1}] ${action}${selector ? " \u2192 " + selector : ""}` });
+            sendEvent2("log", { type: "step", message: `  [${stepIdx + 1}] ${action}${selector ? " \u2192 " + selector : ""}` });
           },
           onError: (msg) => {
-            sendEvent("log", { type: "fail", message: "  \u2717 " + msg });
+            sendEvent2("log", { type: "fail", message: "  \u2717 " + msg });
           }
         });
-        sendEvent("done", { passed: result.passed, duration: result.duration, error: result.error });
+        sendEvent2("done", { passed: result.passed, duration: result.duration, error: result.error });
       } catch (err) {
-        sendEvent("done", { passed: false, error: err.message, duration: Date.now() - startTime });
+        sendEvent2("done", { passed: false, error: err.message, duration: Date.now() - startTime });
       }
       res.end();
       return;
     }
-    if (req.method === "POST" && path3 === "/api/chat") {
+    if (req.method === "POST" && path5 === "/api/chat") {
       let body = "";
       req.on("data", (chunk) => {
         body += chunk.toString();
@@ -7912,6 +7790,11 @@ async function runStatus() {
   }
   console.log();
   console.log("  " + import_chalk.default.gray("Data Path:    ") + import_chalk.default.white(DATA_PATH2));
+  console.log("  " + import_chalk.default.gray("Project Path: ") + import_chalk.default.white(PROJECT_GHOSTRUN_PATH));
+  console.log("  " + import_chalk.default.gray("Mode:         ") + import_chalk.default.white(getInteractionMode()));
+  console.log("  " + import_chalk.default.gray("Profile:      ") + import_chalk.default.white(readConfig().activeProfile || "(none)"));
+  console.log("  " + import_chalk.default.gray("Auto-improve: ") + import_chalk.default.white(readConfig().policies?.autoImproveEnabled ? "enabled" : "disabled"));
+  console.log("  " + import_chalk.default.gray("Loop Guard:   ") + import_chalk.default.white(`iter=${readConfig().policies?.maxAutoImproveIterations ?? 3}, repeats=${readConfig().policies?.maxSameFailureRepeats ?? 2}`));
   const ollamaModel = await isOllamaRunning();
   if (ollamaModel) {
     console.log("  " + import_chalk.default.gray("AI Provider:  ") + import_chalk.default.green(`Ollama (${ollamaModel})`));
@@ -7921,6 +7804,797 @@ async function runStatus() {
     console.log("  " + import_chalk.default.gray("AI Provider:  ") + import_chalk.default.gray("none (run ollama locally or set ANTHROPIC_API_KEY)"));
   }
   console.log();
+}
+async function runAiStatus() {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const ollamaModel = await isOllamaRunning();
+  const provider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? "Anthropic" : "none";
+  const usage = aggregateAiUsage();
+  console.log(import_chalk.default.bold("\n  AI Status\n"));
+  console.log("  " + import_chalk.default.gray("Interaction:  ") + import_chalk.default.white(config.interactionMode || "assist"));
+  console.log("  " + import_chalk.default.gray("Configured:   ") + import_chalk.default.white(config.ai?.provider || "auto"));
+  console.log("  " + import_chalk.default.gray("Available:    ") + (provider === "none" ? import_chalk.default.gray(provider) : import_chalk.default.green(provider)));
+  console.log("  " + import_chalk.default.gray("Track Usage:  ") + import_chalk.default.white(config.ai?.trackUsage === false ? "no" : "yes"));
+  console.log("  " + import_chalk.default.gray("Store Logs:   ") + import_chalk.default.white(config.ai?.storeSanitizedTranscripts === false ? "no" : "yes"));
+  console.log("  " + import_chalk.default.gray("CI Policy:    ") + import_chalk.default.white(config.policies?.allowAiInCi || "summary-only"));
+  console.log("  " + import_chalk.default.gray("Sessions:     ") + import_chalk.default.white(String(usage.calls)));
+  console.log("  " + import_chalk.default.gray("Tokens:       ") + import_chalk.default.white(String(usage.totalTokens)));
+  console.log();
+}
+async function runAiUsage() {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const usage = aggregateAiUsage();
+  console.log(import_chalk.default.bold("\n  AI Usage\n"));
+  console.log(`  Calls:         ${import_chalk.default.white(String(usage.calls))}`);
+  console.log(`  Input tokens:  ${import_chalk.default.white(String(usage.inputTokens))}`);
+  console.log(`  Output tokens: ${import_chalk.default.white(String(usage.outputTokens))}`);
+  console.log(`  Total tokens:  ${import_chalk.default.white(String(usage.totalTokens))}`);
+  if (usage.estimatedCostUsd > 0) {
+    console.log(`  Est. cost:     ${import_chalk.default.white("$" + usage.estimatedCostUsd.toFixed(4))}`);
+  }
+  const providerKeys = Object.keys(usage.byProvider);
+  if (providerKeys.length > 0) {
+    console.log(import_chalk.default.bold("\n  By Provider\n"));
+    for (const key of providerKeys) {
+      const row = usage.byProvider[key];
+      console.log(`  ${import_chalk.default.cyan(key.padEnd(30))} ${import_chalk.default.white(String(row.calls).padStart(4))} calls  ${import_chalk.default.gray(String(row.totalTokens) + " tokens")}`);
+    }
+  }
+  console.log();
+}
+async function runAiSessions(limitArg) {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const limit = limitArg ? Math.max(1, parseInt(limitArg, 10) || 10) : 10;
+  const sessions = listAiSessions(limit);
+  console.log(import_chalk.default.bold(`
+  AI Sessions (${sessions.length})
+`));
+  if (sessions.length === 0) {
+    warn("No AI sessions recorded yet.");
+    console.log();
+    return;
+  }
+  for (const session of sessions) {
+    console.log(`  ${import_chalk.default.gray(session.id.slice(0, 8))}  ${import_chalk.default.cyan(session.mode.padEnd(10))}  ${import_chalk.default.white(session.provider.padEnd(10))}  ${import_chalk.default.gray(session.model)}  ${import_chalk.default.white(String(session.usage.totalTokens || 0).padStart(6))} tok  ${import_chalk.default.gray(timeAgo(session.timestamp))}`);
+    console.log(`           ${import_chalk.default.gray(session.promptPreview.slice(0, 120).replace(/\s+/g, " "))}`);
+  }
+  console.log();
+}
+async function runConfigMode(mode) {
+  const config = readConfig();
+  if (!mode) {
+    printLogo();
+    divider();
+    console.log(import_chalk.default.bold("\n  Interaction Mode\n"));
+    console.log("  " + import_chalk.default.white(config.interactionMode || "assist"));
+    console.log();
+    return;
+  }
+  if (mode !== "assist" && mode !== "auto") {
+    errorMsg('Mode must be "assist" or "auto"');
+    process.exit(1);
+  }
+  config.interactionMode = mode;
+  writeConfig(config, "project");
+  success(`Interaction mode set to: ${mode}`);
+}
+async function runProfileList() {
+  printLogo();
+  divider();
+  const config = readConfig();
+  const profiles = listProfiles();
+  console.log(import_chalk.default.bold(`
+  Profiles (${profiles.length})
+`));
+  if (profiles.length === 0) {
+    warn("No profiles found. Create one: ghostrun profile:create staging https://staging.example.com");
+    console.log();
+    return;
+  }
+  for (const profile of profiles) {
+    const active = config.activeProfile === profile.name ? import_chalk.default.green(" *") : "  ";
+    const auth = profile.auth?.strategy || "none";
+    const acctCount = listAccountIds(profile).length;
+    const acctHint = acctCount > 0 ? import_chalk.default.gray(`  ${acctCount} account(s)`) : "";
+    console.log(`  ${import_chalk.default.white(profile.name)}${active}  ${import_chalk.default.gray((profile.baseUrl || "\u2014").padEnd(36).slice(0, 36))}  ${import_chalk.default.cyan(auth)}${acctHint}`);
+  }
+  console.log();
+}
+async function runProfileShow(name) {
+  printLogo();
+  divider();
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg("Profile not found: " + name);
+    process.exit(1);
+  }
+  console.log(import_chalk.default.bold(`
+  Profile: ${profile.name}
+`));
+  console.log(`  Base URL: ${import_chalk.default.white(profile.baseUrl || "\u2014")}`);
+  console.log(`  Auth:     ${import_chalk.default.white(profile.auth?.strategy || "none")}`);
+  if (profile.auth?.loginFlow) console.log(`  Login:    ${import_chalk.default.white(profile.auth.loginFlow)}`);
+  if (profile.auth?.storageState) console.log(`  State:    ${import_chalk.default.white(profile.auth.storageState)}`);
+  if (profile.auth?.usernameVar) console.log(`  User Var: ${import_chalk.default.white(profile.auth.usernameVar)}`);
+  if (profile.auth?.usernameSecret) console.log(`  User Sec: ${import_chalk.default.white(profile.auth.usernameSecret)}`);
+  if (profile.auth?.passwordSecret) console.log(`  Pass Sec: ${import_chalk.default.white(profile.auth.passwordSecret)}`);
+  if (profile.auth?.tokenSecret) console.log(`  Token:    ${import_chalk.default.white(profile.auth.tokenSecret)}`);
+  const accountIds = listAccountIds(profile);
+  if (accountIds.length) {
+    console.log(import_chalk.default.bold("\n  Accounts:\n"));
+    for (const id of accountIds) {
+      const acc = getProfileAccount(profile, id);
+      const def = profile.defaultAccount === id ? import_chalk.default.green(" (default)") : "";
+      console.log(`  ${import_chalk.default.cyan(id)}${def}  ${import_chalk.default.gray(acc.label || "")}`);
+      console.log(`    emailVar: ${import_chalk.default.yellow(acc.emailVar || "testEmail")}  passwordSecret: ${import_chalk.default.yellow(acc.passwordSecret)}`);
+      if (acc.emailSecret) console.log(`    emailSecret: ${import_chalk.default.yellow(acc.emailSecret)}`);
+      if (acc.loginFlow) console.log(`    loginFlow: ${import_chalk.default.white(acc.loginFlow)}`);
+    }
+    console.log(import_chalk.default.gray("\n  Run: ghostrun run <flow> --profile " + profile.name + " --account <id>"));
+  }
+  const vars = profile.variables || {};
+  console.log(`  Vars:     ${import_chalk.default.white(String(Object.keys(vars).length))}`);
+  for (const [key, value] of Object.entries(vars)) {
+    console.log(`    ${import_chalk.default.yellow(key)}=${import_chalk.default.gray(value)}`);
+  }
+  console.log();
+}
+async function runProfileCreate(name, baseUrl) {
+  ensureProjectWorkspace();
+  if (getProfile(name)) {
+    errorMsg(`Profile already exists: ${name}`);
+    process.exit(1);
+  }
+  const profile = {
+    name,
+    baseUrl: baseUrl || "",
+    variables: {},
+    auth: { strategy: "none" },
+    metadata: {}
+  };
+  saveProfile(profile);
+  success(`Created profile: ${name}`);
+  if (baseUrl) info(`Base URL: ${baseUrl}`);
+}
+async function runProfileUse(name) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg("Profile not found: " + name);
+    process.exit(1);
+  }
+  const config = readConfig();
+  config.activeProfile = name;
+  writeConfig(config, "project");
+  success(`Active profile set to: ${name}`);
+}
+async function runProfileSet(name, key, value) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg("Profile not found: " + name);
+    process.exit(1);
+  }
+  if (key === "baseUrl") {
+    profile.baseUrl = value;
+  } else if (key.startsWith("auth.")) {
+    profile.auth = profile.auth || {};
+    profile.auth[key.slice(5)] = value;
+  } else if (key.startsWith("meta.")) {
+    profile.metadata = profile.metadata || {};
+    profile.metadata[key.slice(5)] = value;
+  } else {
+    profile.variables = profile.variables || {};
+    profile.variables[key] = value;
+  }
+  saveProfile(profile);
+  success(`Updated profile "${name}": ${key}`);
+}
+async function runProfileDelete(name) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg("Profile not found: " + name);
+    process.exit(1);
+  }
+  const approved = await confirmAction(`  Delete profile "${import_chalk.default.yellow(name)}"? (y/N) `, false);
+  if (!approved) {
+    warn("Cancelled.");
+    return;
+  }
+  deleteProfile(name);
+  const config = readConfig();
+  if (config.activeProfile === name) {
+    delete config.activeProfile;
+    writeConfig(config, "project");
+  }
+  success(`Deleted profile: ${name}`);
+}
+async function runProfileAccountAdd(profileName, accountId, opts) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg("Profile not found: " + profileName);
+    process.exit(1);
+  }
+  const id = normalizeAccountId(accountId);
+  const secrets = secretNamesForAccount(id);
+  const passSecret = opts.passwordSecret || secrets.password;
+  const account = buildAccountFromSecrets({
+    id,
+    label: opts.label || id,
+    email: opts.email,
+    emailSecret: opts.emailSecret || secrets.email,
+    passwordSecret: passSecret,
+    loginFlow: opts.loginFlow
+  });
+  profile.accounts = profile.accounts || {};
+  profile.accounts[id] = account;
+  if (opts.default || !profile.defaultAccount) profile.defaultAccount = id;
+  if (!profile.auth || profile.auth.strategy === "none") {
+    profile.auth = {
+      strategy: "form",
+      loginFlow: opts.loginFlow || profile.auth?.loginFlow || "login",
+      usernameVar: account.emailVar || "testEmail"
+    };
+  }
+  saveProfile(profile);
+  success(`Added account "${id}" to profile "${profileName}"`);
+  info(`Email var: ${account.emailVar}  \u2192 export ${account.emailSecret}=...`);
+  info(`Password:  export ${account.passwordSecret}=...`);
+  info(`Run: ghostrun run <flow> --profile ${profileName} --account ${id}`);
+}
+async function runProfileAccountsList(profileName) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg("Profile not found: " + profileName);
+    process.exit(1);
+  }
+  const ids = listAccountIds(profile);
+  console.log(import_chalk.default.bold(`
+  Accounts on profile "${profileName}" (${ids.length})
+`));
+  if (!ids.length) {
+    warn("No accounts defined. Add one: ghostrun profile account add staging admin --email qa-admin@co.com");
+    console.log();
+    return;
+  }
+  for (const id of ids) {
+    const acc = getProfileAccount(profile, id);
+    const def = profile.defaultAccount === id ? import_chalk.default.green(" (default)") : "";
+    console.log(`  ${import_chalk.default.cyan(id)}${def}  ${import_chalk.default.gray(acc.label || "")}`);
+    console.log(`    ${import_chalk.default.yellow(acc.emailVar || "testEmail")}  password: ${import_chalk.default.yellow(acc.passwordSecret)}`);
+    if (acc.emailSecret) console.log(`    email env: ${import_chalk.default.yellow(acc.emailSecret)}`);
+  }
+  console.log();
+}
+async function runProfileAccountShow(profileName, accountId) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg("Profile not found: " + profileName);
+    process.exit(1);
+  }
+  const acc = getProfileAccount(profile, accountId);
+  if (!acc) {
+    errorMsg(`Account not found: ${accountId}. Defined: ${listAccountIds(profile).join(", ") || "(none)"}`);
+    process.exit(1);
+  }
+  console.log(import_chalk.default.bold(`
+  Account: ${normalizeAccountId(accountId)} (${profileName})
+`));
+  console.log(JSON.stringify(acc, null, 2));
+  console.log();
+}
+async function setupProfileAccountsInteractive(staging, clack) {
+  const { confirm, text, isCancel, note } = clack;
+  const addAccounts = await confirm({
+    message: "Configure QA accounts (superadmin, admin, manager, guest)?",
+    initialValue: true
+  });
+  if (isCancel(addAccounts) || !addAccounts) return;
+  const loginFlow = await text({
+    message: "Login flow name (record this first if missing):",
+    placeholder: "login",
+    defaultValue: "login"
+  });
+  const flowName = !isCancel(loginFlow) && loginFlow ? String(loginFlow) : "login";
+  staging.auth = {
+    strategy: "form",
+    loginFlow: flowName,
+    usernameVar: "testEmail"
+  };
+  const useDefaults = await confirm({
+    message: "Create all four roles now (superadmin, admin, manager, guest)?",
+    initialValue: true
+  });
+  if (!isCancel(useDefaults) && useDefaults) {
+    const domain = await text({
+      message: "Email domain for QA users:",
+      placeholder: "yourapp.com",
+      defaultValue: "yourapp.com"
+    });
+    const emailDomain = !isCancel(domain) && domain ? String(domain) : "yourapp.com";
+    staging.accounts = buildDefaultSaaSAccounts(flowName, emailDomain);
+    staging.defaultAccount = "manager";
+    staging.metadata = { ...staging.metadata, accountTypes: DEFAULT_SAAS_ACCOUNT_IDS.join(",") };
+    saveProfile(staging);
+    const lines2 = DEFAULT_SAAS_ACCOUNT_IDS.map((id) => {
+      const a = staging.accounts[id];
+      return `  export ${a.emailSecret}='qa-${id}@${emailDomain}'
+  export ${a.passwordSecret}='...'`;
+    });
+    note(
+      `Set passwords (emails are suggested defaults):
+${lines2.join("\n")}
+
+Run by role:
+  ghostrun run <flow> --profile staging --account superadmin`,
+      "Accounts: superadmin, admin, manager, guest"
+    );
+    return;
+  }
+  let addMore = true;
+  while (addMore) {
+    const role = await text({
+      message: "Account type id (superadmin, admin, manager, guest, \u2026):",
+      placeholder: "manager",
+      validate: (v) => !v || !v.trim() ? "Required" : void 0
+    });
+    if (isCancel(role) || !role) break;
+    const id = normalizeAccountId(String(role));
+    const email = await text({
+      message: `Email for "${id}":`,
+      placeholder: `qa-${id}@yourapp.com`,
+      validate: (v) => !v || !v.includes("@") ? "Enter a valid email" : void 0
+    });
+    if (isCancel(email) || !email) break;
+    const secrets = secretNamesForAccount(id);
+    const account = buildAccountFromSecrets({
+      id,
+      label: id,
+      email: String(email),
+      emailSecret: secrets.email,
+      passwordSecret: secrets.password,
+      loginFlow: flowName
+    });
+    staging.accounts = staging.accounts || {};
+    staging.accounts[id] = account;
+    if (!staging.defaultAccount) staging.defaultAccount = id;
+    const another = await confirm({ message: "Add another account type?", initialValue: false });
+    addMore = !isCancel(another) && !!another;
+  }
+  saveProfile(staging);
+  const lines = listAccountIds(staging).map((id) => {
+    const a = staging.accounts[id];
+    return `  export ${a.emailSecret}='...'
+  export ${a.passwordSecret}='...'`;
+  });
+  note(
+    `Set secrets before running flows:
+${lines.join("\n")}
+
+Run as a role:
+  ghostrun run checkout --profile staging --account admin`,
+    "Multi-account staging"
+  );
+}
+async function runImprove() {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const runs = db.listRuns(void 0, 50);
+  const proposals = listRepairProposals(50);
+  const sessions = listAiSessions(50);
+  const activeProfile = config.activeProfile;
+  const findings = [];
+  const actions = [];
+  const safeguards = [];
+  const repeatedFailures = /* @__PURE__ */ new Map();
+  for (const run of runs.filter((r) => r.status === "failed")) {
+    const key = (run.errorMessage || "unknown").slice(0, 120);
+    repeatedFailures.set(key, (repeatedFailures.get(key) || 0) + 1);
+  }
+  const maxRepeats = config.policies?.maxSameFailureRepeats ?? 2;
+  const repeatedEntries = Array.from(repeatedFailures.entries()).filter(([, count]) => count > 1);
+  if (repeatedEntries.length > 0) {
+    for (const [message, count] of repeatedEntries.slice(0, 5)) {
+      findings.push(`Repeated failure (${count}x): ${message}`);
+      if (count >= maxRepeats) safeguards.push(`Same failure exceeded repeat threshold (${maxRepeats}): ${message}`);
+    }
+  }
+  const openProposals = proposals.filter((p) => p.status === "proposed");
+  if (openProposals.length > 0) {
+    findings.push(`${openProposals.length} open repair proposal(s) available.`);
+    actions.push(`Review with: ghostrun repair list`);
+  }
+  const staleProposals = openProposals.filter((p) => Date.now() - new Date(p.createdAt).getTime() > 7 * 864e5);
+  if (staleProposals.length > 0) {
+    findings.push(`${staleProposals.length} repair proposal(s) are older than 7 days.`);
+    actions.push("Review stale proposals with: ghostrun repair list");
+  }
+  const neverRunFlows = [];
+  const highFailureFlows = [];
+  const alwaysPassFlows = [];
+  for (const flow of db.listFlows()) {
+    const stats = db.getFlowStats(flow.id);
+    if (stats.totalRuns === 0) neverRunFlows.push(flow.name);
+    else if (stats.totalRuns >= 5 && stats.passRate < 80) {
+      highFailureFlows.push({ name: flow.name, rate: stats.passRate, runs: stats.totalRuns });
+    } else if (stats.totalRuns >= 10 && stats.passRate === 100) {
+      alwaysPassFlows.push(flow.name);
+    }
+  }
+  if (neverRunFlows.length) {
+    findings.push(`${neverRunFlows.length} flow(s) have never been run: ${neverRunFlows.slice(0, 5).join(", ")}`);
+    actions.push("Add never-run flows to a smoke suite or remove dead assets.");
+  }
+  if (highFailureFlows.length) {
+    for (const item of highFailureFlows.slice(0, 5)) {
+      findings.push(`High failure rate (${item.rate.toFixed(0)}% over ${item.runs} runs): ${item.name}`);
+    }
+    actions.push("Inspect high-failure flows with ghostrun run:show and ghostrun repair list");
+  }
+  if (alwaysPassFlows.length) {
+    findings.push(`${alwaysPassFlows.length} flow(s) always pass \u2014 possible coverage gaps: ${alwaysPassFlows.slice(0, 5).join(", ")}`);
+  }
+  const flakyFlows = detectFlakyFlows();
+  if (flakyFlows.length) {
+    findings.push(`Flaky flows detected: ${flakyFlows.slice(0, 5).join(", ")}`);
+    actions.push("Stabilize flaky flows with stronger waits or isolated setup steps.");
+  }
+  const aiUsage = aggregateAiUsage();
+  const authorSessions = sessions.filter((s) => s.mode === "author" || s.mode === "create");
+  if (authorSessions.length >= 5) {
+    findings.push(`AI authoring used ${authorSessions.length} times recently (~$${aiUsage.estimatedCostUsd.toFixed(2)} estimated).`);
+  }
+  if (!activeProfile) {
+    findings.push("No active profile is set.");
+    actions.push("Create and select a profile for staging or production runs.");
+  }
+  if (runs.length === 0) {
+    findings.push("No runs recorded yet.");
+    actions.push("Run a smoke flow before using improve.");
+  }
+  if (sessions.length === 0) {
+    findings.push("No AI sessions recorded yet.");
+  }
+  const blocked = safeguards.length > 0 && config.policies?.autoImproveEnabled;
+  let summary;
+  const prompt = [
+    "You are improving a local-first test automation project.",
+    "Summarize the highest-value next actions in 4 bullet points max.",
+    "Do not suggest infinite retry loops.",
+    "",
+    `Auto improve enabled: ${config.policies?.autoImproveEnabled ? "yes" : "no"}`,
+    `Active profile: ${activeProfile || "none"}`,
+    `Open repair proposals: ${openProposals.length}`,
+    `Recent failed runs: ${runs.filter((r) => r.status === "failed").length}`,
+    "",
+    "Findings:",
+    ...findings.map((f) => `- ${f}`),
+    "",
+    "Safeguards:",
+    ...safeguards.length ? safeguards.map((s) => `- ${s}`) : ["- none"]
+  ].join("\n");
+  if (config.policies?.autoImproveEnabled && !blocked) {
+    const ai = await callAI(prompt, { mode: "improve", metadata: { profile: activeProfile || "", openProposals: String(openProposals.length) } });
+    if (ai?.text) summary = ai.text;
+  }
+  const report = {
+    id: (0, import_crypto4.randomUUID)(),
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: blocked ? "blocked" : "generated",
+    autoImproveEnabled: Boolean(config.policies?.autoImproveEnabled),
+    interactionMode: getInteractionMode(),
+    activeProfile: activeProfile || void 0,
+    findings,
+    actions,
+    summary,
+    safeguards
+  };
+  const reportPath = saveImproveReport(report);
+  const markdownPath = path4.join(path4.dirname(reportPath), `${path4.basename(reportPath, ".json")}.md`);
+  const markdown = [
+    "# GhostRun Improve Report",
+    "",
+    `- Generated: ${report.createdAt}`,
+    `- Profile: ${activeProfile || "(none)"}`,
+    `- Open repair proposals: ${openProposals.length}`,
+    `- Stale proposals (>7d): ${staleProposals.length}`,
+    `- High-failure flows: ${highFailureFlows.length}`,
+    `- Never-run flows: ${neverRunFlows.length}`,
+    `- Flaky flows: ${flakyFlows.length}`,
+    "",
+    "## Findings",
+    ...findings.length ? findings.map((f) => `- ${f}`) : ["- none"],
+    "",
+    "## Suggested Actions",
+    ...actions.length ? actions.map((a) => `- ${a}`) : ["- none"],
+    ...summary ? ["", "## AI Summary", summary] : []
+  ].join("\n");
+  fs4.writeFileSync(markdownPath, markdown);
+  console.log(import_chalk.default.bold("\n  Improve Report\n"));
+  console.log(`  Status:     ${blocked ? import_chalk.default.red("blocked") : import_chalk.default.green("generated")}`);
+  console.log(`  Profile:    ${import_chalk.default.white(activeProfile || "(none)")}`);
+  console.log(`  Open fixes: ${import_chalk.default.white(String(openProposals.length))}`);
+  console.log(`  Failures:   ${import_chalk.default.white(String(runs.filter((r) => r.status === "failed").length))}`);
+  if (findings.length) {
+    console.log(import_chalk.default.bold("\n  Findings"));
+    for (const finding of findings) console.log(`  - ${finding}`);
+  }
+  if (actions.length) {
+    console.log(import_chalk.default.bold("\n  Suggested Actions"));
+    for (const action of actions) console.log(`  - ${action}`);
+  }
+  if (summary) {
+    console.log(import_chalk.default.bold("\n  AI Summary"));
+    for (const line of summary.split("\n")) {
+      if (line.trim()) console.log(`  ${line}`);
+    }
+  }
+  if (safeguards.length) {
+    console.log(import_chalk.default.bold("\n  Safeguards"));
+    for (const s of safeguards) console.log(`  - ${import_chalk.default.yellow(s)}`);
+  }
+  console.log();
+  info(`Saved: ${import_chalk.default.cyan(reportPath)}`);
+  info(`Markdown: ${import_chalk.default.cyan(markdownPath)}`);
+  console.log();
+}
+async function runRepairList() {
+  printLogo();
+  divider();
+  const proposals = listRepairProposals(50);
+  console.log(import_chalk.default.bold(`
+  Repair Proposals (${proposals.length})
+`));
+  if (proposals.length === 0) {
+    warn("No repair proposals found.");
+    console.log();
+    return;
+  }
+  console.log(import_chalk.default.gray("  ID        Type       Status     Flow                       Step  Proposal"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(86)));
+  for (const proposal of proposals) {
+    const statusColor = proposal.status === "applied" ? import_chalk.default.green : proposal.status === "rejected" ? import_chalk.default.red : import_chalk.default.yellow;
+    const repairType = getRepairType(proposal);
+    const proposalText = proposal.proposedSelector || proposal.proposedValue || proposal.rationale?.slice(0, 24) || "\u2014";
+    console.log(`  ${import_chalk.default.gray(proposal.id.slice(0, 8))}  ${import_chalk.default.white(repairType.padEnd(10))} ${statusColor(proposal.status.padEnd(10))} ${import_chalk.default.white((proposal.flowName || "").padEnd(26).slice(0, 26))} ${import_chalk.default.gray(String(proposal.stepNumber || "\u2014").padStart(4))}  ${import_chalk.default.cyan(String(proposalText).slice(0, 26))}`);
+  }
+  console.log();
+}
+async function runRepairShow(id) {
+  printLogo();
+  divider();
+  const found = findRepairProposal(id);
+  if (!found) {
+    errorMsg("Repair proposal not found: " + id);
+    process.exit(1);
+  }
+  const proposal = found.proposal;
+  const repairType = getRepairType(proposal);
+  console.log(import_chalk.default.bold(`
+  Repair Proposal: ${proposal.id.slice(0, 8)}
+`));
+  console.log(`  Type:      ${import_chalk.default.white(repairType)}`);
+  console.log(`  Flow:      ${import_chalk.default.white(proposal.flowName)}`);
+  console.log(`  Status:    ${import_chalk.default.white(proposal.status)}`);
+  console.log(`  Step:      ${import_chalk.default.white(String(proposal.stepNumber || "\u2014"))}`);
+  console.log(`  Action:    ${import_chalk.default.white(proposal.action || "\u2014")}`);
+  if (proposal.currentSelector) console.log(`  Selector:  ${import_chalk.default.gray(proposal.currentSelector)} \u2192 ${import_chalk.default.cyan(proposal.proposedSelector || "\u2014")}`);
+  if (proposal.currentValue || proposal.proposedValue) {
+    console.log(`  Value:     ${import_chalk.default.gray(proposal.currentValue || "\u2014")} \u2192 ${import_chalk.default.cyan(proposal.proposedValue || "\u2014")}`);
+  }
+  if (proposal.errorMessage) console.log(`  Error:     ${import_chalk.default.red(proposal.errorMessage)}`);
+  if (proposal.rationale) console.log(`  Why:       ${import_chalk.default.gray(proposal.rationale)}`);
+  if (proposal.runId) console.log(`  Run:       ${import_chalk.default.gray(proposal.runId.slice(0, 8))}`);
+  console.log();
+}
+function applyRepairProposal(id, mode = "interactive") {
+  const found = findRepairProposal(id);
+  if (!found) return { ok: false, message: `Repair proposal not found: ${id}` };
+  const proposal = found.proposal;
+  if (!proposal.flowId || !proposal.nodeId) {
+    return { ok: false, message: "Repair proposal is missing flow or node information." };
+  }
+  const repairType = getRepairType(proposal);
+  if (repairType === "config" || repairType === "url" || repairType === "visual") {
+    if (repairType === "visual") {
+      updateRepairProposal(proposal.id, {
+        status: "applied",
+        rationale: `${proposal.rationale || ""} Acknowledged \u2014 re-run ghostrun baseline:set after UI changes.`
+      });
+      return {
+        ok: true,
+        message: `Visual proposal acknowledged. Re-capture baselines: ghostrun baseline:set "${proposal.flowName}"`,
+        flowName: proposal.flowName
+      };
+    }
+    return {
+      ok: false,
+      message: repairType === "url" ? "URL/config repairs must be applied manually to the profile or flow URL." : "Configuration repairs must be applied manually."
+    };
+  }
+  const flow = db.getFlow(proposal.flowId);
+  if (!flow) return { ok: false, message: "Flow not found for proposal." };
+  let graph;
+  try {
+    graph = JSON.parse(flow.graph);
+  } catch {
+    return { ok: false, message: "Flow graph is invalid." };
+  }
+  const node = graph.nodes.find((n) => String(n.id) === proposal.nodeId);
+  if (!node) return { ok: false, message: "Target node not found in flow." };
+  switch (repairType) {
+    case "selector":
+      if (!proposal.proposedSelector) return { ok: false, message: "Selector repair proposal is incomplete." };
+      node.selector = proposal.proposedSelector;
+      break;
+    case "assertion":
+      if (!proposal.proposedValue) return { ok: false, message: "Assertion repair proposal is incomplete." };
+      node.value = proposal.proposedValue;
+      break;
+    case "wait":
+      node.action = "wait:ms";
+      node.value = proposal.proposedValue || "20000";
+      break;
+    default:
+      return { ok: false, message: `Unsupported repair type: ${repairType}` };
+  }
+  db.updateFlow(flow.id, { graph });
+  const rationale = proposal.rationale ? `${proposal.rationale} ${mode === "auto" ? "Auto-applied by GhostRun after policy and loop-guard checks." : "Applied by user review."}` : mode === "auto" ? "Auto-applied by GhostRun after policy and loop-guard checks." : "Applied by user review.";
+  updateRepairProposal(proposal.id, { status: "applied", rationale });
+  return { ok: true, message: `Applied ${repairType} repair proposal to flow "${flow.name}"`, flowName: flow.name };
+}
+function applySelectorRepairProposal(id, mode = "interactive") {
+  return applyRepairProposal(id, mode);
+}
+function autoApplySelectorRepairProposal(proposal, context) {
+  const config = readConfig();
+  const interactionMode = getInteractionMode();
+  if (!config.policies?.allowAutoRepairApply) {
+    return { applied: false, reason: "config disallows auto-apply" };
+  }
+  if (interactionMode !== "auto") {
+    return { applied: false, reason: "interaction mode is assist" };
+  }
+  if (context.ci) {
+    return { applied: false, reason: "CI mode forbids flow mutation" };
+  }
+  if (isProductionLike(context.profile, context.startUrl)) {
+    return { applied: false, reason: "production-like targets require review" };
+  }
+  if (!proposal.flowId || !proposal.nodeId || !proposal.proposedSelector) {
+    return { applied: false, reason: "proposal is incomplete" };
+  }
+  if (context.currentSelector && proposal.currentSelector && context.currentSelector !== proposal.currentSelector) {
+    return { applied: false, reason: "flow selector changed after proposal creation" };
+  }
+  const attemptCount = getSelectorRepairAttemptCount({ flowId: proposal.flowId, nodeId: proposal.nodeId });
+  const maxAttempts = config.policies?.maxRepairAttemptsPerRun ?? 2;
+  if (attemptCount >= maxAttempts) {
+    return { applied: false, reason: `selector repair attempt limit reached (${maxAttempts})` };
+  }
+  const repeatCount = getRecentFailureRepeatCount(proposal.flowId, proposal.errorMessage || "");
+  const maxRepeats = config.policies?.maxSameFailureRepeats ?? 2;
+  if (repeatCount >= maxRepeats) {
+    return { applied: false, reason: `same failure repeat limit reached (${maxRepeats})` };
+  }
+  const result = applySelectorRepairProposal(proposal.id, "auto");
+  return result.ok ? { applied: true } : { applied: false, reason: result.message };
+}
+async function runRepairApply(id) {
+  const found = findRepairProposal(id);
+  if (!found) {
+    errorMsg("Repair proposal not found: " + id);
+    process.exit(1);
+  }
+  const proposal = found.proposal;
+  const repairType = getRepairType(proposal);
+  if (!proposal.flowId || !proposal.nodeId) {
+    errorMsg("Repair proposal is missing flow or node information.");
+    process.exit(1);
+  }
+  const flow = db.getFlow(proposal.flowId);
+  if (!flow) {
+    errorMsg("Flow not found for proposal.");
+    process.exit(1);
+  }
+  console.log(import_chalk.default.bold(`
+  Apply Repair Proposal ${proposal.id.slice(0, 8)}
+`));
+  console.log(`  Type:     ${import_chalk.default.white(repairType)}`);
+  console.log(`  Flow:     ${import_chalk.default.white(flow.name)}`);
+  if (proposal.proposedSelector) {
+    console.log(`  Selector: ${import_chalk.default.gray(proposal.currentSelector || "\u2014")} \u2192 ${import_chalk.default.cyan(proposal.proposedSelector)}`);
+  }
+  if (proposal.proposedValue) {
+    console.log(`  Value:    ${import_chalk.default.gray(proposal.currentValue || "\u2014")} \u2192 ${import_chalk.default.cyan(proposal.proposedValue)}`);
+  }
+  if (repairType === "url" || repairType === "config") {
+    warn("This proposal must be applied manually to the profile or flow URL.");
+    if (proposal.rationale) console.log(import_chalk.default.gray(`  Hint: ${proposal.rationale}`));
+    return;
+  }
+  if (repairType === "visual") {
+    console.log(import_chalk.default.bold(`
+  Visual Regression Proposal ${proposal.id.slice(0, 8)}
+`));
+    console.log(`  Flow:     ${import_chalk.default.white(flow.name)}`);
+    console.log(`  Diff:     ${import_chalk.default.yellow(proposal.currentValue || "\u2014")}`);
+    console.log(import_chalk.default.gray(`  ${proposal.proposedValue || "Run ghostrun baseline:set after intentional UI changes."}`));
+    const approved2 = await confirmAction(import_chalk.default.cyan("  Acknowledge and mark applied? (Y/n) "), true);
+    if (!approved2) {
+      warn("Cancelled.");
+      return;
+    }
+    const result2 = applyRepairProposal(proposal.id, "interactive");
+    if (!result2.ok) {
+      errorMsg(result2.message);
+      process.exit(1);
+    }
+    success(result2.message);
+    return;
+  }
+  console.log();
+  const approved = await confirmAction(import_chalk.default.cyan(`  Apply this ${repairType} change? (Y/n) `), true);
+  if (!approved) {
+    warn("Cancelled.");
+    return;
+  }
+  const result = applyRepairProposal(proposal.id, "interactive");
+  if (!result.ok) {
+    errorMsg(result.message);
+    process.exit(1);
+  }
+  success(result.message);
+}
+function pageSignalScore(page) {
+  return page.interactives.forms.length * 4 + page.interactives.searchInputs.length * 3 + page.interactives.standaloneInputs.length * 2 + page.interactives.ctaButtons.length + Math.min(page.links.length, 8) * 0.25;
+}
+function shouldUseScrapeForExplore(pages, candidates) {
+  if (!isCrawleeEnabled()) return false;
+  if (pages.length === 0 || candidates.length === 0) return true;
+  const usefulPages = pages.filter((p) => pageSignalScore(p) >= 2).length;
+  const genericButtonCount = pages.reduce((sum, p) => sum + p.interactives.ctaButtons.filter((b) => /^(learn more|read more|submit|continue|next|start|open|click)$/i.test(b.text.trim())).length, 0);
+  const totalButtons = pages.reduce((sum, p) => sum + p.interactives.ctaButtons.length, 0);
+  const hasSpaHints = pages.some((p) => p.spaIndicators?.hasRouter || p.spaIndicators?.hasVueApp || p.spaIndicators?.hasNgApp || p.spaIndicators?.hasLoadingState);
+  return usefulPages === 0 || totalButtons > 0 && genericButtonCount / totalButtons > 0.6 || hasSpaHints && candidates.length < 2;
+}
+function pageDataFromScrapedPage(p) {
+  const searchInputs = p.forms.flatMap((form) => form.fields).filter(
+    (field) => field.type === "search" || /search|query|find/i.test(`${field.name} ${field.placeholder} ${field.label}`)
+  );
+  const forms = p.forms.map((form) => ({
+    selector: form.selector,
+    method: "get",
+    fields: form.fields,
+    submitSelector: form.submitSelector,
+    submitText: form.submitText || "Submit"
+  }));
+  return {
+    url: p.url,
+    title: p.title,
+    headings: p.headings,
+    links: p.links.map((l) => l.href),
+    screenshotPath: null,
+    interactives: {
+      forms,
+      searchInputs,
+      standaloneInputs: [],
+      ctaButtons: p.buttons
+    },
+    spaIndicators: {
+      hasRouter: /react|next|router|__next|vite|app/i.test(p.text.slice(0, 2e3)),
+      hasVueApp: /vue|data-v-/.test(p.text.slice(0, 2e3)),
+      hasNgApp: /ng-|angular/i.test(p.text.slice(0, 2e3)),
+      hasLoadingState: /loading|spinner|skeleton/i.test(p.text.slice(0, 2e3))
+    }
+  };
 }
 async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
   const normalize = (u) => {
@@ -8077,12 +8751,12 @@ async function bfsCrawl(startUrl, screenshotsDir, maxPages, onProgress) {
           // Check for dynamic loading indicators (loading spinners, skeletons)
           hasLoadingState: !!document.querySelector('[class*="loading"], [class*="skeleton"], [class*="spinner"]')
         };
-        return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8) };
-      }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [] }));
-      const ssPath = path2.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
+        return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8), spaIndicators };
+      }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [], spaIndicators: void 0 }));
+      const ssPath = path4.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
       await page.screenshot({ path: ssPath, type: "jpeg", quality: 60 }).catch(() => {
       });
-      const ssExists = fs2.existsSync(ssPath);
+      const ssExists = fs4.existsSync(ssPath);
       pages.push({
         url: page.url(),
         title,
@@ -8228,7 +8902,7 @@ Give this automation flow a short name (3-6 words) and one sentence description.
 Reply with ONLY this JSON, nothing else: {"name": "...", "description": "..."}`;
         let name = p.title || new URL(p.url).pathname;
         let description = `Automated interaction on ${p.title || p.url}`;
-        const result = await callAI(prompt);
+        const result = await callAI(prompt, { mode: "author", metadata: { source: "explore" } });
         if (result) {
           try {
             const match = result.text.replace(/```json\n?|\n?```/g, "").match(/\{[^{}]+\}/);
@@ -8252,8 +8926,8 @@ Reply with ONLY this JSON, nothing else: {"name": "...", "description": "..."}`;
 function generateExploreHtml(report, pages, candidates) {
   const thumbs = pages.map((p, i) => {
     let imgTag = '<div class="no-screenshot">No screenshot</div>';
-    if (p.screenshotPath && fs2.existsSync(p.screenshotPath)) {
-      const b64 = fs2.readFileSync(p.screenshotPath).toString("base64");
+    if (p.screenshotPath && fs4.existsSync(p.screenshotPath)) {
+      const b64 = fs4.readFileSync(p.screenshotPath).toString("base64");
       imgTag = `<img src="data:image/jpeg;base64,${b64}" alt="${p.title}" loading="lazy">`;
     }
     return `
@@ -8455,8 +9129,8 @@ async function runExplore(url) {
   }
   const maxPages = Math.min(parseInt(maxPagesStr, 10), 100);
   const report = db.createExploreReport(url, env);
-  const exploreDir = path2.join(DATA_PATH2, "explore", report.id);
-  fs2.mkdirSync(exploreDir, { recursive: true });
+  const exploreDir = path4.join(DATA_PATH2, "explore", report.id);
+  fs4.mkdirSync(exploreDir, { recursive: true });
   let cookiesJson = null;
   if (loginCreds) {
     note("A browser will open. Log in, then come back and press Enter.", "Login Required");
@@ -8469,11 +9143,11 @@ async function runExplore(url) {
       await loginPage.fill('input[type="password"]', loginCreds.loginPassword, { timeout: 3e3 });
     } catch {
     }
-    await new Promise((resolve) => {
+    await new Promise((resolve3) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       rl.question(import_chalk.default.cyan("\n  Press Enter once you are logged in... "), () => {
         rl.close();
-        resolve();
+        resolve3();
       });
     });
     const cookies = await loginPage.context().cookies();
@@ -8510,6 +9184,35 @@ async function runExplore(url) {
       }
     }
     note("No AI available \u2014 generated flows from detected page elements. Set up Ollama or ANTHROPIC_API_KEY for better names.", "Note");
+  }
+  if (shouldUseScrapeForExplore(pages, candidates)) {
+    const sScrape = spinner();
+    sScrape.start("Explorer confidence is low \u2014 using Crawlee scrape fallback...");
+    try {
+      const scrape = await runCrawleeScrape(url, {
+        maxPages: Math.min(Math.max(1, maxPages), 3),
+        reason: "explore-fallback",
+        exploreReportId: report.id,
+        quiet: true,
+        requireEnabled: false
+      });
+      const scrapePages = scrape.pages.map(pageDataFromScrapedPage);
+      const combinedPages = deduplicatePages([...pages, ...scrapePages]);
+      const scrapeCandidates = hasAI ? await analyzePages(combinedPages) : combinedPages.flatMap(
+        (p) => buildStepsFromInteractives(p).map((steps) => ({
+          name: p.title ? `${p.title} \u2014 ${steps.find((s2) => s2.action !== "navigate")?.action || "check"}` : `Check ${new URL(p.url).pathname}`,
+          description: `Automated flow enriched by Crawlee scrape on ${p.title || p.url}`,
+          route: p.url,
+          steps
+        }))
+      );
+      pages.push(...scrapePages.filter((sp) => !pages.some((p) => p.url === sp.url)));
+      candidates = [...candidates, ...scrapeCandidates];
+      sScrape.stop(`Crawlee fallback added ${scrape.pages.length} scraped page${scrape.pages.length !== 1 ? "s" : ""}`);
+    } catch (err) {
+      sScrape.stop("Crawlee fallback skipped");
+      note(err instanceof Error ? err.message : String(err), "Scrape fallback unavailable");
+    }
   }
   const seenRoutes = /* @__PURE__ */ new Set();
   candidates = candidates.filter((c) => {
@@ -8552,8 +9255,8 @@ async function runExplore(url) {
   const s3 = spinner();
   s3.start("Generating report...");
   const reportHtml = generateExploreHtml(report, pages, candidates);
-  const reportPath = path2.join(exploreDir, "report.html");
-  fs2.writeFileSync(reportPath, reportHtml, "utf-8");
+  const reportPath = path4.join(exploreDir, "report.html");
+  fs4.writeFileSync(reportPath, reportHtml, "utf-8");
   db.updateExploreReport(report.id, { status: "complete", reportPath });
   s3.stop("Report generated");
   console.log();
@@ -8714,25 +9417,39 @@ async function runSuiteRun(name, vars) {
     warn("No flows in this suite.");
     return;
   }
+  const parallelMode = process.argv.includes("--parallel");
   console.log(import_chalk.default.bold(`
-  Suite: ${suite.name}
+  Suite: ${suite.name}${parallelMode ? import_chalk.default.gray("  [parallel]") : ""}
 `));
   const lineWidth = 45;
   console.log(import_chalk.default.gray("  " + "\u2500".repeat(lineWidth)));
   const results = [];
   const suiteStart = Date.now();
-  for (let i = 0; i < flows.length; i++) {
-    const sf = flows[i];
-    process.stdout.write(`   ${import_chalk.default.gray(String(i + 1))}  ${import_chalk.default.white(sf.flowName.padEnd(22).slice(0, 22))}  `);
-    try {
-      const result = await executeFlow(sf.flowId, vars);
-      const dur = result.duration;
-      process.stdout.write(result.passed ? import_chalk.default.green("\u2713") : import_chalk.default.red("\u2717"));
-      process.stdout.write("  " + import_chalk.default.gray(dur + "ms") + "\n");
-      results.push({ index: i + 1, name: sf.flowName, passed: result.passed, duration: dur });
-    } catch (err) {
-      process.stdout.write(import_chalk.default.red("\u2717") + "  " + import_chalk.default.gray("error") + "\n");
-      results.push({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) });
+  if (parallelMode) {
+    const settled = await Promise.all(
+      flows.map(
+        (sf, i) => executeFlow(sf.flowId, vars, { quiet: true }).then((result) => ({ index: i + 1, name: sf.flowName, passed: result.passed, duration: result.duration })).catch((err) => ({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) }))
+      )
+    );
+    results.push(...settled);
+    results.forEach((r) => {
+      const status = r.passed ? import_chalk.default.green("\u2713") : import_chalk.default.red("\u2717");
+      console.log(`   ${import_chalk.default.gray(String(r.index))}  ${import_chalk.default.white(r.name.padEnd(22).slice(0, 22))}  ${status}  ${import_chalk.default.gray(r.duration + "ms")}`);
+    });
+  } else {
+    for (let i = 0; i < flows.length; i++) {
+      const sf = flows[i];
+      process.stdout.write(`   ${import_chalk.default.gray(String(i + 1))}  ${import_chalk.default.white(sf.flowName.padEnd(22).slice(0, 22))}  `);
+      try {
+        const result = await executeFlow(sf.flowId, vars);
+        const dur = result.duration;
+        process.stdout.write(result.passed ? import_chalk.default.green("\u2713") : import_chalk.default.red("\u2717"));
+        process.stdout.write("  " + import_chalk.default.gray(dur + "ms") + "\n");
+        results.push({ index: i + 1, name: sf.flowName, passed: result.passed, duration: dur });
+      } catch (err) {
+        process.stdout.write(import_chalk.default.red("\u2717") + "  " + import_chalk.default.gray("error") + "\n");
+        results.push({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) });
+      }
     }
   }
   const totalDuration = Date.now() - suiteStart;
@@ -8763,12 +9480,12 @@ async function runBaselineSet(id) {
   }
   const steps = db.listSteps(result.runId);
   let count = 0;
-  const baselinesDir = path2.join(DATA_PATH2, "baselines", flow.id);
-  fs2.mkdirSync(baselinesDir, { recursive: true });
+  const baselinesDir = path4.join(DATA_PATH2, "baselines", flow.id);
+  fs4.mkdirSync(baselinesDir, { recursive: true });
   for (const step of steps) {
-    if (step.screenshotPath && fs2.existsSync(step.screenshotPath)) {
-      const dest = path2.join(baselinesDir, `step-${step.stepNumber}.png`);
-      fs2.copyFileSync(step.screenshotPath, dest);
+    if (step.screenshotPath && fs4.existsSync(step.screenshotPath)) {
+      const dest = path4.join(baselinesDir, `step-${step.stepNumber}.png`);
+      fs4.copyFileSync(step.screenshotPath, dest);
       db.setBaseline(flow.id, step.stepNumber, dest);
       count++;
     }
@@ -8807,31 +9524,61 @@ async function runBaselineShow(id) {
   }
   console.log();
 }
-async function runCreate(description) {
-  printLogo();
-  divider();
+async function runCreate(description, extraArgs = []) {
+  const jsonOutput = parseFlagValue(extraArgs, "--output") === "json" || extraArgs.includes("--json");
+  const preview = extraArgs.includes("--preview");
+  const noSave = preview || extraArgs.includes("--no-save");
+  const profileName = parseFlagValue(extraArgs, "--profile") || readConfig().activeProfile || void 0;
+  if (!jsonOutput) {
+    printLogo();
+    divider();
+  }
   if (!description) {
+    const positional = extraArgs.filter((a) => !a.startsWith("--") && extraArgs.indexOf(a) === extraArgs.lastIndexOf(a));
+    description = positional.join(" ").trim();
+  }
+  if (!description) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: "Description required" }));
+      process.exit(1);
+    }
     description = await askQuestion(import_chalk.default.cyan("\n  Describe the automation flow: "));
     if (!description) {
       errorMsg("Description required");
       process.exit(1);
     }
   }
-  const baseUrl = await askQuestion(import_chalk.default.cyan("  Base URL for this flow (e.g. http://localhost:3000): "));
+  let baseUrl = parseFlagValue(extraArgs, "--base-url");
+  if (!baseUrl && profileName) {
+    baseUrl = getProfile(profileName)?.baseUrl;
+  }
   if (!baseUrl) {
-    errorMsg("Base URL required");
-    process.exit(1);
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: "Base URL required. Pass --base-url or --profile with baseUrl." }));
+      process.exit(1);
+    }
+    baseUrl = await askQuestion(import_chalk.default.cyan("  Base URL for this flow (e.g. http://localhost:3000): "));
+    if (!baseUrl) {
+      errorMsg("Base URL required");
+      process.exit(1);
+    }
   }
   const hasAI = !!await isOllamaRunning() || !!process.env.ANTHROPIC_API_KEY;
   if (!hasAI) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: "No AI provider available. Set ANTHROPIC_API_KEY or run Ollama." }));
+      process.exit(1);
+    }
     errorMsg("No AI provider available. Run Ollama locally or set ANTHROPIC_API_KEY.");
     process.exit(1);
   }
-  info("Generating flow from description...");
+  if (!jsonOutput) info("Generating flow from description...");
+  const authorContext = buildAuthorContext(profileName);
   const prompt = `Convert this automation test description into a Playwright test flow.
 
 Description: "${description}"
 Base URL: "${baseUrl}"
+${authorContext}
 
 Output ONLY a valid JSON array of steps, no other text:
 [
@@ -8839,15 +9586,19 @@ Output ONLY a valid JSON array of steps, no other text:
 ]
 
 Rules:
-- Use "navigate" for page navigation (include full URL)
+- Use "navigate" for page navigation (include full URL or {{baseUrl}} paths)
 - Use "click" for button/link clicks (guess a reasonable selector)
 - Use "fill" for text inputs (include the test value)
 - Use "assert:text" to verify text appears on page
 - Use "assert:url" to verify URL contains a string
 - Only include fields relevant to each action
 - selector and url fields must be CSS selectors or full URLs`;
-  const result = await callAI(prompt);
+  const result = await callAI(prompt, { mode: "author", metadata: { source: "create", profile: profileName || "" } });
   if (!result) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: "AI failed to generate flow." }));
+      process.exit(1);
+    }
     errorMsg("AI failed to generate flow.");
     process.exit(1);
   }
@@ -8857,6 +9608,10 @@ Rules:
     steps = JSON.parse(cleaned);
     if (!Array.isArray(steps)) throw new Error("Not an array");
   } catch {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: "AI returned invalid JSON.", preview: result.text.slice(0, 200) }));
+      process.exit(1);
+    }
     errorMsg("AI returned invalid JSON. Try again with a clearer description.");
     console.log(import_chalk.default.gray("  AI response: " + result.text.slice(0, 200)));
     process.exit(1);
@@ -8864,7 +9619,7 @@ Rules:
   }
   let flowName = "Generated Flow";
   {
-    const nameResult = await callAI(`Give a short (2-5 words) flow name for this automation: "${description}". Reply with ONLY the name, title-cased, no punctuation. Examples: "Login Flow", "Checkout Guest", "Search Products".`);
+    const nameResult = await callAI(`Give a short (2-5 words) flow name for this automation: "${description}". Reply with ONLY the name, title-cased, no punctuation. Examples: "Login Flow", "Checkout Guest", "Search Products".`, { mode: "author", metadata: { source: "flow-naming" } });
     if (nameResult?.text) {
       const candidate = nameResult.text.replace(/[^a-zA-Z0-9 ]/g, "").trim().slice(0, 40);
       if (candidate.length >= 3) flowName = candidate;
@@ -8888,7 +9643,36 @@ Rules:
   });
   nodes.push({ id: "end", type: "end", label: "End" });
   edges.push({ id: `e${steps.length}`, source: prevId, target: "end" });
-  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl }, createdBy: "agent" });
+  const graph = { nodes, edges, appUrl: baseUrl };
+  if (preview || noSave) {
+    const payload = { preview: true, name: flowName, description, baseUrl, steps, graph };
+    if (jsonOutput) {
+      console.log(JSON.stringify(payload));
+      return;
+    }
+    divider();
+    info("Preview generated flow (not saved):");
+    console.log(JSON.stringify(payload, null, 2));
+    const saveApproved = await confirmAction(import_chalk.default.cyan("\n  Save this flow? (Y/n) "), true);
+    if (!saveApproved) {
+      warn("Preview only \u2014 flow not saved.");
+      return;
+    }
+  }
+  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph, createdBy: "agent" });
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      flowId: flow.id,
+      flowIdShort: flow.id.slice(0, 8),
+      name: flowName,
+      description,
+      baseUrl,
+      stepCount: steps.length,
+      steps,
+      runHint: `ghostrun run ${flow.id.slice(0, 8)}`
+    }));
+    return;
+  }
   divider();
   success(`Flow created: ${import_chalk.default.white(flowName)}`);
   info(`Creator: ${import_chalk.default.magenta("\u{1F916} agent")}`);
@@ -8899,17 +9683,17 @@ Rules:
 async function runCodeScan(dir) {
   printLogo();
   divider();
-  if (!fs2.existsSync(dir)) {
+  if (!fs4.existsSync(dir)) {
     errorMsg("Directory not found: " + dir);
     process.exit(1);
   }
   info(`Scanning: ${import_chalk.default.cyan(dir)}`);
   let framework = "Generic";
-  if (fs2.existsSync(path2.join(dir, "next.config.js")) || fs2.existsSync(path2.join(dir, "next.config.ts"))) {
+  if (fs4.existsSync(path4.join(dir, "next.config.js")) || fs4.existsSync(path4.join(dir, "next.config.ts"))) {
     framework = "Next.js";
-  } else if (fs2.existsSync(path2.join(dir, "package.json"))) {
+  } else if (fs4.existsSync(path4.join(dir, "package.json"))) {
     try {
-      const pkg = JSON.parse(fs2.readFileSync(path2.join(dir, "package.json"), "utf8"));
+      const pkg = JSON.parse(fs4.readFileSync(path4.join(dir, "package.json"), "utf8"));
       if (pkg.dependencies?.express || pkg.devDependencies?.express) framework = "Express";
     } catch {
     }
@@ -8917,19 +9701,19 @@ async function runCodeScan(dir) {
   info(`Framework: ${import_chalk.default.cyan(framework)}`);
   const routes = [];
   if (framework === "Next.js") {
-    const appDir = path2.join(dir, "app");
-    const pagesDir = path2.join(dir, "pages");
-    const rootDir = fs2.existsSync(appDir) ? appDir : fs2.existsSync(pagesDir) ? pagesDir : null;
+    const appDir = path4.join(dir, "app");
+    const pagesDir = path4.join(dir, "pages");
+    const rootDir = fs4.existsSync(appDir) ? appDir : fs4.existsSync(pagesDir) ? pagesDir : null;
     if (rootDir) {
       const walkDir = (d, base) => {
-        for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
-          const full = path2.join(d, entry.name);
+        for (const entry of fs4.readdirSync(d, { withFileTypes: true })) {
+          const full = path4.join(d, entry.name);
           if (entry.isDirectory()) {
             walkDir(full, base);
             continue;
           }
           if (/^(page|route)\.(tsx?|jsx?)$/.test(entry.name)) {
-            const rel = path2.dirname(full).replace(base, "").replace(/\\/g, "/") || "/";
+            const rel = path4.dirname(full).replace(base, "").replace(/\\/g, "/") || "/";
             const route = rel || "/";
             if (!routes.includes(route)) routes.push(route);
           }
@@ -8940,8 +9724,8 @@ async function runCodeScan(dir) {
   } else if (framework === "Express") {
     const walkFiles = (d) => {
       const files = [];
-      for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
-        const full = path2.join(d, entry.name);
+      for (const entry of fs4.readdirSync(d, { withFileTypes: true })) {
+        const full = path4.join(d, entry.name);
         if (entry.isDirectory() && !["node_modules", ".git", "dist", "build"].includes(entry.name)) {
           files.push(...walkFiles(full));
         } else if (entry.isFile() && /\.(js|ts)$/.test(entry.name)) files.push(full);
@@ -8950,7 +9734,7 @@ async function runCodeScan(dir) {
     };
     for (const file of walkFiles(dir)) {
       try {
-        const content = fs2.readFileSync(file, "utf8");
+        const content = fs4.readFileSync(file, "utf8");
         const matches = content.matchAll(/(?:app|router)\.\w+\(['"]([/][^'"]*)['"]/g);
         for (const m of matches) {
           if (!routes.includes(m[1])) routes.push(m[1]);
@@ -8961,8 +9745,8 @@ async function runCodeScan(dir) {
   } else {
     const walkFiles = (d) => {
       const files = [];
-      for (const entry of fs2.readdirSync(d, { withFileTypes: true })) {
-        const full = path2.join(d, entry.name);
+      for (const entry of fs4.readdirSync(d, { withFileTypes: true })) {
+        const full = path4.join(d, entry.name);
         if (entry.isDirectory() && !["node_modules", ".git", "dist", "build"].includes(entry.name)) {
           files.push(...walkFiles(full));
         } else if (entry.isFile() && /\.(js|ts|tsx|jsx)$/.test(entry.name)) files.push(full);
@@ -8971,7 +9755,7 @@ async function runCodeScan(dir) {
     };
     for (const file of walkFiles(dir)) {
       try {
-        const content = fs2.readFileSync(file, "utf8");
+        const content = fs4.readFileSync(file, "utf8");
         const matches = content.matchAll(/['"]([/][a-z][a-z0-9\-/]*)['"]/gi);
         for (const m of matches) {
           if (!routes.includes(m[1])) routes.push(m[1]);
@@ -9018,21 +9802,21 @@ async function runCodeScan(dir) {
 }
 function getTemplatesDir() {
   const candidates = [
-    path2.join(__dirname, "templates"),
-    path2.join(process.cwd(), "templates")
+    path4.join(__dirname, "templates"),
+    path4.join(process.cwd(), "templates")
   ];
   for (const c of candidates) {
-    if (fs2.existsSync(c)) return c;
+    if (fs4.existsSync(c)) return c;
   }
   return candidates[0];
 }
 async function runStoreList() {
   const dir = getTemplatesDir();
-  if (!fs2.existsSync(dir)) {
+  if (!fs4.existsSync(dir)) {
     errorMsg("Templates directory not found at " + dir);
     return;
   }
-  const files = fs2.readdirSync(dir).filter((f) => f.endsWith(".flow.json"));
+  const files = fs4.readdirSync(dir).filter((f) => f.endsWith(".flow.json"));
   if (files.length === 0) {
     warn("No templates found.");
     return;
@@ -9042,7 +9826,7 @@ async function runStoreList() {
   console.log(import_chalk.default.gray("  " + "\u2500".repeat(72)));
   for (const file of files) {
     try {
-      const t = JSON.parse(fs2.readFileSync(path2.join(dir, file), "utf8"));
+      const t = JSON.parse(fs4.readFileSync(path4.join(dir, file), "utf8"));
       const slug = file.replace(".flow.json", "");
       const tags = (t.tags || []).slice(0, 3).map((g) => import_chalk.default.cyan(g)).join(import_chalk.default.gray(", "));
       const vars = (t.variables || []).map((v) => import_chalk.default.yellow(`{{${v}}}`)).join(import_chalk.default.gray(", "));
@@ -9058,15 +9842,15 @@ async function runStoreList() {
 }
 async function runStoreInstall(slug) {
   const dir = getTemplatesDir();
-  const file = path2.join(dir, slug.endsWith(".flow.json") ? slug : slug + ".flow.json");
-  if (!fs2.existsSync(file)) {
+  const file = path4.join(dir, slug.endsWith(".flow.json") ? slug : slug + ".flow.json");
+  if (!fs4.existsSync(file)) {
     errorMsg(`Template not found: ${slug}`);
     info("Available templates: " + import_chalk.default.cyan("ghostrun store list"));
     process.exit(1);
   }
   let t;
   try {
-    t = JSON.parse(fs2.readFileSync(file, "utf8"));
+    t = JSON.parse(fs4.readFileSync(file, "utf8"));
   } catch {
     errorMsg("Invalid template file");
     process.exit(1);
@@ -9075,8 +9859,8 @@ async function runStoreInstall(slug) {
   const existing = db.findFlowByName(t.flow.name);
   if (existing) {
     warn(`Flow "${t.flow.name}" already installed (id: ${existing.id.slice(0, 8)})`);
-    const overwrite = await askQuestion(import_chalk.default.cyan("  Overwrite? (y/N) "));
-    if (overwrite.toLowerCase() !== "y") {
+    const overwrite = await confirmAction(import_chalk.default.cyan("  Overwrite? (y/N) "), false);
+    if (!overwrite) {
       info("Skipped.");
       return;
     }
@@ -9104,14 +9888,17 @@ async function runStoreInstall(slug) {
   }
   console.log();
 }
-async function runInit() {
+async function runInit(extraArgs = []) {
+  const nonInteractive = extraArgs.includes("--yes") || extraArgs.includes("-y") || extraArgs.includes("--ci");
   printLogo();
   divider();
   console.log(import_chalk.default.bold("\n  GhostRun Setup Wizard\n"));
-  fs2.mkdirSync(path2.join(DATA_PATH2, "data"), { recursive: true });
-  fs2.mkdirSync(path2.join(DATA_PATH2, "screenshots"), { recursive: true });
-  fs2.mkdirSync(path2.join(DATA_PATH2, "sessions"), { recursive: true });
+  fs4.mkdirSync(path4.join(DATA_PATH2, "data"), { recursive: true });
+  fs4.mkdirSync(path4.join(DATA_PATH2, "screenshots"), { recursive: true });
+  fs4.mkdirSync(path4.join(DATA_PATH2, "sessions"), { recursive: true });
   success("Data directory ready: " + import_chalk.default.cyan(DATA_PATH2));
+  ensureProjectWorkspace();
+  success("Project workspace ready: " + import_chalk.default.cyan(PROJECT_GHOSTRUN_PATH));
   const { execSync } = require("child_process");
   let chromiumOk = false;
   try {
@@ -9122,8 +9909,8 @@ async function runInit() {
     warn("Playwright not found");
   }
   if (!chromiumOk) {
-    const installPw = await askQuestion(import_chalk.default.cyan("  Install Playwright + Chromium? (Y/n) "));
-    if (installPw.toLowerCase() !== "n") {
+    const installPw = nonInteractive || await confirmAction(import_chalk.default.cyan("  Install Playwright + Chromium? (Y/n) "), true);
+    if (installPw) {
       console.log(import_chalk.default.gray("  Running: npm install playwright...\n"));
       try {
         execSync("npm install playwright", { stdio: "inherit", cwd: __dirname });
@@ -9137,8 +9924,8 @@ async function runInit() {
     try {
       execSync("npx playwright install chromium --dry-run", { stdio: "ignore" });
     } catch {
-      const installBrowser = await askQuestion(import_chalk.default.cyan("  Chromium browser not found. Install it? (Y/n) "));
-      if (installBrowser.toLowerCase() !== "n") {
+      const installBrowser = nonInteractive || await confirmAction(import_chalk.default.cyan("  Chromium browser not found. Install it? (Y/n) "), true);
+      if (installBrowser) {
         execSync("npx playwright install chromium", { stdio: "inherit" });
         success("Chromium installed");
       }
@@ -9158,8 +9945,8 @@ async function runInit() {
     console.log(import_chalk.default.gray("     brew install ollama && ollama pull gemma3:4b && ollama serve\n"));
     console.log(`  ${import_chalk.default.cyan("B)")} Anthropic ${import_chalk.default.gray("(cloud \u2014 needs API key)")}`);
     console.log(import_chalk.default.gray("     export ANTHROPIC_API_KEY=sk-ant-...\n"));
-    const choice = await askQuestion(import_chalk.default.cyan("  Try to start Ollama now? (y/N) "));
-    if (choice.toLowerCase() === "y") {
+    const choice = nonInteractive ? false : await confirmAction(import_chalk.default.cyan("  Try to start Ollama now? (y/N) "), false);
+    if (choice) {
       try {
         const { spawn: sp } = require("child_process");
         sp("ollama", ["serve"], { detached: true, stdio: "ignore" }).unref();
@@ -9176,9 +9963,25 @@ async function runInit() {
     }
   }
   console.log();
-  const envFile = path2.join(process.cwd(), ".ghostrun.env");
-  if (!fs2.existsSync(envFile)) {
-    fs2.writeFileSync(envFile, [
+  if (isCrawleeEnabled()) {
+    success("Scraping: Crawlee enabled");
+  } else {
+    const enableScraping = nonInteractive ? false : await confirmAction(import_chalk.default.cyan("  Enable optional website scraping with Crawlee? (y/N) "), false);
+    if (enableScraping) {
+      try {
+        await loadCrawlee();
+        setCrawleeEnabled(true);
+        success("Scraping: Crawlee enabled");
+      } catch {
+        warn("Crawlee package not found. Install it, then rerun init:");
+        console.log(import_chalk.default.cyan("  npm install crawlee"));
+      }
+    }
+  }
+  console.log();
+  const envFile = path4.join(process.cwd(), ".ghostrun.env");
+  if (!fs4.existsSync(envFile)) {
+    fs4.writeFileSync(envFile, [
       "# GhostRun variables \u2014 used as {{VARIABLE}} in flows",
       "# BASE_URL=https://your-app.com",
       "# EMAIL=test@example.com",
@@ -9189,16 +9992,23 @@ async function runInit() {
   } else {
     info(".ghostrun.env already exists");
   }
+  const projectConfig = readConfig();
+  info(`Interaction mode: ${projectConfig.interactionMode || "assist"}`);
+  info(`AI usage tracking: ${projectConfig.ai?.trackUsage === false ? "disabled" : "enabled"}`);
+  info("Run `ghostrun audit` to check for secret leaks before committing");
   divider();
   console.log(import_chalk.default.bold.green("\n  Setup complete!\n"));
   console.log("  " + import_chalk.default.gray("Record a flow:   ") + import_chalk.default.cyan("ghostrun learn https://your-app.com"));
   console.log("  " + import_chalk.default.gray("Run a flow:      ") + import_chalk.default.cyan("ghostrun run <name>"));
   console.log("  " + import_chalk.default.gray("Run (visible):   ") + import_chalk.default.cyan("ghostrun run <name> --visible"));
+  if (isCrawleeEnabled()) {
+    console.log("  " + import_chalk.default.gray("Scrape a site:   ") + import_chalk.default.cyan("ghostrun scrape https://your-app.com --output json"));
+  }
   console.log("  " + import_chalk.default.gray("Ask the bot:     ") + import_chalk.default.cyan("ghostrun chat"));
   console.log("  " + import_chalk.default.gray("Browse templates:") + import_chalk.default.cyan("ghostrun store list"));
   console.log();
 }
-async function runMonitor(flowId) {
+async function runMonitorOnce(flowId) {
   printLogo();
   divider();
   const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
@@ -9210,7 +10020,7 @@ async function runMonitor(flowId) {
   const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === "json";
   console.log(import_chalk.default.bold("\n  Monitor: ") + import_chalk.default.white(flow.name) + "\n");
   const previousRuns = db.listRuns(flow.id, 2);
-  let prevData = {};
+  const prevData = {};
   if (previousRuns.length > 0) {
     db.getRunData(previousRuns[0].id).forEach((d) => {
       prevData[d.variableName] = d.variableValue;
@@ -9252,6 +10062,136 @@ async function runMonitor(flowId) {
     console.log("\n" + JSON.stringify({ flowId: flow.id, flowName: flow.name, runId: result.runId, extractedData, hasChanges }, null, 2));
   }
   console.log();
+}
+async function runScrapeCommand(url, extraArgs = []) {
+  const maxPages = parseNumberFlag(extraArgs, "--max-pages", 1, 100);
+  const selector = parseFlagValue(extraArgs, "--selector");
+  const jsonOutput = parseFlagValue(extraArgs, "--output") === "json" || extraArgs.includes("--json");
+  if (!jsonOutput) {
+    printLogo();
+    divider();
+    console.log(import_chalk.default.bold("\n  Scrape Website\n"));
+    info("URL: " + import_chalk.default.cyan(url));
+    info("Max pages: " + import_chalk.default.white(String(maxPages)));
+    if (selector) info("Selector: " + import_chalk.default.white(selector));
+    console.log();
+  }
+  try {
+    const result = await runCrawleeScrape(url, { maxPages, selector, reason: "manual", quiet: jsonOutput });
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrapeId: result.id,
+        status: result.status,
+        url: result.url,
+        pages: result.pages.length,
+        resultPath: result.resultPath,
+        data: result.pages
+      }));
+      return;
+    }
+    success(`Scraped ${result.pages.length} page${result.pages.length !== 1 ? "s" : ""}`);
+    info("Scrape ID: " + import_chalk.default.gray(result.id.slice(0, 8)));
+    info("Result: " + import_chalk.default.cyan(result.resultPath));
+    const first = result.pages[0];
+    if (first) {
+      console.log();
+      console.log(import_chalk.default.bold("  Preview\n"));
+      if (first.title) console.log("  " + import_chalk.default.gray("Title:   ") + import_chalk.default.white(first.title));
+      if (first.headings.length) console.log("  " + import_chalk.default.gray("Headings: ") + first.headings.slice(0, 4).join(import_chalk.default.gray(" \xB7 ")));
+      if (first.buttons.length) console.log("  " + import_chalk.default.gray("Buttons: ") + first.buttons.slice(0, 6).map((b) => b.text).join(import_chalk.default.gray(" \xB7 ")));
+    }
+    console.log();
+  } catch (err) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ status: "failed", error: err instanceof Error ? err.message : String(err) }));
+    } else {
+      errorMsg(err instanceof Error ? err.message : String(err));
+    }
+    process.exitCode = 1;
+  }
+}
+async function runScrapeAndFlowCommand(url, extraArgs = []) {
+  const flowId = parseFlagValue(extraArgs, "--flow");
+  if (!flowId) {
+    errorMsg("Usage: scrape:run <url> --flow <id|name> [--max-pages N] [--output json]");
+    process.exit(1);
+  }
+  const maxPages = parseNumberFlag(extraArgs, "--max-pages", 1, 100);
+  const selector = parseFlagValue(extraArgs, "--selector");
+  const jsonOutput = parseFlagValue(extraArgs, "--output") === "json" || extraArgs.includes("--json");
+  let scrapeResult = null;
+  try {
+    scrapeResult = await runCrawleeScrape(url, { maxPages, selector, reason: "scrape-run", quiet: jsonOutput });
+    const runResult = await executeFlow(flowId, globalVars, { jsonOutput, quiet: jsonOutput });
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrape: {
+          scrapeId: scrapeResult.id,
+          status: scrapeResult.status,
+          pages: scrapeResult.pages.length,
+          resultPath: scrapeResult.resultPath,
+          data: scrapeResult.pages
+        },
+        run: runResult
+      }));
+      return;
+    }
+    divider();
+    success(`Scraped ${scrapeResult.pages.length} page${scrapeResult.pages.length !== 1 ? "s" : ""} and ran flow`);
+    info("Scrape ID: " + import_chalk.default.gray(scrapeResult.id.slice(0, 8)));
+    info("Run ID: " + import_chalk.default.gray(runResult.runId.slice(0, 8)));
+    console.log();
+  } catch (err) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrape: scrapeResult ? { scrapeId: scrapeResult.id, resultPath: scrapeResult.resultPath } : null,
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    } else {
+      errorMsg(err instanceof Error ? err.message : String(err));
+    }
+    process.exitCode = 1;
+  }
+}
+async function runScrapeList() {
+  const scrapes = db.listScrapeRuns(20);
+  console.log(import_chalk.default.bold("\n  Scrapes\n"));
+  if (scrapes.length === 0) {
+    warn("No scrapes found. Run: " + import_chalk.default.cyan("ghostrun scrape <url>"));
+    console.log();
+    return;
+  }
+  console.log(import_chalk.default.gray("  ID        Status     Pages  Reason          URL"));
+  console.log(import_chalk.default.gray("  " + "\u2500".repeat(86)));
+  for (const s of scrapes) {
+    const status = s.status === "complete" ? import_chalk.default.green("complete") : s.status === "failed" ? import_chalk.default.red("failed") : import_chalk.default.yellow(s.status);
+    console.log(`  ${import_chalk.default.gray(s.id.slice(0, 8))}  ${status.padEnd(18)} ${import_chalk.default.white(String(s.pagesCount).padEnd(5))}  ${import_chalk.default.gray((s.reason || "").padEnd(14).slice(0, 14))} ${import_chalk.default.cyan(s.url.slice(0, 44))}`);
+  }
+  console.log();
+}
+async function runScrapeShow(id) {
+  const scrape = db.findScrapeRunByPartialId(id);
+  if (!scrape) {
+    errorMsg("Scrape not found: " + id);
+    process.exit(1);
+  }
+  const result = readScrapeResult(scrape.resultPath);
+  console.log(JSON.stringify({
+    scrapeId: scrape.id,
+    status: scrape.status,
+    url: scrape.url,
+    reason: scrape.reason,
+    maxPages: scrape.maxPages,
+    selector: scrape.selector,
+    pagesCount: scrape.pagesCount,
+    resultPath: scrape.resultPath,
+    runId: scrape.runId,
+    stepNumber: scrape.stepNumber,
+    exploreReportId: scrape.exploreReportId,
+    errorMessage: scrape.errorMessage,
+    data: result?.pages || []
+  }, null, 2));
 }
 async function runChat() {
   printLogo();
@@ -9394,6 +10334,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       try {
         const msg = await client.messages.create({
+          model: "claude-3-5-haiku-20241022",
           max_tokens: 1024,
           system: buildSystemPrompt(),
           messages: conversationHistory.map((m) => ({ role: m.role, content: m.content }))
@@ -9407,9 +10348,9 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
     }
   }
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const askUser = () => new Promise((resolve) => {
+  const askUser = () => new Promise((resolve3) => {
     process.stdout.write(import_chalk.default.cyan("\n  You  \u203A "));
-    rl.once("line", resolve);
+    rl.once("line", resolve3);
   });
   while (true) {
     let input;
@@ -9437,7 +10378,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
       if (targetFlow) {
         process.stdout.write(import_chalk.default.cyan(`
   Run "${targetFlow.name}"? (y/N) `));
-        const confirm = await new Promise((resolve) => rl.once("line", resolve));
+        const confirm = await new Promise((resolve3) => rl.once("line", resolve3));
         if (confirm.trim().toLowerCase() === "y") {
           console.log();
           const result = await executeFlow(targetFlow.id, globalVars);
@@ -9451,9 +10392,124 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
     }
   }
 }
-async function runInteractive() {
+function detectHomeState() {
+  const globalReady = fs4.existsSync(path4.join(DATA_PATH2, "data", "ghostrun.db"));
+  const projectReady = fs4.existsSync(PROJECT_CONFIG_PATH);
+  const flows = db.listFlows();
+  const profilesDir = path4.join(PROJECT_GHOSTRUN_PATH, "profiles");
+  const profileCount = fs4.existsSync(profilesDir) ? fs4.readdirSync(profilesDir).filter((f) => f.endsWith(".json")).length : 0;
+  const openRepairs = listRepairProposals(50).filter((p) => p.status === "proposed").length;
+  const recentRuns = db.listRuns(void 0, 10);
+  const lastFail = recentRuns.find((r) => r.status === "failed");
+  const config = readConfig();
+  return {
+    globalReady,
+    projectReady,
+    hasFlows: flows.length > 0,
+    flowCount: flows.length,
+    hasProfiles: profileCount > 0,
+    profileCount,
+    openRepairs,
+    lastFailedRun: lastFail ? { id: lastFail.id, flowName: db.getFlow(lastFail.flowId)?.name || "Unknown" } : null,
+    cwd: process.cwd(),
+    projectName: config.project?.name || null,
+    activeProfile: config.activeProfile || null
+  };
+}
+async function runSetupFunnel(state) {
   const clack = await import("@clack/prompts");
-  const { intro, outro, select, text, confirm, spinner, isCancel, note, log } = clack;
+  const { intro, confirm, isCancel, note, outro, text } = clack;
+  if (!state.globalReady) {
+    console.clear();
+    printLogo();
+    intro(import_chalk.default.cyan(" Welcome to GhostRun "));
+    note(
+      "First-time setup installs Playwright Chromium and creates ~/.ghostrun/\nYou only do this once per machine.",
+      "Setup required"
+    );
+    const setup = await confirm({ message: "Set up GhostRun now?", initialValue: true });
+    if (isCancel(setup) || !setup) {
+      outro("Run ghostrun init when you are ready.");
+      process.exit(0);
+    }
+    console.log();
+    await runInit(["--yes"]);
+    return runSetupFunnel(detectHomeState());
+  }
+  if (!state.projectReady) {
+    console.clear();
+    printLogo();
+    intro(import_chalk.default.cyan(" New project "));
+    note(
+      `No ${import_chalk.default.cyan(".ghostrun/")} in:
+  ${state.cwd}
+
+Flows, profiles, baselines, and CI artifacts live here \u2014 commit .ghostrun/ to git (exclude secrets).`,
+      "Project workspace"
+    );
+    const initProject = await confirm({ message: "Initialize GhostRun in this folder?", initialValue: true });
+    if (isCancel(initProject) || !initProject) {
+      outro("Open your app repo and run ghostrun again, or run ghostrun init.");
+      process.exit(0);
+    }
+    ensureProjectWorkspace();
+    const config = readConfig();
+    if (!config.project?.name) {
+      const name = await text({
+        message: "Project name (for reports):",
+        placeholder: path4.basename(state.cwd),
+        defaultValue: path4.basename(state.cwd)
+      });
+      if (!isCancel(name) && name) {
+        config.project = { ...config.project, name: String(name), workspaceVersion: "1" };
+        writeConfig(config);
+      }
+    }
+    if (!state.hasProfiles) {
+      const addProfile = await confirm({ message: "Create a staging profile with a base URL?", initialValue: true });
+      if (!isCancel(addProfile) && addProfile) {
+        const baseUrl = await text({
+          message: "Staging / app URL:",
+          placeholder: "https://staging.yourapp.com",
+          validate: (v) => !v || !v.startsWith("http") ? "Enter a URL starting with http" : void 0
+        });
+        if (!isCancel(baseUrl) && baseUrl) {
+          await runProfileCreate("staging", String(baseUrl));
+          const staging = getProfile("staging");
+          if (staging) {
+            await setupProfileAccountsInteractive(staging, { confirm, text, isCancel, note });
+            const useMailpit = await confirm({
+              message: "Enable Mailpit for magic-link email flows? (optional \u2014 skip if you use password login)",
+              initialValue: false
+            });
+            if (!isCancel(useMailpit) && useMailpit) {
+              staging.services = {
+                ...staging.services,
+                email: { provider: "mailpit", apiUrl: "http://localhost:8025", timeoutMs: 45e3 }
+              };
+              saveProfile(staging);
+              copyDevServicesTemplate();
+              note(
+                "Start Mailpit when needed:\n  docker compose -f .ghostrun/services/dev.compose.yml --profile mailpit up -d",
+                "Optional email"
+              );
+            }
+          }
+          await runProfileUse("staging");
+        }
+      }
+    }
+  }
+}
+async function runHome() {
+  let state = detectHomeState();
+  await runSetupFunnel(state);
+  state = detectHomeState();
+  await runInteractive(state);
+}
+async function runInteractive(initialState) {
+  const clack = await import("@clack/prompts");
+  const { intro, outro, select, text, isCancel, note, log } = clack;
   console.clear();
   printLogo();
   const flows = db.listFlows();
@@ -9464,7 +10520,17 @@ async function runInteractive() {
   const agentFlows = flows.filter((f) => f.createdBy === "agent").length;
   const ollamaModel = await isOllamaRunning();
   const aiProvider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? "Anthropic" : "none";
-  intro(import_chalk.default.cyan(" GhostRun \u2014 Memory-driven Web Automation "));
+  const activeProfile = readConfig().activeProfile || "(none)";
+  intro(import_chalk.default.cyan(" GhostRun \u2014 your QA agent "));
+  let homeState = initialState || detectHomeState();
+  const hints = [];
+  if (!homeState.hasFlows) hints.push("\u2192 Record your first flow to get started");
+  if (homeState.hasFlows && !homeState.activeProfile) hints.push("\u2192 Set a profile: ghostrun profile use staging");
+  if (homeState.lastFailedRun) hints.push(`\u2192 Last failure: ${homeState.lastFailedRun.flowName}`);
+  if (homeState.openRepairs > 0) hints.push(`\u2192 ${homeState.openRepairs} repair proposal(s) waiting for review`);
+  if (hints.length) {
+    note(hints.map((h) => `  ${h}`).join("\n"), "Suggested");
+  }
   const passRateBar = runs.length > 0 ? progressBar(passed, runs.length, 12) : "";
   const passRatePct = runs.length > 0 ? `  ${Math.round(passed / runs.length * 100)}%` : "";
   const flowsLine = flows.length > 0 ? `  Flows:    ${import_chalk.default.white(String(flows.length))}  (${import_chalk.default.blue(`${humanFlows} \u{1F464}`)}  ${import_chalk.default.magenta(`${agentFlows} \u{1F916}`)})` : `  Flows:    ${import_chalk.default.white("0")}`;
@@ -9473,29 +10539,136 @@ async function runInteractive() {
       flowsLine,
       `  Runs:     ${import_chalk.default.white(String(runs.length))}  ${import_chalk.default.green(String(passed) + " passed")}  ${failed > 0 ? import_chalk.default.red(String(failed) + " failed") : import_chalk.default.gray("0 failed")}`,
       runs.length > 0 ? `  Rate:     ${passRateBar}${import_chalk.default.gray(passRatePct)}` : "",
+      `  Profile:  ${import_chalk.default.cyan(activeProfile)}`,
       `  AI:       ${ollamaModel ? import_chalk.default.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? import_chalk.default.cyan(aiProvider) : import_chalk.default.gray("none \u2014 run Ollama or set ANTHROPIC_API_KEY")}`
     ].filter(Boolean).join("\n"),
     "Status"
   );
   while (true) {
+    homeState = detectHomeState();
+    const menuOptions = [];
+    if (homeState.lastFailedRun) {
+      menuOptions.push({
+        value: "last-failure",
+        label: "\u{1F534} Review last failure",
+        hint: homeState.lastFailedRun.flowName
+      });
+    }
+    if (homeState.openRepairs > 0) {
+      menuOptions.push({
+        value: "repair",
+        label: "\u{1F6E0}  Review repair proposals",
+        hint: `${homeState.openRepairs} open`
+      });
+    }
+    if (!homeState.hasFlows) {
+      menuOptions.push({
+        value: "author",
+        label: "\u270D  Record your first flow",
+        hint: "opens browser \u2014 no commands to memorize"
+      });
+    } else {
+      menuOptions.push({
+        value: "run",
+        label: "\u25B6  Run a flow",
+        hint: `${homeState.flowCount} saved`
+      });
+      menuOptions.push({
+        value: "author",
+        label: "\u270D  Create or capture flows",
+        hint: "record, generate, explore, API"
+      });
+    }
+    menuOptions.push(
+      { value: "suite", label: "\u{1F9EA} Run a test suite", hint: "multiple flows" },
+      { value: "profiles", label: "\u{1F5C2}  Manage profiles", hint: homeState.activeProfile || "none set" },
+      { value: "improve", label: "\u{1F4C8} Improve & analyze", hint: "flaky flows, gaps" },
+      { value: "reports", label: "\u{1F4CB} View run reports", hint: runs.length > 0 ? `${runs.length} runs` : "no runs yet" },
+      { value: "monitor", label: "\u{1F550} Monitor & schedules", hint: "interval + cron" },
+      { value: "services", label: "\u{1F4EC} Service Bridge", hint: "optional \u2014 Mailpit, webhooks" },
+      { value: "doctor", label: "\u{1FA7A} Health check", hint: "doctor + audit" },
+      { value: "chat", label: "\u{1F4AC} Ask GhostRun Bot", hint: "natural language" },
+      { value: "serve", label: "\u{1F310}  Web dashboard", hint: "local UI" },
+      { value: "exit", label: "\u2715  Exit" }
+    );
     const action = await select({
       message: "What do you want to do?",
-      options: [
-        { value: "run", label: "\u25B6  Run a flow", hint: flows.length > 0 ? `${flows.length} saved` : "no flows yet" },
-        { value: "record", label: "\u23FA  Record a new flow", hint: "opens real browser" },
-        { value: "suite", label: "\u{1F9EA} Run a test suite", hint: "run multiple flows" },
-        { value: "reports", label: "\u{1F4CB} View run reports", hint: runs.length > 0 ? `${runs.length} runs` : "no runs yet" },
-        { value: "explore", label: "\u{1F50D} Explore a URL", hint: "auto-discover flows with AI" },
-        { value: "schedule", label: "\u{1F550} Manage schedules", hint: "cron-based automation" },
-        { value: "status", label: "\u{1F4CA} System status", hint: "stats + AI provider" },
-        { value: "chat", label: "\u{1F4AC} Ask GhostRun Bot", hint: "Q&A + run flows by name" },
-        { value: "serve", label: "\u{1F310}  Open web dashboard", hint: "Local web UI" },
-        { value: "exit", label: "\u2715  Exit" }
-      ]
+      options: menuOptions
     });
     if (isCancel(action) || action === "exit") {
       outro(import_chalk.default.gray("Bye."));
       process.exit(0);
+    }
+    if (action === "last-failure" && homeState.lastFailedRun) {
+      console.log();
+      await runShowRun(homeState.lastFailedRun.id.slice(0, 8));
+      const evidenceReport = path4.join(getRunEvidenceDir(homeState.lastFailedRun.id), "report.html");
+      if (fs4.existsSync(evidenceReport)) {
+        log.info(`Full report: ${evidenceReport}`);
+      }
+      console.log();
+      await _pause();
+      continue;
+    }
+    if (action === "doctor") {
+      console.log();
+      await runDoctor();
+      await runSecurityAudit(false);
+      console.log();
+      await _pause();
+      continue;
+    }
+    if (action === "services") {
+      const svc = await select({
+        message: "Service Bridge:",
+        options: [
+          { value: "doctor", label: "Health check (Mailpit + hooks)" },
+          { value: "inbox", label: "Show Mailpit inbox" },
+          { value: "hooks", label: "List webhook captures" },
+          { value: "up", label: "Show docker compose command" },
+          { value: "back", label: "\u2190 Back" }
+        ]
+      });
+      if (isCancel(svc) || svc === "back") continue;
+      console.log();
+      if (svc === "up") await runServicesCommand(["up"]);
+      else await runServicesCommand([svc]);
+      await _pause();
+      continue;
+    }
+    if (action === "monitor") {
+      const mon = await select({
+        message: "Monitoring:",
+        options: [
+          { value: "schedule-list", label: "List schedules" },
+          { value: "schedule-add", label: "Add schedule" },
+          { value: "daemon", label: "Start scheduler daemon" },
+          { value: "back", label: "\u2190 Back" }
+        ]
+      });
+      if (isCancel(mon) || mon === "back") continue;
+      if (mon === "schedule-list") {
+        console.log();
+        await runScheduleList();
+        await _pause();
+      } else if (mon === "daemon") {
+        console.log();
+        await runServe(["--daemon"]);
+      } else if (mon === "schedule-add") {
+        const flowsNow = db.listFlows();
+        if (!flowsNow.length) {
+          log.warn("Record a flow first.");
+          continue;
+        }
+        const fc = await select({ message: "Flow:", options: flowsNow.map((f) => ({ value: f.id, label: f.name })) });
+        if (isCancel(fc)) continue;
+        const cron = await text({ message: "Cron expression:", placeholder: "0 9 * * *", defaultValue: "0 9 * * *" });
+        if (isCancel(cron)) continue;
+        const flow = db.getFlow(fc);
+        if (flow) await runScheduleAdd(flow.name, String(cron));
+        await _pause();
+      }
+      continue;
     }
     if (action === "run") {
       const currentFlows = db.listFlows();
@@ -9516,21 +10689,56 @@ async function runInteractive() {
       await runFlow(flowChoice);
       console.log();
       await _pause();
-    } else if (action === "record") {
-      const url = await text({
-        message: "URL to record:",
-        placeholder: "https://yourapp.com",
-        validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+    } else if (action === "author") {
+      const authorAction = await select({
+        message: "How do you want to create a flow?",
+        options: [
+          { value: "record", label: "Record browser flow", hint: "capture clicks and fills" },
+          { value: "generate", label: "Generate from description", hint: "AI draft flow" },
+          { value: "explore", label: "Explore a URL", hint: "discover candidate flows" },
+          { value: "api", label: "Build API flow", hint: "interactive HTTP flow builder" },
+          { value: "back", label: "\u2190 Back" }
+        ]
       });
-      if (isCancel(url)) continue;
-      const name = await text({
-        message: "Flow name:",
-        placeholder: "e.g. Login Flow",
-        defaultValue: new URL(url).hostname
-      });
-      if (isCancel(name)) continue;
-      console.log();
-      await runLearn(url, name);
+      if (isCancel(authorAction) || authorAction === "back") continue;
+      if (authorAction === "record") {
+        const url = await text({
+          message: "URL to record:",
+          placeholder: "https://yourapp.com",
+          validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+        });
+        if (isCancel(url)) continue;
+        const name = await text({
+          message: "Flow name:",
+          placeholder: "e.g. Login Flow",
+          defaultValue: new URL(url).hostname
+        });
+        if (isCancel(name)) continue;
+        console.log();
+        await runLearn(url, name);
+      } else if (authorAction === "generate") {
+        const description = await text({
+          message: "Describe the flow:",
+          placeholder: "Login as admin and verify dashboard loads",
+          validate: (v) => !v ? "Description required" : void 0
+        });
+        if (isCancel(description)) continue;
+        console.log();
+        await runCreate(description);
+      } else if (authorAction === "explore") {
+        const url = await text({
+          message: "URL to explore:",
+          placeholder: "https://yourapp.com",
+          validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+        });
+        if (isCancel(url)) continue;
+        console.log();
+        await runExplore(url);
+        await _pause();
+      } else if (authorAction === "api") {
+        console.log();
+        await runApiLearn();
+      }
     } else if (action === "suite") {
       const suites = db.listSuites();
       if (suites.length === 0) {
@@ -9571,16 +10779,85 @@ async function runInteractive() {
       await runShowRun(runChoice.slice(0, 8));
       console.log();
       await _pause();
-    } else if (action === "explore") {
-      const url = await text({
-        message: "URL to explore:",
-        placeholder: "https://yourapp.com",
-        validate: (v) => !v || !v.startsWith("http") ? "Enter a valid URL starting with http" : void 0
+    } else if (action === "repair") {
+      const repairAction = await select({
+        message: "Repair proposals:",
+        options: [
+          { value: "list", label: "List proposals" },
+          { value: "apply", label: "Apply a proposal" },
+          { value: "back", label: "\u2190 Back" }
+        ]
       });
-      if (isCancel(url)) continue;
+      if (isCancel(repairAction) || repairAction === "back") continue;
+      if (repairAction === "list") {
+        console.log();
+        await runRepairList();
+        await _pause();
+      } else if (repairAction === "apply") {
+        const proposals = listRepairProposals(20).filter((p) => p.status === "proposed");
+        if (proposals.length === 0) {
+          log.warn("No open repair proposals.");
+          continue;
+        }
+        const choice = await select({
+          message: "Which repair proposal?",
+          options: proposals.map((p) => ({
+            value: p.id,
+            label: `${p.flowName} \xB7 step ${p.stepNumber || "\u2014"}`,
+            hint: (p.proposedSelector || "").slice(0, 40)
+          }))
+        });
+        if (isCancel(choice)) continue;
+        console.log();
+        await runRepairApply(choice);
+        await _pause();
+      }
+    } else if (action === "profiles") {
+      const profileAction = await select({
+        message: "Profile management:",
+        options: [
+          { value: "list", label: "List profiles" },
+          { value: "create", label: "Create profile" },
+          { value: "use", label: "Use profile" },
+          { value: "show", label: "Show profile" },
+          { value: "back", label: "\u2190 Back" }
+        ]
+      });
+      if (isCancel(profileAction) || profileAction === "back") continue;
+      if (profileAction === "list") {
+        console.log();
+        await runProfileList();
+        await _pause();
+      } else if (profileAction === "create") {
+        const name = await text({ message: "Profile name:", placeholder: "staging", validate: (v) => !v ? "Required" : void 0 });
+        if (isCancel(name)) continue;
+        const url = await text({ message: "Base URL (optional):", placeholder: "https://staging.example.com" });
+        if (isCancel(url)) continue;
+        await runProfileCreate(name, url || void 0);
+      } else if (profileAction === "use") {
+        const profiles = listProfiles();
+        if (profiles.length === 0) {
+          log.warn("No profiles found.");
+          continue;
+        }
+        const choice = await select({ message: "Which profile?", options: profiles.map((p) => ({ value: p.name, label: p.name, hint: p.baseUrl || "" })) });
+        if (isCancel(choice)) continue;
+        await runProfileUse(choice);
+      } else if (profileAction === "show") {
+        const profiles = listProfiles();
+        if (profiles.length === 0) {
+          log.warn("No profiles found.");
+          continue;
+        }
+        const choice = await select({ message: "Which profile?", options: profiles.map((p) => ({ value: p.name, label: p.name, hint: p.baseUrl || "" })) });
+        if (isCancel(choice)) continue;
+        console.log();
+        await runProfileShow(choice);
+        await _pause();
+      }
+    } else if (action === "improve") {
       console.log();
-      await runExplore(url);
-      console.log();
+      await runImprove();
       await _pause();
     } else if (action === "schedule") {
       const schedAction = await select({
@@ -9641,11 +10918,11 @@ async function runInteractive() {
   }
 }
 function _pause() {
-  return new Promise((resolve) => {
+  return new Promise((resolve3) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question(import_chalk.default.gray("  Press Enter to continue..."), () => {
       rl.close();
-      resolve();
+      resolve3();
     });
   });
 }
@@ -9696,7 +10973,7 @@ async function runApiLearn() {
         }
       }
       nodes.push({
-        id: (0, import_uuid2.v4)(),
+        id: (0, import_crypto4.randomUUID)(),
         type: "action",
         action: "http:request",
         method,
@@ -9708,7 +10985,7 @@ async function runApiLearn() {
       });
     } else if (type === "assert") {
       const assertType = (await askQuestion("    Assert type [status/body:contains/json:path/time]: ")).trim() || "status";
-      let node = { id: (0, import_uuid2.v4)(), type: "action", action: "assert:response", assert: assertType, label: `Assert ${assertType}` };
+      let node = { id: (0, import_crypto4.randomUUID)(), type: "action", action: "assert:response", assert: assertType, label: `Assert ${assertType}` };
       if (assertType === "status") {
         const exp = (await askQuestion("    Expected status [200]: ")).trim() || "200";
         node = { ...node, expected: Number(exp), label: `Assert status ${exp}` };
@@ -9727,11 +11004,11 @@ async function runApiLearn() {
     } else if (type === "extract") {
       const varName = (await askQuestion("    Variable name: ")).trim();
       const p = (await askQuestion("    JSON path (e.g. $.id): ")).trim();
-      nodes.push({ id: (0, import_uuid2.v4)(), type: "action", action: "extract:json", variable: varName, path: p, label: `Extract ${varName} from ${p}` });
+      nodes.push({ id: (0, import_crypto4.randomUUID)(), type: "action", action: "extract:json", variable: varName, path: p, label: `Extract ${varName} from ${p}` });
     } else if (type === "set") {
       const varName = (await askQuestion("    Variable name: ")).trim();
       const val = (await askQuestion("    Value: ")).trim();
-      nodes.push({ id: (0, import_uuid2.v4)(), type: "action", action: "set:variable", variable: varName, value: val, label: `Set ${varName} = ${val}` });
+      nodes.push({ id: (0, import_crypto4.randomUUID)(), type: "action", action: "set:variable", variable: varName, value: val, label: `Set ${varName} = ${val}` });
     } else {
       warn(`Unknown type "${type}". Try: http, assert, extract, set, done`);
       continue;
@@ -9832,7 +11109,7 @@ async function runEnvDelete(envName) {
   console.log();
 }
 async function runVarDump(runId) {
-  let run = db.findRunByPartialId(runId) || db.getRun(runId);
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
   if (!run) {
     errorMsg("Run not found: " + runId);
     process.exit(1);
@@ -9931,7 +11208,7 @@ async function runPerfRun(flowId, extraArgs) {
   const config = parsePerfArgs(extraArgs);
   printLogo();
   divider();
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) {
     errorMsg("Flow not found: " + flowId);
     process.exit(1);
@@ -9967,7 +11244,7 @@ async function runPerfExport(flowId, extraArgs) {
   const errRate = parseFloat(extraArgs[extraArgs.indexOf("--max-errors") + 1] || "1");
   const outputFlag = extraArgs.indexOf("--output");
   const outputFile = outputFlag !== -1 ? extraArgs[outputFlag + 1] : "";
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) {
     errorMsg("Flow not found: " + flowId);
     process.exit(1);
@@ -9996,7 +11273,7 @@ async function runPerfExport(flowId, extraArgs) {
     errorThreshold: errRate
   });
   const filename = outputFile || `${flow.name.replace(/[^a-z0-9]/gi, "-").toLowerCase()}-k6.js`;
-  fs2.writeFileSync(filename, script, "utf8");
+  fs4.writeFileSync(filename, script, "utf8");
   printLogo();
   divider();
   success(`k6 script exported: ${import_chalk.default.cyan(filename)}`);
@@ -10188,23 +11465,786 @@ footer{margin-top:48px;color:#768390;font-size:12px}
 </table>
 <footer>Generated by GhostRun \xB7 ${(/* @__PURE__ */ new Date()).toISOString()}</footer>
 </body></html>`;
-  fs2.writeFileSync(outFile, html);
+  fs4.writeFileSync(outFile, html);
   success(`HTML report: ${import_chalk.default.cyan(outFile)}`);
+}
+var SECRET_PATTERNS = [
+  { name: "Anthropic API key", pattern: /sk-ant-api[a-zA-Z0-9_-]{10,}/ },
+  { name: "OpenAI-style key", pattern: /\bsk-[a-zA-Z0-9]{20,}\b/ },
+  { name: "GitHub token", pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/ },
+  { name: "AWS access key", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "Private key block", pattern: /-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
+  { name: "npm token", pattern: /\bnpm_[a-zA-Z0-9]{36}\b/ }
+];
+var PLACEHOLDER_OK = [
+  /sk-ant-\.\.\./,
+  /example\.com/,
+  /your-app\.com/,
+  /test@example\.com/,
+  /PASSWORD=secret/,
+  /s3cr3t/,
+  /STAGING_API_TOKEN/,
+  /AUTH_PASSWORD/
+];
+function lineLooksLikePlaceholder(line) {
+  return PLACEHOLDER_OK.some((re) => re.test(line));
+}
+function scanTextForSecrets(label, content, filePath) {
+  const findings = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (lineLooksLikePlaceholder(line)) continue;
+    for (const { name, pattern } of SECRET_PATTERNS) {
+      if (pattern.test(line)) {
+        findings.push(`${filePath}:${i + 1} \u2014 possible ${name}`);
+      }
+    }
+    if (/"password"\s*:\s*"[^"]{3,}"/i.test(line) && !/secret|example|test123|placeholder/i.test(line)) {
+      findings.push(`${filePath}:${i + 1} \u2014 plaintext password in JSON`);
+    }
+  }
+  return findings;
+}
+function collectProjectScanFiles() {
+  const files = [];
+  const roots = [
+    PROJECT_GHOSTRUN_PATH,
+    process.cwd()
+  ];
+  const names = [".ghostrun.env", ".env"];
+  for (const root of roots) {
+    for (const name of names) {
+      const p = path4.join(root, name);
+      if (fs4.existsSync(p) && fs4.statSync(p).isFile()) files.push(p);
+    }
+  }
+  const walk = (dir) => {
+    if (!fs4.existsSync(dir)) return;
+    for (const entry of fs4.readdirSync(dir, { withFileTypes: true })) {
+      const full = path4.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (["node_modules", ".git", "runs", "reports", "ai"].includes(entry.name)) continue;
+        walk(full);
+        continue;
+      }
+      if (!/\.(json|env|flow\.json|txt|yaml|yml)$/.test(entry.name)) continue;
+      if (full.includes(`${path4.sep}auth${path4.sep}storage-state${path4.sep}`)) continue;
+      if (full.includes(`${path4.sep}auth${path4.sep}secrets${path4.sep}`)) continue;
+      files.push(full);
+    }
+  };
+  walk(path4.join(PROJECT_GHOSTRUN_PATH, "profiles"));
+  walk(path4.join(PROJECT_GHOSTRUN_PATH, "flows"));
+  if (fs4.existsSync(PROJECT_CONFIG_PATH)) files.push(PROJECT_CONFIG_PATH);
+  return [...new Set(files)];
+}
+async function runSecurityAudit(exitOnFailure = true) {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  GhostRun Security Audit\n"));
+  const findings = [];
+  const warnings = [];
+  const passes = [];
+  ensureProjectWorkspace();
+  const gitignorePath = path4.join(PROJECT_GHOSTRUN_PATH, ".gitignore");
+  if (fs4.existsSync(gitignorePath)) {
+    const gi = fs4.readFileSync(gitignorePath, "utf8");
+    if (gi.includes("auth/secrets/") && gi.includes("auth/storage-state/")) {
+      passes.push("Project .gitignore excludes auth secrets and storage state");
+    } else {
+      findings.push("Project .gitignore should exclude auth/secrets/ and auth/storage-state/");
+    }
+  } else {
+    findings.push("Missing .ghostrun/.gitignore");
+  }
+  const rootGitignore = path4.join(process.cwd(), ".gitignore");
+  if (fs4.existsSync(rootGitignore)) {
+    const gi = fs4.readFileSync(rootGitignore, "utf8");
+    if (/\.ghostrun\.env|\.env/.test(gi)) {
+      passes.push("Root .gitignore mentions env files");
+    } else {
+      warnings.push("Add .ghostrun.env and .env to root .gitignore");
+    }
+  }
+  for (const filePath of collectProjectScanFiles()) {
+    const rel = path4.relative(process.cwd(), filePath) || filePath;
+    const content = fs4.readFileSync(filePath, "utf8");
+    findings.push(...scanTextForSecrets(rel, content, rel));
+  }
+  for (const profile of listProfiles()) {
+    const vars = profile.variables || {};
+    for (const [key, value] of Object.entries(vars)) {
+      if (/password|token|secret|api_key/i.test(key) && value.length > 0 && !lineLooksLikePlaceholder(value)) {
+        warnings.push(`Profile "${profile.name}" has sensitive-looking variable "${key}" \u2014 prefer tokenSecret + env var`);
+      }
+    }
+    if (profile.auth?.passwordSecret && profile.auth?.username && !profile.auth?.usernameVar) {
+      warnings.push(`Profile "${profile.name}" has inline username \u2014 prefer usernameVar or env reference`);
+    }
+  }
+  if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.length > 20) {
+    passes.push("ANTHROPIC_API_KEY loaded from environment (not stored in project files)");
+  }
+  const config = readConfig();
+  if (config.policies?.allowAutoRepairApply) {
+    warnings.push("allowAutoRepairApply is enabled \u2014 flows may mutate without review outside CI");
+  }
+  console.log(import_chalk.default.bold("  Passed"));
+  if (passes.length === 0) console.log(import_chalk.default.gray("  (none)"));
+  for (const p of passes) console.log(`  ${import_chalk.default.green("\u2713")} ${p}`);
+  if (warnings.length) {
+    console.log(import_chalk.default.bold("\n  Warnings"));
+    for (const w of warnings) console.log(`  ${import_chalk.default.yellow("!")} ${w}`);
+  }
+  if (findings.length) {
+    console.log(import_chalk.default.bold("\n  Findings"));
+    for (const f of findings) console.log(`  ${import_chalk.default.red("\u2717")} ${f}`);
+  } else {
+    console.log(import_chalk.default.bold("\n  Findings"));
+    console.log(`  ${import_chalk.default.green("\u2713")} No secret patterns detected in scanned project files`);
+  }
+  console.log(import_chalk.default.gray("\n  npm package ships only: ghostrun.js, mcp-server.js, docs, templates/"));
+  console.log(import_chalk.default.gray("  See docs/security.md for the full safety model.\n"));
+  if (findings.length && exitOnFailure) process.exit(1);
+}
+async function runIntegrationsCommand(args2 = []) {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const sub = args2[0] || "list";
+  if (sub === "list") {
+    console.log(import_chalk.default.bold("\n  GhostRun Integrations\n"));
+    const gh = config.integrations?.github;
+    const ln = config.integrations?.linear;
+    console.log(`  ${import_chalk.default.cyan("GitHub Issues")}  ${gh?.enabled ? import_chalk.default.green("enabled") : import_chalk.default.gray("disabled")}`);
+    if (gh?.owner) console.log(import_chalk.default.gray(`    repo: ${gh.owner}/${gh.repo || "?"}`));
+    console.log(`  ${import_chalk.default.cyan("Linear")}         ${ln?.enabled ? import_chalk.default.green("enabled") : import_chalk.default.gray("disabled")}`);
+    if (ln?.teamId) console.log(import_chalk.default.gray(`    team: ${ln.teamId}`));
+    console.log(import_chalk.default.gray("\n  Configure in .ghostrun/config.json \u2192 integrations"));
+    console.log(import_chalk.default.gray("  Full issue creation: v2.0-alpha (failure.v1.json scaffold ready in v1.3)\n"));
+    return;
+  }
+  if (sub === "test") {
+    const target = args2[1];
+    if (!target) {
+      errorMsg("Usage: ghostrun integrations test <github|linear>");
+      process.exit(1);
+    }
+    if (target === "github") {
+      const gh = config.integrations?.github;
+      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+      if (!gh?.enabled) {
+        warn("GitHub integration disabled in config.");
+        process.exit(1);
+      }
+      if (!token) {
+        errorMsg("GITHUB_TOKEN or GH_TOKEN not set.");
+        process.exit(1);
+      }
+      if (!gh.owner || !gh.repo) {
+        errorMsg("Set integrations.github.owner and integrations.github.repo in config.");
+        process.exit(1);
+      }
+      success(`GitHub config OK: ${gh.owner}/${gh.repo} (token present)`);
+      return;
+    }
+    if (target === "linear") {
+      const ln = config.integrations?.linear;
+      const key = process.env.LINEAR_API_KEY;
+      if (!ln?.enabled) {
+        warn("Linear integration disabled in config.");
+        process.exit(1);
+      }
+      if (!key) {
+        errorMsg("LINEAR_API_KEY not set.");
+        process.exit(1);
+      }
+      if (!ln.teamId) {
+        errorMsg("Set integrations.linear.teamId in config.");
+        process.exit(1);
+      }
+      success(`Linear config OK: team ${ln.teamId} (API key present)`);
+      return;
+    }
+    errorMsg(`Unknown integration: ${target}`);
+    process.exit(1);
+  }
+  errorMsg("Usage: ghostrun integrations list | test <github|linear>");
+  process.exit(1);
+}
+async function runAuthorBenchmark(extraArgs = []) {
+  printLogo();
+  divider();
+  const { spawnSync } = require("child_process");
+  const realBin = fs4.realpathSync(process.argv[1]);
+  const pkgDir = path4.dirname(realBin);
+  let scriptPath = path4.join(pkgDir, "scripts", "author-benchmark.mjs");
+  if (!fs4.existsSync(scriptPath)) {
+    scriptPath = path4.join(process.cwd(), "scripts", "author-benchmark.mjs");
+  }
+  if (!fs4.existsSync(scriptPath)) {
+    errorMsg("Author benchmark script not found.");
+    process.exit(1);
+  }
+  const result = spawnSync("node", [scriptPath, ...extraArgs], { stdio: "inherit", env: process.env });
+  process.exit(result.status ?? 1);
+}
+async function runDoctor() {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  GhostRun Health Check\n"));
+  const check = (label, ok, detail) => {
+    const badge = ok ? import_chalk.default.green("  OK  ") : import_chalk.default.red(" FAIL ");
+    const desc = detail ? import_chalk.default.gray(" \u2014 " + detail) : "";
+    console.log(`  [${badge}] ${label}${desc}`);
+  };
+  const rawVer = process.version;
+  const major = parseInt(rawVer.replace("v", "").split(".")[0], 10);
+  check("Node.js >= 18", major >= 18, `${rawVer}`);
+  const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
+  check("ANTHROPIC_API_KEY set", hasApiKey, hasApiKey ? "present" : "not set \u2014 AI features may be limited");
+  const paths = getProjectPaths();
+  const projectDbPath = paths.dbPath;
+  const projectDbExists = fs4.existsSync(projectDbPath);
+  check("Project database", projectDbExists || fs4.existsSync(PROJECT_CONFIG_PATH), projectDbExists ? projectDbPath : "run ghostrun init in project root");
+  const globalDbPath = path4.join(DATA_PATH2, "data", "ghostrun.db");
+  const globalDbExists = fs4.existsSync(globalDbPath);
+  check("Global database (legacy)", globalDbExists, globalDbExists ? globalDbPath : "optional \u2014 project DB is primary");
+  const wsExists = fs4.existsSync(PROJECT_CONFIG_PATH);
+  check("Project workspace initialised", wsExists, wsExists ? PROJECT_CONFIG_PATH : "run: ghostrun init");
+  const activeProfileName = readConfig().activeProfile || null;
+  const activeProfileObj = activeProfileName ? getProfile(activeProfileName) : null;
+  check("Active profile", !!activeProfileName, activeProfileName || "none \u2014 use: ghostrun profile use <name>");
+  if (activeProfileObj?.services && (isEmailBridgeEnabled(activeProfileObj.services) || activeProfileObj.services.webhook || activeProfileObj.services.postgres?.connectionSecret)) {
+    const svcResults = await runServicesDoctor(activeProfileObj.services);
+    for (const r of svcResults) {
+      check(`Service: ${r.name}`, r.ok, r.detail);
+    }
+  } else if (activeProfileObj?.auth?.strategy && activeProfileObj.auth.strategy !== "none") {
+    check("Profile auth", true, `${activeProfileObj.auth.strategy} \u2014 credentials via env or .ghostrun/auth/secrets/`);
+  }
+  const ollamaModel = await isOllamaRunning();
+  check("Ollama running", !!ollamaModel, ollamaModel ? `model: ${ollamaModel}` : "not reachable (optional)");
+  console.log();
+}
+async function writeJUnitReport(flowName, runId, steps, totalDurationMs) {
+  const reportsDir = path4.join(PROJECT_GHOSTRUN_PATH, "reports");
+  if (!fs4.existsSync(reportsDir)) fs4.mkdirSync(reportsDir, { recursive: true });
+  const outPath = path4.join(reportsDir, `junit-${runId}.xml`);
+  const failures = steps.filter((s) => s.status === "failed").length;
+  const durationSec = (totalDurationMs / 1e3).toFixed(3);
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const testcases = steps.map((s) => {
+    const dur = ((s.duration || 0) / 1e3).toFixed(3);
+    const nameAttr = esc(s.name || `Step ${s.status}`);
+    const failureEl = s.status === "failed" && s.errorMessage ? `
+      <failure message="${esc(s.errorMessage)}">${esc(s.errorMessage)}</failure>` : "";
+    return `    <testcase name="${nameAttr}" classname="${esc(flowName)}" time="${dur}">${failureEl}
+    </testcase>`;
+  }).join("\n");
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites name="GhostRun" tests="${steps.length}" failures="${failures}" time="${durationSec}">`,
+    `  <testsuite name="${esc(flowName)}" tests="${steps.length}" failures="${failures}" time="${durationSec}" id="${esc(runId)}">`,
+    testcases,
+    "  </testsuite>",
+    "</testsuites>"
+  ].join("\n");
+  fs4.writeFileSync(outPath, xml, "utf8");
+  return outPath;
+}
+async function runReportPublish(extraArgs = []) {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const destDir = parseFlagValue(extraArgs, "--dir") || "./test-results";
+  const runIdArg = parseFlagValue(extraArgs, "--run");
+  const jsonOutput = parseFlagValue(extraArgs, "--output") === "json" || extraArgs.includes("--json");
+  const createIssues = extraArgs.includes("--create-issues");
+  let runId = runIdArg;
+  if (!runId) {
+    const recent = db.listRuns(void 0, 1);
+    runId = recent[0]?.id;
+  }
+  if (!runId) {
+    errorMsg("No runs found to publish.");
+    process.exit(1);
+  }
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) {
+    errorMsg("Run not found: " + runId);
+    process.exit(1);
+  }
+  const evidenceDir = getRunEvidenceDir(run.id);
+  if (!fs4.existsSync(path4.join(evidenceDir, "manifest.json"))) {
+    writeEvidenceBundle(run.id, { ci: process.argv.includes("--ci") });
+  }
+  fs4.mkdirSync(destDir, { recursive: true });
+  const htmlPath = path4.join(destDir, "ghostrun-report.html");
+  const junitPath = path4.join(destDir, "ghostrun-junit.xml");
+  const manifestPath = path4.join(destDir, "manifest.json");
+  const failurePath = path4.join(destDir, "failure.v1.json");
+  const screenshotsDir = path4.join(destDir, "screenshots");
+  const srcManifest = path4.join(evidenceDir, "manifest.json");
+  const srcReport = path4.join(evidenceDir, "report.html");
+  const srcFailure = path4.join(evidenceDir, "failure.v1.json");
+  const srcScreenshots = path4.join(evidenceDir, "screenshots");
+  if (fs4.existsSync(srcReport)) fs4.copyFileSync(srcReport, htmlPath);
+  else await generateRunReport(run.id, htmlPath);
+  const steps = db.listSteps(run.id);
+  const flow = db.getFlow(run.flowId);
+  const flowName = flow?.name || run.flowId;
+  const junitSource = await writeJUnitReport(
+    flowName,
+    run.id,
+    steps.map((s) => ({ name: s.name, status: s.status, duration: s.duration, errorMessage: s.errorMessage })),
+    run.duration || 0
+  );
+  fs4.copyFileSync(junitSource, junitPath);
+  fs4.mkdirSync(screenshotsDir, { recursive: true });
+  const copiedScreenshots = [];
+  const shotSourceDir = fs4.existsSync(srcScreenshots) ? srcScreenshots : db.getScreenshotsPath(run.id);
+  if (fs4.existsSync(shotSourceDir)) {
+    for (const file of fs4.readdirSync(shotSourceDir).filter((f) => f.endsWith(".png"))) {
+      const dest = path4.join(screenshotsDir, file);
+      fs4.copyFileSync(path4.join(shotSourceDir, file), dest);
+      copiedScreenshots.push(dest);
+    }
+  }
+  let manifest = {};
+  if (fs4.existsSync(srcManifest)) {
+    manifest = JSON.parse(fs4.readFileSync(srcManifest, "utf8"));
+  }
+  manifest = {
+    ...manifest,
+    publishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    publishDir: path4.resolve(destDir),
+    htmlReport: path4.resolve(htmlPath),
+    junitReport: path4.resolve(junitPath),
+    screenshots: copiedScreenshots.map((p) => path4.resolve(p))
+  };
+  fs4.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  if (fs4.existsSync(srcFailure)) {
+    fs4.copyFileSync(srcFailure, failurePath);
+  }
+  if (createIssues) {
+    if (run.status === "failed" && fs4.existsSync(failurePath)) {
+      const config = readConfig();
+      const issueTrigger = process.env.CI === "true" || extraArgs.includes("--ci") ? "ci-failure" : "local-failure";
+      if (!shouldCreateGitHubIssue(config, issueTrigger)) {
+        warn(`--create-issues skipped: integrations.github.createOn excludes "${issueTrigger}".`);
+      } else {
+        try {
+          const failure = JSON.parse(fs4.readFileSync(failurePath, "utf8"));
+          const result = await createGitHubIssueFromFailure(failure, manifest, config, {
+            publishFailurePath: failurePath,
+            evidenceFailurePath: fs4.existsSync(srcFailure) ? srcFailure : void 0
+          });
+          if (result.skipped === "duplicate" && result.issueUrl) {
+            info(`GitHub issue already exists: ${result.issueUrl}`);
+          } else if (result.created && result.issueUrl) {
+            success(`GitHub issue created: ${result.issueUrl}`);
+          } else if (result.skipped === "disabled") {
+            warn("--create-issues skipped: integrations.github.enabled is false.");
+          } else if (result.skipped === "config") {
+            errorMsg("Set integrations.github.owner and integrations.github.repo in config.");
+            process.exit(1);
+          }
+        } catch (err) {
+          errorMsg(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      }
+    } else {
+      warn("--create-issues skipped: run passed or no failure artifact.");
+    }
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify(manifest));
+    return;
+  }
+  success("Reports published.");
+  info(`Directory: ${import_chalk.default.cyan(path4.resolve(destDir))}`);
+  info(`HTML:      ${import_chalk.default.cyan(String(manifest.htmlReport))}`);
+  info(`JUnit:     ${import_chalk.default.cyan(String(manifest.junitReport))}`);
+  info(`Manifest:  ${import_chalk.default.cyan(path4.resolve(manifestPath))}`);
+  if (fs4.existsSync(failurePath)) info(`Failure:   ${import_chalk.default.cyan(path4.resolve(failurePath))}`);
+  console.log();
+}
+async function runAuthor() {
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold("\n  Author a Flow\n"));
+  console.log(import_chalk.default.white("  Choose how to create a new flow:\n"));
+  console.log(`  ${import_chalk.default.cyan("1)")} Record browser flow`);
+  console.log(`  ${import_chalk.default.cyan("2)")} Generate from description ${import_chalk.default.gray("(AI)")}`);
+  console.log(`  ${import_chalk.default.cyan("3)")} Import from curl`);
+  console.log(`  ${import_chalk.default.cyan("4)")} Import from OpenAPI spec`);
+  console.log(`  ${import_chalk.default.cyan("5)")} Explore website ${import_chalk.default.gray("(AI)")}`);
+  console.log();
+  const choice = await askQuestion("  Enter choice [1-5]: ");
+  switch (choice.trim()) {
+    case "1": {
+      const url = await askQuestion("  URL to record: ");
+      if (!url.trim()) {
+        errorMsg("URL required");
+        process.exit(1);
+      }
+      await runLearn(url.trim());
+      break;
+    }
+    case "2":
+      await runCreate();
+      break;
+    case "3":
+      await runFlowFromCurl();
+      break;
+    case "4": {
+      const specFile = await askQuestion("  Path to OpenAPI/Swagger file: ");
+      if (!specFile.trim()) {
+        errorMsg("File path required");
+        process.exit(1);
+      }
+      await runFlowFromSpec(specFile.trim());
+      break;
+    }
+    case "5": {
+      const exploreUrl = await askQuestion("  URL to explore: ");
+      if (!exploreUrl.trim()) {
+        errorMsg("URL required");
+        process.exit(1);
+      }
+      await runExplore(exploreUrl.trim());
+      break;
+    }
+    default:
+      errorMsg(`Invalid choice: ${choice}. Enter a number from 1 to 5.`);
+      process.exit(1);
+  }
+}
+async function runMonitor(flowId, extraArgs = []) {
+  const intervalArg = parseFlagValue(extraArgs, "--interval");
+  if (!intervalArg && !extraArgs.includes("--interval")) {
+    return runMonitorOnce(flowId);
+  }
+  const intervalSec = intervalArg ? Math.max(1, parseInt(intervalArg, 10) || 60) : 60;
+  const profileArg = parseFlagValue(extraArgs, "--profile");
+  if (profileArg) {
+    const config = readConfig();
+    config.activeProfile = profileArg;
+    writeConfig(config);
+  }
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) {
+    errorMsg("Flow not found: " + flowId);
+    process.exit(1);
+  }
+  const activeProfileName = profileArg || readConfig().activeProfile || void 0;
+  const activeProfile = activeProfileName ? getProfile(activeProfileName) : null;
+  const notifyTargets = resolveMonitorNotificationTargets(extraArgs, activeProfile);
+  printLogo();
+  divider();
+  console.log(
+    import_chalk.default.bold("\n  Monitoring: ") + import_chalk.default.white(flow.name) + import_chalk.default.gray(` every ${intervalSec}s`) + import_chalk.default.gray(" | Press Ctrl+C to stop\n")
+  );
+  let totalRuns = 0;
+  let totalPassed = 0;
+  let consecutiveFailures = 0;
+  let running = false;
+  let lastAlertAt = 0;
+  process.once("SIGINT", () => {
+    console.log("\n");
+    divider();
+    const passRate = totalRuns > 0 ? (totalPassed / totalRuns * 100).toFixed(1) : "0.0";
+    console.log(import_chalk.default.bold("  Monitor stopped."));
+    console.log(`  Total runs:  ${import_chalk.default.white(String(totalRuns))}`);
+    console.log(`  Pass rate:   ${totalRuns > 0 && totalPassed === totalRuns ? import_chalk.default.green(passRate + "%") : import_chalk.default.yellow(passRate + "%")}`);
+    console.log();
+    process.exit(0);
+  });
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    const tickStart = Date.now();
+    try {
+      const result = await executeFlow(flow.id, globalVars, { quiet: true, jsonOutput: false });
+      const durationMs = Date.now() - tickStart;
+      const durationStr = durationMs >= 1e3 ? `${(durationMs / 1e3).toFixed(1)}s` : `${durationMs}ms`;
+      const ts = (/* @__PURE__ */ new Date()).toISOString().replace("T", " ").slice(0, 19);
+      totalRuns++;
+      if (result.passed) {
+        totalPassed++;
+        consecutiveFailures = 0;
+        console.log(`  ${import_chalk.default.green("\u2713")} ${import_chalk.default.gray(ts)} ${import_chalk.default.green("PASS")} ${import_chalk.default.gray(durationStr)}`);
+      } else {
+        consecutiveFailures++;
+        const errMsg = result.error ? result.error.split("\n")[0].slice(0, 120) : "unknown error";
+        console.log(`  ${import_chalk.default.red("\u2717")} ${import_chalk.default.gray(ts)} ${import_chalk.default.red("FAIL")} ${import_chalk.default.gray(durationStr)}`);
+        console.log(import_chalk.default.red(`    ERROR: ${errMsg}`));
+        if (consecutiveFailures >= notifyTargets.threshold) {
+          console.log(import_chalk.default.red.bold(`
+  !! ALERT: ${consecutiveFailures} consecutive failures for "${flow.name}" !!
+`));
+          if (notifyTargets.enabled && consecutiveFailures === notifyTargets.threshold) {
+            await sendMonitorAlert({
+              flow,
+              profileName: activeProfileName,
+              consecutiveFailures,
+              error: errMsg,
+              webhookUrl: notifyTargets.webhookUrl,
+              slackWebhook: notifyTargets.slackWebhook
+            });
+            lastAlertAt = consecutiveFailures;
+          } else if (notifyTargets.enabled && consecutiveFailures > lastAlertAt && consecutiveFailures % notifyTargets.threshold === 0) {
+            await sendMonitorAlert({
+              flow,
+              profileName: activeProfileName,
+              consecutiveFailures,
+              error: errMsg,
+              webhookUrl: notifyTargets.webhookUrl,
+              slackWebhook: notifyTargets.slackWebhook
+            });
+            lastAlertAt = consecutiveFailures;
+          }
+        }
+      }
+    } catch (err) {
+      const durationMs = Date.now() - tickStart;
+      const durationStr = durationMs >= 1e3 ? `${(durationMs / 1e3).toFixed(1)}s` : `${durationMs}ms`;
+      const ts = (/* @__PURE__ */ new Date()).toISOString().replace("T", " ").slice(0, 19);
+      totalRuns++;
+      consecutiveFailures++;
+      const errMsg = err instanceof Error ? err.message.split("\n")[0].slice(0, 120) : String(err);
+      console.log(`  ${import_chalk.default.red("\u2717")} ${import_chalk.default.gray(ts)} ${import_chalk.default.red("FAIL")} ${import_chalk.default.gray(durationStr)}`);
+      console.log(import_chalk.default.red(`    ERROR: ${errMsg}`));
+      if (consecutiveFailures >= notifyTargets.threshold) {
+        console.log(import_chalk.default.red.bold(`
+  !! ALERT: ${consecutiveFailures} consecutive failures for "${flow.name}" !!
+`));
+        if (notifyTargets.enabled && consecutiveFailures >= notifyTargets.threshold && consecutiveFailures !== lastAlertAt) {
+          await sendMonitorAlert({
+            flow,
+            profileName: activeProfileName,
+            consecutiveFailures,
+            error: errMsg,
+            webhookUrl: notifyTargets.webhookUrl,
+            slackWebhook: notifyTargets.slackWebhook
+          });
+          lastAlertAt = consecutiveFailures;
+        }
+      }
+    } finally {
+      running = false;
+    }
+  };
+  await tick();
+  setInterval(tick, intervalSec * 1e3);
+  await new Promise(() => {
+  });
 }
 var args = process.argv.slice(2);
 var cmd = args[0];
 var globalVars = parseVars(process.argv.slice(2));
-var db = new DatabaseManager();
+var db;
+function initializeDatabase() {
+  initProjectContext();
+  refreshProjectConstants();
+  const paths = getProjectPaths();
+  const hasProject = fs4.existsSync(paths.configPath);
+  const manager = new DatabaseManager(hasProject ? {
+    dbPath: paths.dbPath,
+    screenshotsPath: paths.screenshotsPath,
+    sessionsPath: paths.sessionsPath
+  } : {});
+  manager.setFlowSyncHook((event, flow) => {
+    if (!fs4.existsSync(paths.configPath)) return;
+    try {
+      if (event === "delete") deleteFlowFile(flow.id, flow.name);
+      else writeFlowFile(flow);
+    } catch {
+    }
+  });
+  if (hasProject) {
+    const sync = syncFlowsFromDisk(
+      (data) => manager.createFlow(data),
+      (name) => manager.findFlowByName(name),
+      (id, data) => manager.updateFlow(id, data)
+    );
+    if (sync.imported + sync.updated > 0 && process.env.GHOSTRUN_QUIET !== "1") {
+      info(`Synced flows from disk: ${sync.imported} imported, ${sync.updated} updated`);
+    }
+  }
+  return manager;
+}
+async function runSyncFlows() {
+  ensureProjectWorkspace();
+  const sync = syncFlowsFromDisk(
+    (data) => db.createFlow(data),
+    (name) => db.findFlowByName(name),
+    (id, data) => db.updateFlow(id, data)
+  );
+  success(`Flow sync complete \u2014 imported ${sync.imported}, updated ${sync.updated}, skipped ${sync.skipped}`);
+  const files = listFlowFiles();
+  if (files.length) info(`${files.length} flow file(s) under .ghostrun/flows/`);
+}
+async function runMigrateProjectScope() {
+  printLogo();
+  divider();
+  ensureProjectWorkspace();
+  const paths = getProjectPaths();
+  const globalDbPath = path4.join(DATA_PATH2, "data", "ghostrun.db");
+  if (!fs4.existsSync(globalDbPath)) {
+    warn("No global database at ~/.ghostrun/data/ghostrun.db \u2014 nothing to migrate.");
+    return;
+  }
+  if (fs4.existsSync(paths.dbPath) && db.listFlows().length > 0) {
+    const approved = await confirmAction("  Project DB already has flows. Merge global flows anyway? (y/N) ", false);
+    if (!approved) {
+      warn("Migration cancelled.");
+      return;
+    }
+  }
+  const globalDb = new DatabaseManager({ dbPath: globalDbPath });
+  const globalFlows = globalDb.listFlows();
+  let imported = 0;
+  for (const flow of globalFlows) {
+    const existing = db.findFlowByName(flow.name);
+    if (existing) continue;
+    db.createFlow({
+      name: flow.name,
+      description: flow.description || void 0,
+      appUrl: flow.appUrl || void 0,
+      graph: JSON.parse(flow.graph || "{}"),
+      createdBy: flow.createdBy
+    });
+    imported++;
+  }
+  globalDb.close();
+  const diskSync = syncFlowsFromDisk(
+    (data) => db.createFlow(data),
+    (name) => db.findFlowByName(name),
+    (id, data) => db.updateFlow(id, data)
+  );
+  success(`Project scope migration complete`);
+  info(`Global flows copied: ${imported}`);
+  info(`Disk sync: ${diskSync.imported} imported, ${diskSync.updated} updated`);
+  info(`Project DB: ${paths.dbPath}`);
+}
+async function runServicesCommand(subArgs) {
+  ensureProjectWorkspace();
+  const sub = subArgs[0] || "list";
+  const profile = getSelectedProfile(subArgs) || (readConfig().activeProfile ? getProfile(readConfig().activeProfile) : null);
+  switch (sub) {
+    case "list": {
+      console.log(import_chalk.default.bold("\n  Service Bridge (optional)\n"));
+      console.log(import_chalk.default.gray("  Most SaaS apps use profile auth + shared QA credentials \u2014 no Mailpit required."));
+      console.log(import_chalk.default.gray("  Set auth in .ghostrun/profiles/staging.json and secrets via env or auth/secrets/."));
+      console.log();
+      console.log(import_chalk.default.gray("  Optional local dev stack: .ghostrun/services/dev.compose.yml"));
+      console.log(import_chalk.default.gray("  Mailpit (magic links):  http://localhost:8025"));
+      console.log(import_chalk.default.gray("  Hook catcher:           http://127.0.0.1:8787"));
+      console.log(import_chalk.default.gray("  Start Mailpit only:     docker compose -f .ghostrun/services/dev.compose.yml up -d mailpit"));
+      if (profile?.services) {
+        console.log(import_chalk.default.cyan("\n  Active profile services:"));
+        console.log(JSON.stringify(profile.services, null, 2));
+      } else {
+        console.log(import_chalk.default.gray("\n  No services block \u2014 profile auth only (recommended for password login)."));
+      }
+      console.log();
+      break;
+    }
+    case "doctor": {
+      console.log(import_chalk.default.bold("\n  Service Bridge Health\n"));
+      const results = await runServicesDoctor(profile?.services);
+      for (const r of results) {
+        const badge = r.ok ? import_chalk.default.green(" OK ") : import_chalk.default.red("FAIL");
+        console.log(`  [${badge}] ${r.name} \u2014 ${r.detail}`);
+      }
+      console.log();
+      break;
+    }
+    case "inbox": {
+      if (!isEmailBridgeEnabled(profile?.services)) {
+        errorMsg("Mailpit not enabled on this profile. Add services.email or use profile auth with QA credentials.");
+        process.exit(1);
+      }
+      const apiUrl = resolveEmailApiUrl(profile?.services);
+      try {
+        const messages = await fetchMailpitMessages(apiUrl);
+        console.log(import_chalk.default.bold(`
+  Mailpit inbox (${messages.length} messages)
+`));
+        console.log(sanitizeInboxSnapshot(messages, 15) || import_chalk.default.gray("  (empty)"));
+      } catch (e) {
+        errorMsg(e instanceof Error ? e.message : String(e));
+        process.exit(1);
+      }
+      console.log();
+      break;
+    }
+    case "hooks": {
+      const captures = listWebhookCaptures(20);
+      console.log(import_chalk.default.bold(`
+  Webhook captures (${captures.length})
+`));
+      for (const c of captures.slice(0, 10)) {
+        console.log(`  ${import_chalk.default.gray(c.receivedAt)} ${import_chalk.default.cyan(c.method)} ${c.path} (${c.body.length} bytes)`);
+      }
+      if (captures.length === 0) console.log(import_chalk.default.gray("  (none \u2014 POST to http://127.0.0.1:8787/your/path)"));
+      console.log();
+      break;
+    }
+    case "hook": {
+      if (subArgs.includes("--daemon")) {
+        const { url } = await startHookCatcher(8787);
+        success(`Hook catcher listening on ${url}`);
+        info("POST any path \u2014 captures saved to .ghostrun/services/webhooks/");
+        info("Health: GET /hooks/health");
+        await new Promise(() => {
+        });
+      } else {
+        errorMsg("Usage: ghostrun services hook --daemon");
+        process.exit(1);
+      }
+      break;
+    }
+    case "up": {
+      copyDevServicesTemplate();
+      const compose = path4.join(getProjectPaths().servicesPath, "dev.compose.yml");
+      info(`Dev stack template: ${compose}`);
+      info("Run: docker compose -f .ghostrun/services/dev.compose.yml up -d");
+      break;
+    }
+    case "seed": {
+      const pg = profile?.services?.postgres;
+      if (!pg?.connectionSecret) {
+        errorMsg("Profile missing services.postgres.connectionSecret");
+        process.exit(1);
+      }
+      const paths = getProjectPaths();
+      const fixtures = (pg.fixtures || []).map((f) => path4.isAbsolute(f) ? f : path4.join(paths.fixturesSql, f));
+      await runSqlFixtures(fixtures, pg.connectionSecret);
+      success(`Applied ${fixtures.length} SQL fixture(s)`);
+      break;
+    }
+    default:
+      errorMsg(`Unknown services subcommand: ${sub}. Use: list, doctor, inbox, hooks, hook, up, seed`);
+      process.exit(1);
+  }
+}
 async function main() {
+  db = initializeDatabase();
   if (!cmd) {
-    await runInteractive();
+    await runHome();
     db.close();
     return;
   }
   if (cmd === "--version" || cmd === "-v") {
-    const realBin = fs2.realpathSync(process.argv[1]);
-    const pkgPath = path2.join(path2.dirname(realBin), "package.json");
-    const pkg = JSON.parse(fs2.readFileSync(pkgPath, "utf8"));
+    const realBin = fs4.realpathSync(process.argv[1]);
+    const pkgPath = path4.join(path4.dirname(realBin), "package.json");
+    const pkg = JSON.parse(fs4.readFileSync(pkgPath, "utf8"));
     console.log(pkg.version);
     process.exit(0);
   }
@@ -10222,9 +12262,16 @@ async function main() {
     console.log(`  ${C("learn <url> [name]")}${G("Record a new flow (opens real browser)")}`);
     console.log(`  ${C("run <id|name> [--var k=v]")}${G("Execute a flow headlessly")}`);
     console.log(`  ${C("run <id> --visible")}${G("Run with visible browser window")}`);
+    console.log(`  ${C("run <id> --ci")}${G("CI-safe run (no implicit healing)")}`);
     console.log(`  ${C("run <id> --output json")}${G("JSON output with extracted data")}`);
     console.log(`  ${C("run <id> --report html")}${G("Run flow + save HTML report")}`);
+    console.log(`  ${C("run <id> --reporter junit")}${G("Save JUnit XML report after run")}`);
+    console.log(`  ${C("run <id> --video")}${G("Record video of the run")}`);
+    console.log(`  ${C("run <id> --trace")}${G("Record Playwright trace for inspection")}`);
+    console.log(`  ${C("run <id> --baseline")}${G("Fail on visual regression vs baselines")}`);
+    console.log(`  ${C("run <id> --baseline-threshold 5")}${G("Visual diff threshold (percent)")}`);
     console.log(`  ${C("create [description]")}${G("Generate flow from natural language  \u{1F916} AI")}`);
+    console.log(`  ${C("author")}${G("Interactive menu to author a flow")}`);
     console.log(`  ${C("code:scan <directory>")}${G("Scan codebase, create draft flows    \u{1F916} AI")}`);
     console.log();
     H("Flow Management");
@@ -10238,11 +12285,36 @@ async function main() {
     console.log(`  ${C("flow:from-curl [cmd]")}${G("Parse curl command \u2192 create flow")}`);
     console.log(`  ${C("flow:from-spec <file>")}${G("Import OpenAPI/Swagger JSON or YAML spec")}`);
     console.log();
-    H("Scheduling");
-    console.log(`  ${C('flow:schedule <id> "<cron>"')}${G('Schedule a flow  e.g. "0 9 * * *"')}`);
-    console.log(`  ${C("schedule:list")}${G("List all schedules")}`);
-    console.log(`  ${C("schedule:remove <id>")}${G("Remove a schedule")}`);
-    console.log(`  ${C("serve")}${G("Start the scheduler daemon")}`);
+    H("Profiles");
+    console.log(`  ${C("profile:list")}${G("List project profiles")}`);
+    console.log(`  ${C("profile:show <name>")}${G("Show a project profile")}`);
+    console.log(`  ${C("profile:create <name> [url]")}${G("Create a profile with optional base URL")}`);
+    console.log(`  ${C("profile:use <name>")}${G("Set the active project profile")}`);
+    console.log(`  ${C("profile:set <name> <key> <val>")}${G("Set baseUrl, auth.*, meta.*, or profile var")}`);
+    console.log(`  ${C("profile:delete <name>")}${G("Delete a project profile")}`);
+    console.log(`  ${C("profile accounts list <profile>")}${G("Roles: superadmin, admin, manager, guest")}`);
+    console.log(`  ${C("profile account add <profile> <id>")}${G("Add account with email + password secrets")}`);
+    console.log(import_chalk.default.gray(`  ${"  Run: --profile staging --account admin  (email + password per role)".padEnd(52)}`));
+    console.log();
+    H("SaaS Service Bridge (optional)");
+    console.log(`  ${C("services list")}${G("Overview \u2014 creds-first; Mailpit optional")}`);
+    console.log(`  ${C("services doctor")}${G("Check configured services only")}`);
+    console.log(`  ${C("services inbox")}${G("Mailpit inbox (requires services.email)")}`);
+    console.log(`  ${C("services hooks")}${G("List captured webhooks")}`);
+    console.log(`  ${C("services hook --daemon")}${G("Start local webhook catcher on :8787")}`);
+    console.log(import_chalk.default.gray(`  ${"  Flow actions: db:*, webhook:*, email:* (optional Mailpit)".padEnd(52)}`));
+    console.log();
+    H("Project Scope");
+    console.log(`  ${C("sync flows")}${G("Import .ghostrun/flows/*.flow.json into DB")}`);
+    console.log(`  ${C("migrate project-scope")}${G("Copy flows from ~/.ghostrun to this repo")}`);
+    console.log();
+    H("Monitor & Scheduling");
+    console.log(`  ${C("monitor <id> --interval 60s")}${G("Poll a flow on an interval")}`);
+    console.log(`  ${C("monitor daemon")}${G("Run cron scheduler (writes scheduler.pid)")}`);
+    console.log(`  ${C("monitor schedule list")}${G("List cron schedules")}`);
+    console.log(`  ${C('monitor schedule add <id> "<cron>"')}${G('Add schedule  e.g. "0 9 * * *"')}`);
+    console.log(`  ${C("monitor schedule remove <id>")}${G("Remove a schedule")}`);
+    console.log(import_chalk.default.gray(`  ${"  Legacy (deprecated v1.3.0): flow:schedule, schedule:list, serve".padEnd(52)}`));
     console.log(`  ${C("serve --ui [--port 3000]")}${G("Launch the web dashboard")}`);
     console.log();
     H("Test Suites");
@@ -10250,18 +12322,26 @@ async function main() {
     console.log(`  ${C("suite:add <suite> <flow>")}${G("Add a flow to a suite")}`);
     console.log(`  ${C("suite:list")}${G("List all suites")}`);
     console.log(`  ${C("suite:show <suite>")}${G("Show flows in a suite")}`);
-    console.log(`  ${C("suite:run <suite> [--var k=v]")}${G("Run all flows in a suite")}`);
+    console.log(`  ${C("suite:run <suite> [--var k=v] [--parallel]")}${G("Run all flows in a suite")}`);
     console.log();
     H("Visual Baselines");
     console.log(`  ${C("baseline:set <flow-id>")}${G("Capture reference screenshots")}`);
     console.log(`  ${C("baseline:clear <flow-id>")}${G("Clear baselines for a flow")}`);
     console.log(`  ${C("baseline:show <flow-id>")}${G("List baseline screenshots")}`);
+    console.log(`  ${C("run <id> --baseline")}${G("Gate runs on visual diff vs baselines")}`);
     console.log();
     H("Run History & Analysis");
     console.log(`  ${C("run:list")}${G("List recent runs with status + timing")}`);
     console.log(`  ${C("run:show <id>")}${G("Full step details + screenshots")}`);
     console.log(`  ${C("run:diff <id1> <id2>")}${G("Pixel-diff screenshots between two runs")}`);
     console.log(`  ${C("run:analyze <id>")}${G("Plain-English failure analysis          \u{1F916} AI")}`);
+    console.log(`  ${C("repair list")}${G("List stored repair proposals")}`);
+    console.log(`  ${C("repair show <id>")}${G("Show repair proposal details")}`);
+    console.log(`  ${C("repair apply <id>")}${G("Apply a stored repair proposal")}`);
+    console.log(`  ${C("improve")}${G("Analyze GhostRun data and suggest improvements")}`);
+    console.log(`  ${C("report publish")}${G("Bundle HTML/JUnit/screenshots for CI")}`);
+    console.log(`  ${C("report list")}${G("List recent runs")}`);
+    console.log(`  ${C("integrations list")}${G("Show GitHub/Linear integration config")}`);
     console.log();
     H("Template Store");
     console.log(`  ${C("store list")}${G("Browse 10+ ready-made flow templates")}`);
@@ -10270,6 +12350,15 @@ async function main() {
     H("Data Extraction & Monitoring");
     console.log(`  ${C("monitor <id|name>")}${G("Run flow + show extracted data changes")}`);
     console.log(`  ${C("monitor <id> --output json")}${G("Monitor with JSON output")}`);
+    console.log(`  ${C("monitor <id> --interval <s>")}${G("Loop: run every N seconds (default 60)")}`);
+    console.log(`  ${C("monitor <id> --interval 30 --profile <name>")}${G("Continuous monitor with profile")}`);
+    if (isCrawleeEnabled()) {
+      console.log(`  ${C("scrape <url> [opts]")}${G("Scrape website data with Crawlee")}`);
+      console.log(`  ${C("scrape:run <url> --flow <id>")}${G("Scrape first, then run a flow")}`);
+      console.log(`  ${C("scrape:list")}${G("List saved scrape datasets")}`);
+      console.log(`  ${C("scrape:show <id>")}${G("Show saved scrape JSON")}`);
+      console.log(import_chalk.default.gray(`  ${"  Options: --max-pages N  --selector CSS  --output json".padEnd(52)}`));
+    }
     console.log(import_chalk.default.gray(`  ${"  Flow actions: extract, scroll:bottom, scroll:load, next:page".padEnd(52)}`));
     console.log();
     H("API Testing");
@@ -10292,41 +12381,312 @@ async function main() {
     console.log();
     H("Chat & Setup");
     console.log(`  ${C("chat")}${G("Ask GhostRun Bot \u2014 Q&A + run flows      \u{1F916} AI")}`);
-    console.log(`  ${C("init")}${G("Setup wizard (Chromium + AI provider)")}`);
+    console.log(`  ${C("init [--yes]")}${G("Setup wizard (Chromium + AI provider)")}`);
+    console.log(`  ${C("audit")}${G("Scan project for secret leaks")}`);
+    console.log(`  ${C("config:mode [assist|auto]")}${G("Show or set interaction mode")}`);
+    console.log(`  ${C("ai:status")}${G("AI provider, policy, and usage summary")}`);
+    console.log(`  ${C("ai:usage")}${G("Aggregated AI token and call usage")}`);
+    console.log(`  ${C("ai:sessions [limit]")}${G("Recent sanitized AI session log")}`);
     console.log();
     H("Exploration & System");
     console.log(`  ${C("explore <url>")}${G("Auto-discover flows via BFS crawl       \u{1F916} AI")}`);
     console.log(`  ${C("explore:list")}${G("List all explore sessions")}`);
     console.log(`  ${C("explore:confirm <report-id>")}${G("Save confirmed flows from explore")}`);
     console.log(`  ${C("status")}${G("Stats, creator breakdown, AI provider")}`);
+    console.log(`  ${C("doctor")}${G("Run a health checklist for GhostRun")}`);
+    console.log(`  ${C("benchmark author")}${G("Measure AI flow generation quality")}`);
     console.log(`  ${C("serve")}${G("Open web dashboard (ghostrun serve --ui)")}`);
     console.log();
     console.log(import_chalk.default.gray("  \u{1F916} AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)"));
     console.log(import_chalk.default.gray("  \u{1F464}     = human-recorded   \u{1F916} = agent/AI-generated"));
-    console.log(import_chalk.default.gray("  Flags:     --visible (show browser)  --output json  --var key=value"));
+    console.log(import_chalk.default.gray("  Flags:     --visible  --ci  --profile <name>  --baseline  --output json  --var key=value"));
     console.log();
     process.exit(0);
   }
+  if (cmd === "repair" && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case "list":
+        await runRepairList();
+        break;
+      case "show":
+        if (!rest[0]) {
+          errorMsg("Repair proposal ID required");
+          process.exit(1);
+        }
+        await runRepairShow(rest[0]);
+        break;
+      case "apply":
+        if (!rest[0]) {
+          errorMsg("Repair proposal ID required");
+          process.exit(1);
+        }
+        await runRepairApply(rest[0]);
+        break;
+      default:
+        errorMsg(`Unknown repair subcommand: ${sub}. Use: list, show, apply`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+  if (cmd === "report" && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case "list":
+        await runListRuns();
+        break;
+      case "show":
+        if (!rest[0]) {
+          errorMsg("Run ID required");
+          process.exit(1);
+        }
+        await runShowRun(rest[0]);
+        break;
+      case "diff":
+        if (!rest[0] || !rest[1]) {
+          errorMsg("Usage: ghostrun report diff <run1> <run2>");
+          process.exit(1);
+        }
+        await runDiff(rest[0], rest[1]);
+        break;
+      case "analyze":
+        if (!rest[0]) {
+          errorMsg("Run ID required");
+          process.exit(1);
+        }
+        await runAnalyzeRun(rest[0]);
+        break;
+      case "publish":
+        await runReportPublish(rest);
+        break;
+      default:
+        errorMsg(`Unknown report subcommand: ${sub}. Use: list, show, diff, analyze, publish`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+  if (cmd === "profile" && args[1] && !args[1].includes(":")) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case "list":
+        await runProfileList();
+        break;
+      case "show":
+        if (!rest[0]) {
+          errorMsg("Profile name required");
+          process.exit(1);
+        }
+        await runProfileShow(rest[0]);
+        break;
+      case "create":
+        if (!rest[0]) {
+          errorMsg("Profile name required");
+          process.exit(1);
+        }
+        await runProfileCreate(rest[0], rest[1]);
+        break;
+      case "use":
+        if (!rest[0]) {
+          errorMsg("Profile name required");
+          process.exit(1);
+        }
+        await runProfileUse(rest[0]);
+        break;
+      case "set":
+        if (!rest[0] || !rest[1] || !rest[2]) {
+          errorMsg("Usage: ghostrun profile set <name> <key> <value>");
+          process.exit(1);
+        }
+        await runProfileSet(rest[0], rest[1], rest[2]);
+        break;
+      case "delete":
+        if (!rest[0]) {
+          errorMsg("Profile name required");
+          process.exit(1);
+        }
+        await runProfileDelete(rest[0]);
+        break;
+      case "accounts":
+        if (rest[0] === "list") {
+          if (!rest[1]) {
+            errorMsg("Usage: ghostrun profile accounts list <profile>");
+            process.exit(1);
+          }
+          await runProfileAccountsList(rest[1]);
+        } else if (rest[0] === "show") {
+          if (!rest[1] || !rest[2]) {
+            errorMsg("Usage: ghostrun profile accounts show <profile> <account>");
+            process.exit(1);
+          }
+          await runProfileAccountShow(rest[1], rest[2]);
+        } else {
+          errorMsg("Usage: ghostrun profile accounts list|show <profile> [account]");
+          process.exit(1);
+        }
+        break;
+      case "account":
+        if (rest[0] === "add") {
+          if (!rest[1] || !rest[2]) {
+            errorMsg("Usage: ghostrun profile account add <profile> <account-id> [--email addr] [--password-secret ENV] [--login-flow name]");
+            process.exit(1);
+          }
+          const addRest = rest.slice(3);
+          await runProfileAccountAdd(rest[1], rest[2], {
+            email: parseFlagValue(addRest, "--email"),
+            emailSecret: parseFlagValue(addRest, "--email-secret"),
+            passwordSecret: parseFlagValue(addRest, "--password-secret"),
+            loginFlow: parseFlagValue(addRest, "--login-flow"),
+            label: parseFlagValue(addRest, "--label"),
+            default: addRest.includes("--default")
+          });
+        } else {
+          errorMsg("Usage: ghostrun profile account add <profile> <account-id> [options]");
+          process.exit(1);
+        }
+        break;
+      default:
+        errorMsg(`Unknown profile subcommand: ${sub}. Use: list, show, create, use, set, delete, accounts, account`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+  if (cmd === "author" && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case "create":
+        await runCreate(rest.filter((a) => !a.startsWith("--")).join(" ") || void 0, rest);
+        break;
+      case "record":
+      case "learn":
+        if (!rest[0]) {
+          errorMsg("URL required");
+          process.exit(1);
+        }
+        await runLearn(rest[0]);
+        break;
+      case "curl":
+        await runFlowFromCurl(rest[0]);
+        break;
+      case "spec":
+        if (!rest[0]) {
+          errorMsg("OpenAPI spec path required");
+          process.exit(1);
+        }
+        await runFlowFromSpec(rest[0]);
+        break;
+      case "explore":
+        if (!rest[0]) {
+          errorMsg("URL required");
+          process.exit(1);
+        }
+        await runExplore(rest[0]);
+        break;
+      default:
+        await runAuthor();
+    }
+    db.close();
+    return;
+  }
+  if (cmd === "ai" && args[1]) {
+    const sub = args[1];
+    switch (sub) {
+      case "status":
+        await runAiStatus();
+        break;
+      case "usage":
+        await runAiUsage();
+        break;
+      case "sessions":
+        await runAiSessions(args[2]);
+        break;
+      default:
+        errorMsg(`Unknown ai subcommand: ${sub}. Use: status, usage, sessions`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+  if (cmd === "integrations") {
+    await runIntegrationsCommand(args.slice(1));
+    db.close();
+    return;
+  }
+  if (cmd === "services") {
+    await runServicesCommand(args.slice(1));
+    db.close();
+    return;
+  }
+  if (cmd === "sync" && args[1] === "flows") {
+    await runSyncFlows();
+    db.close();
+    return;
+  }
+  if (cmd === "migrate" && args[1] === "project-scope") {
+    await runMigrateProjectScope();
+    db.close();
+    return;
+  }
+  if (LEGACY_COMMAND_MAP[cmd]) rejectLegacyCommand(cmd);
   switch (cmd) {
+    case "doctor":
+      await runDoctor();
+      break;
+    case "benchmark":
+      if (args[1] === "author") {
+        await runAuthorBenchmark(args.slice(2));
+      } else {
+        errorMsg("Usage: ghostrun benchmark author [--dry-run]");
+        process.exit(1);
+      }
+      break;
+    case "audit":
+      await runSecurityAudit(true);
+      break;
+    case "author":
+      await runAuthor();
+      break;
     case "init":
-      await runInit();
+      await runInit(args.slice(1));
       break;
     case "chat":
       await runChat();
       break;
-    case "monitor":
-      if (!args[1]) {
-        errorMsg("Flow ID or name required");
-        process.exit(1);
-      }
-      await runMonitor(args[1]);
+    case "config:mode":
+      await runConfigMode(args[1]);
       break;
-    case "learn":
+    case "monitor":
+      await runMonitorCommand(args.slice(1));
+      break;
+    case "scrape":
       if (!args[1]) {
         errorMsg("URL required");
         process.exit(1);
       }
-      await runLearn(args[1]);
+      await runScrapeCommand(args[1], args.slice(2));
+      break;
+    case "scrape:run":
+      if (!args[1]) {
+        errorMsg("URL required");
+        process.exit(1);
+      }
+      await runScrapeAndFlowCommand(args[1], args.slice(2));
+      break;
+    case "scrape:list":
+      await runScrapeList();
+      break;
+    case "scrape:show":
+      if (!args[1]) {
+        errorMsg("Scrape ID required");
+        process.exit(1);
+      }
+      await runScrapeShow(args[1]);
       break;
     case "run": {
       if (!args[1]) {
@@ -10339,10 +12699,26 @@ async function main() {
         const i = args.indexOf("--output");
         return i >= 0 && args[i + 1] && !args[i + 1].startsWith("--") && args[i + 1] !== "json" ? args[i + 1] : null;
       })();
+      const reporterIdx = args.indexOf("--reporter");
+      const reporterFmt = reporterIdx >= 0 ? args[reporterIdx + 1] || "" : null;
       const savedRunId = await runFlow(args[1], globalVars);
       if (reportFmt && savedRunId) {
         const outFile = reportOut || `ghostrun-report-${savedRunId.slice(0, 8)}.html`;
         await generateRunReport(savedRunId, outFile);
+      }
+      if (reporterFmt === "junit" && savedRunId) {
+        const runSteps = db.listSteps(savedRunId);
+        const runRecord = db.getRun(savedRunId);
+        const totalMs = runRecord?.duration || 0;
+        const flowRecord = runRecord ? db.findFlowByPartialId(runRecord.flowId) || db.findFlowByName(runRecord.flowId) : null;
+        const flowNameForReport = flowRecord?.name || args[1];
+        const junitPath = await writeJUnitReport(
+          flowNameForReport,
+          savedRunId,
+          runSteps.map((s) => ({ name: s.name, status: s.status, duration: s.duration, errorMessage: s.errorMessage })),
+          totalMs
+        );
+        info("JUnit report: " + import_chalk.default.cyan(junitPath));
       }
       break;
     }
@@ -10401,49 +12777,11 @@ async function main() {
       }
       await runFlowFromSpec(args[1]);
       break;
-    case "flow:schedule":
-      if (!args[1] || !args[2]) {
-        errorMsg('Usage: flow:schedule <id|name> "<cron expression>"');
-        process.exit(1);
-      }
-      await runScheduleAdd(args[1], args[2]);
-      break;
-    case "schedule:list":
-      await runScheduleList();
-      break;
-    case "schedule:remove":
-      if (!args[1]) {
-        errorMsg("Schedule ID required");
-        process.exit(1);
-      }
-      await runScheduleRemove(args[1]);
-      break;
     case "serve":
       await runServe(args.slice(1));
       break;
-    case "run:list":
-      await runListRuns();
-      break;
-    case "run:show":
-      if (!args[1]) {
-        errorMsg("Run ID required");
-        process.exit(1);
-      }
-      await runShowRun(args[1]);
-      break;
-    case "run:diff":
-      if (!args[1] || !args[2]) {
-        errorMsg("Usage: run:diff <run1-id> <run2-id>");
-        process.exit(1);
-      }
-      await runDiff(args[1], args[2]);
-      break;
-    case "run:analyze":
-      if (!args[1]) {
-        errorMsg("Run ID required");
-        process.exit(1);
-      }
-      await runAnalyzeRun(args[1]);
+    case "improve":
+      await runImprove();
       break;
     case "explore":
       if (!args[1]) {
@@ -10517,9 +12855,6 @@ async function main() {
         process.exit(1);
       }
       await runBaselineShow(args[1]);
-      break;
-    case "create":
-      await runCreate(args[1]);
       break;
     case "code:scan":
       if (!args[1]) {

@@ -8,8 +8,10 @@ import { sanitize } from '@ghostrun/privacy';
 
 export interface ActionResult {
   success: boolean;
+  warning?: string;
+  selector?: string;
   error?: {
-    type: string;
+    type: import('@ghostrun/core').StepErrorType;
     message: string;
     selector?: string;
     expected?: string;
@@ -87,7 +89,7 @@ export async function executeAction(
       return await executePress(execContext, sanitizedValue || 'Enter');
     
     case 'navigate':
-      return await executeNavigate(execContext, sanitizedValue || resolvedSelector);
+      return await executeNavigate(execContext, sanitizedValue || resolvedSelector || '');
     
     case 'goback':
       return await executeGoBack(execContext);
@@ -345,42 +347,6 @@ async function executeHover(
     return createError('hover_failed', error, selector);
   }
 }
-      success: false,
-      error: {
-        type: 'missing_value',
-        message: 'Select action requires a value',
-        recoverable: false,
-      },
-    };
-  }
-  
-  try {
-    const locator = getLocator(page, selector!, selectorType);
-    await locator.selectOption(value, { timeout: execContext.config.timeout });
-    return { success: true };
-  } catch (error) {
-    return createError('select_failed', error, selector);
-  }
-}
-
-/**
- * Execute check action
- */
-async function executeCheck(
-  execContext: ExecutionContext,
-  selector: string | undefined,
-  selectorType: string | undefined
-): Promise<ActionResult> {
-  const { page } = execContext;
-  
-  try {
-    const locator = getLocator(page, selector!, selectorType);
-    await locator.check({ timeout: execContext.config.timeout });
-    return { success: true };
-  } catch (error) {
-    return createError('check_failed', error, selector);
-  }
-}
 
 /**
  * Execute press action (key press)
@@ -514,7 +480,7 @@ function getLocator(
     case 'text':
       return page.getByText(selector);
     case 'role':
-      return page.getByRole(selector as import('@playwright/test').AriaRole);
+      return page.getByRole(selector as Parameters<typeof page.getByRole>[0]);
     case 'testid':
       return page.getByTestId(selector);
     case 'label':
@@ -654,7 +620,7 @@ function createError(
 ): ActionResult {
   const message = error instanceof Error ? error.message : String(error);
   
-  let errorType = type;
+  let errorType: import('@ghostrun/core').StepErrorType = isStepErrorType(type) ? type : 'unknown';
   if (message.includes('locator')) {
     if (message.includes('not found') || message.includes('Timeout')) {
       errorType = 'element_not_found';
@@ -673,6 +639,38 @@ function createError(
       suggestions: generateSuggestions(errorType, selector),
     },
   };
+}
+
+function isStepErrorType(type: string): type is import('@ghostrun/core').StepErrorType {
+  return [
+    'element_not_found',
+    'element_not_visible',
+    'element_not_enabled',
+    'action_timeout',
+    'action_failed',
+    'navigation_timeout',
+    'assertion_failed',
+    'network_error',
+    'slot_missing',
+    'validation_failed',
+    'unknown_action',
+    'missing_value',
+    'click_failed',
+    'dblclick_failed',
+    'rightclick_failed',
+    'type_failed',
+    'fill_failed',
+    'select_failed',
+    'check_failed',
+    'uncheck_failed',
+    'hover_failed',
+    'press_failed',
+    'goback_failed',
+    'goforward_failed',
+    'refresh_failed',
+    'screenshot_failed',
+    'unknown',
+  ].includes(type);
 }
 
 /**

@@ -223,6 +223,10 @@ export function createElementSelector(strategies: SelectorStrategy[]): ElementSe
  */
 export function createElementSnapshot(element: HTMLElement): ElementSnapshot {
   const rect = element.getBoundingClientRect();
+  const labels = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+    ? Array.from(element.labels ?? []).map(label => label.textContent?.trim()).filter(Boolean)
+    : [];
+
   return {
     tag: element.tagName.toLowerCase(),
     id: element.id || undefined,
@@ -230,7 +234,7 @@ export function createElementSnapshot(element: HTMLElement): ElementSnapshot {
     name: (element as HTMLInputElement).name || undefined,
     type: (element as HTMLInputElement).type || undefined,
     role: element.getAttribute('role') || undefined,
-    label: (element as HTMLLabelElement).label || element.getAttribute('aria-label') || undefined,
+    label: labels[0] || element.getAttribute('aria-label') || undefined,
     placeholder: (element as HTMLInputElement).placeholder || undefined,
     text: element.textContent?.trim() || undefined,
     innerHTML: element.innerHTML,

@@ -78,7 +78,6 @@ export async function executeFlow(
   
   // Create context
   const context = await browser.newContext({
-    headless: finalConfig.headless,
     viewport: finalConfig.viewport,
   });
   
@@ -109,7 +108,7 @@ export async function executeFlow(
 
   try {
     // Execute from start node
-    let currentNodeId = flow.startNodeId;
+    let currentNodeId: string | null = flow.startNodeId;
     
     while (currentNodeId) {
       const node = findNode({ flow, currentNodeId } as GraphState, currentNodeId);
@@ -243,7 +242,7 @@ async function executeNode(
     status: 'running',
     startedAt: new Date(),
     consoleLogs: [],
-    networkLogs: [...execContext.state.consoleLogs],
+    networkLogs: [...execContext.state.networkLogs],
   };
 
   try {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ActionType, SelectorType } from './action';
 
 /**
  * Node types in the flow graph
@@ -45,6 +46,9 @@ export interface NodeData {
   // Action nodes
   action?: ActionType;
   targetSelector?: string;
+  selector?: string;
+  selectorType?: SelectorType | Selector['type'];
+  value?: string;
   inputValue?: string;
   slotId?: string;
   
@@ -71,33 +75,11 @@ export interface Selector {
 }
 
 /**
- * Action types that can be performed
- */
-export type ActionType = 
-  | 'click'
-  | 'dblclick'
-  | 'rightClick'
-  | 'type'
-  | 'fill'
-  | 'select'
-  | 'check'
-  | 'uncheck'
-  | 'hover'
-  | 'press'
-  | 'scroll'
-  | 'screenshot'
-  | 'wait'
-  | 'navigate'
-  | 'goBack'
-  | 'goForward'
-  | 'refresh';
-
-/**
  * Condition for decision nodes
  */
 export interface Condition {
-  type: 'url' | 'selector' | 'text' | 'count' | 'custom';
-  operator: 'equals' | 'contains' | 'matches' | 'exists' | 'notExists' | 'greaterThan' | 'lessThan';
+  type: 'url' | 'selector' | 'text' | 'element' | 'count' | 'custom';
+  operator: 'equals' | 'notEquals' | 'contains' | 'matches' | 'exists' | 'notExists' | 'greaterThan' | 'lessThan';
   target: string;
   value?: string | number;
   caseSensitive?: boolean;
@@ -146,11 +128,19 @@ export function createScreenNode(params: {
 export function createActionNode(params: {
   label: string;
   action: ActionType;
-  targetSelector?: Selector;
+  targetSelector?: Selector | string;
   inputValue?: string;
+  value?: string;
   slotId?: string;
   position?: NodePosition;
 }): FlowNode {
+  const selectorValue = typeof params.targetSelector === 'string'
+    ? params.targetSelector
+    : params.targetSelector?.value;
+  const selectorType = typeof params.targetSelector === 'string'
+    ? undefined
+    : params.targetSelector?.type;
+
   return {
     id: crypto.randomUUID(),
     type: 'action',
@@ -158,8 +148,11 @@ export function createActionNode(params: {
     position: params.position ?? { x: 0, y: 0 },
     data: {
       action: params.action,
-      targetSelector: params.targetSelector,
+      targetSelector: selectorValue,
+      selector: selectorValue,
+      selectorType,
       inputValue: params.inputValue,
+      value: params.value ?? params.inputValue,
       slotId: params.slotId,
     },
   };

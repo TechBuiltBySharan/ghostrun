@@ -10,11 +10,1150 @@ import chalk from 'chalk';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { v4 as uuidv4 } from 'uuid';
+import { createHash, randomUUID as uuidv4 } from 'crypto';
 import { DatabaseManager } from './packages/database/src/manager';
+import {
+  escapeHtml,
+  formatReportDuration,
+  computeFlowGraphHash,
+  buildRunHistorySparklineHtml,
+  buildRepairPanelHtml,
+  buildNextStepsPanelHtml,
+  buildIntentBlockHtml,
+  buildFailurePanelHtml,
+  RUN_REPORT_V2_STYLES,
+  type RepairProposalView,
+} from './run-report-v2';
+import {
+  initProjectContext,
+  getProjectPaths,
+  ensureProjectDirs,
+  ensureProjectJson,
+  writeFlowFile,
+  deleteFlowFile,
+  syncFlowsFromDisk,
+  copyDevServicesTemplate,
+  updateProjectGitignore,
+  resolveProjectRoot,
+  listFlowFiles,
+} from './project-scope';
+import {
+  applyProfileAccount,
+  resolveSelectedAccountKey,
+  getEffectiveAuthForAccount,
+  getProfileAccount,
+  listAccountIds,
+  buildAccountFromSecrets,
+  secretNamesForAccount,
+  normalizeAccountId,
+  buildDefaultSaaSAccounts,
+  DEFAULT_SAAS_ACCOUNT_IDS,
+  type ProfileAccount,
+} from './account-scope';
+import {
+  waitForEmail,
+  extractFirstUrl,
+  extractOtpCode,
+  waitForWebhook,
+  runServicesDoctor,
+  runSqlFixtures,
+  runDbQuery,
+  assertDbQuery,
+  assertWebhookPayload,
+  verifyWebhookSignature,
+  resolveWebhookCapture,
+  fetchMailpitMessages,
+  sanitizeInboxSnapshot,
+  startHookCatcher,
+  listWebhookCaptures,
+  isEmailBridgeEnabled,
+  resolveEmailApiUrl,
+  type ProfileServices,
+} from './service-bridge';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '.';
 const DATA_PATH = path.join(HOME_DIR, '.ghostrun');
+const GLOBAL_CONFIG_PATH = path.join(DATA_PATH, 'config.json');
+const SCRAPES_PATH = path.join(DATA_PATH, 'scrapes');
+
+function refreshProjectConstants(): { ghostrunPath: string; configPath: string } {
+  const p = getProjectPaths();
+  PROJECT_GHOSTRUN_PATH = p.ghostrunPath;
+  PROJECT_CONFIG_PATH = p.configPath;
+  return { ghostrunPath: p.ghostrunPath, configPath: p.configPath };
+}
+
+let PROJECT_GHOSTRUN_PATH = path.join(process.cwd(), '.ghostrun');
+let PROJECT_CONFIG_PATH = path.join(PROJECT_GHOSTRUN_PATH, 'config.json');
+
+type InteractionMode = 'assist' | 'auto';
+type AiCiPolicy = 'off' | 'summary-only' | 'on';
+
+interface GhostrunConfig {
+  project?: {
+    name?: string;
+    workspaceVersion?: string;
+  };
+  interactionMode?: InteractionMode;
+  activeProfile?: string;
+  features?: {
+    crawlee?: {
+      enabled?: boolean;
+    };
+  };
+  ai?: {
+    provider?: 'auto' | 'ollama' | 'anthropic';
+    model?: string;
+    trackUsage?: boolean;
+    storeSanitizedTranscripts?: boolean;
+  };
+  policies?: {
+    allowAutoRepairApply?: boolean;
+    allowAiInCi?: AiCiPolicy;
+    requireApprovalForFlowMutation?: boolean;
+    requireApprovalForSecretUse?: boolean;
+    autoImproveEnabled?: boolean;
+    maxAutoImproveIterations?: number;
+    maxRepairAttemptsPerRun?: number;
+    maxSameFailureRepeats?: number;
+    visualDiffThresholdPercent?: number;
+  };
+  integrations?: {
+    github?: {
+      enabled?: boolean;
+      owner?: string;
+      repo?: string;
+      labels?: string[];
+      createOn?: Array<'ci-failure' | 'monitor-failure' | 'local-failure'>;
+    };
+    linear?: {
+      enabled?: boolean;
+      teamId?: string;
+      projectId?: string;
+      label?: string;
+      priority?: number;
+      createOn?: Array<'ci-failure' | 'monitor-failure' | 'local-failure'>;
+    };
+  };
+}
+
+const EVIDENCE_SCHEMA_VERSION = '1.3';
+
+/** Legacy colon commands removed in v1.3.0 — use canonical replacements */
+const LEGACY_COMMAND_MAP: Record<string, string> = {
+  'repair:list': 'ghostrun repair list',
+  'repair:show': 'ghostrun repair show <id>',
+  'repair:apply': 'ghostrun repair apply <id>',
+  'profile:list': 'ghostrun profile list',
+  'profile:show': 'ghostrun profile show <name>',
+  'profile:create': 'ghostrun profile create <name>',
+  'profile:use': 'ghostrun profile use <name>',
+  'profile:set': 'ghostrun profile set <name> <key> <value>',
+  'profile:delete': 'ghostrun profile delete <name>',
+  'run:show': 'ghostrun report show <run-id>',
+  'run:diff': 'ghostrun report diff <run1> <run2>',
+  'run:analyze': 'ghostrun report analyze <run-id>',
+  'run:list': 'ghostrun report list',
+  'flow:list': 'ghostrun flow:list',
+  'flow:schedule': 'ghostrun monitor schedule add <id> "<cron>"',
+  'schedule:list': 'ghostrun monitor schedule list',
+  'schedule:remove': 'ghostrun monitor schedule remove <id>',
+  'learn': 'ghostrun author record <url>',
+  'create': 'ghostrun author create "<description>"',
+  'flow:fix': 'ghostrun repair (interactive: flow:fix still works)',
+  'baseline:set': 'ghostrun baseline:set <flow>',
+  'baseline:show': 'ghostrun baseline:show <flow>',
+  'baseline:clear': 'ghostrun baseline:clear <flow>',
+  'suite:run': 'ghostrun run --suite <name>',
+  'ai:usage': 'ghostrun ai usage',
+  'ai:status': 'ghostrun ai status',
+  'ai:sessions': 'ghostrun ai sessions',
+};
+
+function rejectLegacyCommand(cmd: string): void {
+  const replacement = LEGACY_COMMAND_MAP[cmd];
+  if (!replacement) return;
+  errorMsg(`Command "${cmd}" was removed in GhostRun v1.3.0.\n  Use: ${replacement}`);
+  process.exit(1);
+}
+
+function getSchedulerPidPath(): string {
+  return path.join(PROJECT_GHOSTRUN_PATH, 'scheduler.pid');
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface GhostrunProfile {
+  name: string;
+  baseUrl?: string;
+  variables?: Record<string, string>;
+  auth?: {
+    strategy?: 'none' | 'form' | 'storage-state' | 'basic-auth' | 'bearer-token' | 'otp-bypass';
+    loginFlow?: string;
+    username?: string;
+    usernameVar?: string;
+    usernameSecret?: string;
+    passwordSecret?: string;
+    tokenSecret?: string;
+    /** Env var for staging test OTP (default 000000 when unset) */
+    otpSecret?: string;
+    /** Flow variable for OTP code (default testOtp) */
+    otpVar?: string;
+    storageState?: string;
+  };
+  metadata?: Record<string, string>;
+  services?: ProfileServices;
+  /** SaaS account types: superadmin, admin, manager, guest — email + password per role */
+  accounts?: Record<string, ProfileAccount>;
+  defaultAccount?: string;
+}
+
+interface AiUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
+}
+
+interface AiSessionRecord {
+  id: string;
+  timestamp: string;
+  mode: string;
+  provider: string;
+  model: string;
+  interactionMode: InteractionMode;
+  durationMs: number;
+  usage: AiUsage;
+  promptHash: string;
+  promptPreview: string;
+  responsePreview: string;
+  metadata?: Record<string, string>;
+}
+
+type RepairType = 'selector' | 'assertion' | 'wait' | 'url' | 'config' | 'visual';
+
+interface RepairProposal {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  status: 'proposed' | 'applied' | 'rejected';
+  source: 'ai-heal' | 'ai-summary' | 'human';
+  repairType?: RepairType;
+  flowId: string;
+  flowName: string;
+  runId?: string;
+  nodeId?: string;
+  stepNumber?: number;
+  action?: string;
+  currentSelector?: string;
+  proposedSelector?: string;
+  currentValue?: string;
+  proposedValue?: string;
+  errorMessage?: string;
+  rationale?: string;
+}
+
+interface MonitorAlertPayload {
+  event: 'ghostrun.monitor.alert';
+  flowId: string;
+  flowName: string;
+  profile: string | null;
+  consecutiveFailures: number;
+  error: string | null;
+  timestamp: string;
+}
+
+interface ImproveReport {
+  id: string;
+  createdAt: string;
+  status: 'generated' | 'blocked';
+  autoImproveEnabled: boolean;
+  interactionMode: InteractionMode;
+  activeProfile?: string;
+  findings: string[];
+  actions: string[];
+  summary?: string;
+  safeguards: string[];
+}
+
+interface ScrapedField {
+  type: string;
+  name: string;
+  placeholder: string;
+  label: string;
+  selector: string;
+  required: boolean;
+}
+
+interface ScrapedPage {
+  url: string;
+  title: string;
+  description: string;
+  headings: string[];
+  links: Array<{ text: string; href: string }>;
+  forms: Array<{ selector: string; fields: ScrapedField[]; submitText: string; submitSelector: string | null }>;
+  buttons: Array<{ text: string; selector: string }>;
+  selected: Array<{ selector: string; text: string; html: string }>;
+  text: string;
+}
+
+interface ScrapeResult {
+  id: string;
+  url: string;
+  status: string;
+  reason: string;
+  maxPages: number;
+  selector?: string;
+  pages: ScrapedPage[];
+  resultPath: string;
+  createdAt: string;
+}
+
+function defaultConfig(): GhostrunConfig {
+  return {
+    project: {
+      name: path.basename(process.cwd()),
+      workspaceVersion: '1',
+    },
+    interactionMode: 'assist',
+    features: {
+      crawlee: { enabled: false },
+    },
+    ai: {
+      provider: 'auto',
+      trackUsage: true,
+      storeSanitizedTranscripts: true,
+    },
+    policies: {
+      allowAutoRepairApply: false,
+      allowAiInCi: 'summary-only',
+      requireApprovalForFlowMutation: true,
+      requireApprovalForSecretUse: true,
+      autoImproveEnabled: false,
+      maxAutoImproveIterations: 3,
+      maxRepairAttemptsPerRun: 2,
+      maxSameFailureRepeats: 2,
+      visualDiffThresholdPercent: 5,
+    },
+    integrations: {
+      github: { enabled: false, labels: ['ghostrun', 'qa-failure'], createOn: ['ci-failure'] },
+      linear: { enabled: false, label: 'ghostrun', createOn: ['ci-failure'] },
+    },
+  };
+}
+
+function readSingleConfig(filePath: string): GhostrunConfig {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as GhostrunConfig;
+  } catch {
+    return {};
+  }
+}
+
+function readConfig(): GhostrunConfig {
+  const base = defaultConfig();
+  const globalConfig = readSingleConfig(GLOBAL_CONFIG_PATH);
+  const projectConfig = readSingleConfig(PROJECT_CONFIG_PATH);
+  return {
+    ...base,
+    ...globalConfig,
+    ...projectConfig,
+    project: { ...base.project, ...(globalConfig.project || {}), ...(projectConfig.project || {}) },
+    features: {
+      ...base.features,
+      ...(globalConfig.features || {}),
+      ...(projectConfig.features || {}),
+      crawlee: {
+        ...(base.features?.crawlee || {}),
+        ...((globalConfig.features || {}).crawlee || {}),
+        ...((projectConfig.features || {}).crawlee || {}),
+      },
+    },
+    ai: { ...base.ai, ...(globalConfig.ai || {}), ...(projectConfig.ai || {}) },
+    policies: { ...base.policies, ...(globalConfig.policies || {}), ...(projectConfig.policies || {}) },
+    integrations: {
+      ...base.integrations,
+      ...(globalConfig.integrations || {}),
+      ...(projectConfig.integrations || {}),
+      github: {
+        ...(base.integrations?.github || {}),
+        ...((globalConfig.integrations || {}).github || {}),
+        ...((projectConfig.integrations || {}).github || {}),
+      },
+      linear: {
+        ...(base.integrations?.linear || {}),
+        ...((globalConfig.integrations || {}).linear || {}),
+        ...((projectConfig.integrations || {}).linear || {}),
+      },
+    },
+  };
+}
+
+function writeConfig(config: GhostrunConfig, scope: 'global' | 'project' = 'project') {
+  const configPath = scope === 'global' ? GLOBAL_CONFIG_PATH : PROJECT_CONFIG_PATH;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+}
+
+function ensureProjectWorkspace() {
+  initProjectContext();
+  refreshProjectConstants();
+  const paths = getProjectPaths();
+  ensureProjectDirs(paths);
+  copyDevServicesTemplate();
+  updateProjectGitignore();
+  ensureProjectJson(readConfig().project?.name);
+
+  if (!fs.existsSync(PROJECT_CONFIG_PATH)) writeConfig(defaultConfig(), 'project');
+
+  const secretsReadme = path.join(PROJECT_GHOSTRUN_PATH, 'auth', 'secrets', 'README.txt');
+  if (!fs.existsSync(secretsReadme)) {
+    fs.writeFileSync(secretsReadme, [
+      'Store local secret files here (gitignored).',
+      'Prefer environment variables or your CI secret store when possible.',
+      'Example: echo "my-token" > STAGING_API_TOKEN.txt',
+      '',
+    ].join('\n'));
+  }
+}
+
+function getInteractionMode(): InteractionMode {
+  return readConfig().interactionMode || 'assist';
+}
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function shortHash(input: string): string {
+  return createHash('sha256').update(input).digest('hex').slice(0, 24);
+}
+
+function recordAiSession(entry: Omit<AiSessionRecord, 'id' | 'timestamp'>) {
+  ensureProjectWorkspace();
+  const record: AiSessionRecord = {
+    id: uuidv4(),
+    timestamp: new Date().toISOString(),
+    ...entry,
+  };
+  const filePath = path.join(PROJECT_GHOSTRUN_PATH, 'ai', 'sessions', `${record.timestamp.replace(/[:.]/g, '-')}-${record.id.slice(0, 8)}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(record, null, 2));
+}
+
+function listAiSessions(limit = 50): AiSessionRecord[] {
+  const dir = path.join(PROJECT_GHOSTRUN_PATH, 'ai', 'sessions');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .sort()
+    .reverse()
+    .slice(0, limit)
+    .map(f => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as AiSessionRecord;
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is AiSessionRecord => Boolean(x));
+}
+
+function aggregateAiUsage() {
+  const sessions = listAiSessions(5000);
+  const byProvider: Record<string, { calls: number; inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }> = {};
+  let calls = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let estimatedCostUsd = 0;
+  for (const session of sessions) {
+    calls++;
+    inputTokens += session.usage.inputTokens || 0;
+    outputTokens += session.usage.outputTokens || 0;
+    totalTokens += session.usage.totalTokens || 0;
+    estimatedCostUsd += session.usage.estimatedCostUsd || 0;
+    const key = `${session.provider}:${session.model}`;
+    byProvider[key] = byProvider[key] || { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 };
+    byProvider[key].calls++;
+    byProvider[key].inputTokens += session.usage.inputTokens || 0;
+    byProvider[key].outputTokens += session.usage.outputTokens || 0;
+    byProvider[key].totalTokens += session.usage.totalTokens || 0;
+    byProvider[key].estimatedCostUsd += session.usage.estimatedCostUsd || 0;
+  }
+  return { calls, inputTokens, outputTokens, totalTokens, estimatedCostUsd, byProvider, sessions };
+}
+
+function getProfilesDir(): string {
+  ensureProjectWorkspace();
+  return path.join(PROJECT_GHOSTRUN_PATH, 'profiles');
+}
+
+function profilePath(name: string): string {
+  return path.join(getProfilesDir(), `${name}.json`);
+}
+
+function listProfiles(): GhostrunProfile[] {
+  const dir = getProfilesDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .sort()
+    .map(f => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as GhostrunProfile;
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is GhostrunProfile => Boolean(x));
+}
+
+function getProfile(name: string): GhostrunProfile | null {
+  const filePath = profilePath(name);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as GhostrunProfile;
+  } catch {
+    return null;
+  }
+}
+
+function saveProfile(profile: GhostrunProfile) {
+  fs.writeFileSync(profilePath(profile.name), JSON.stringify(profile, null, 2));
+}
+
+function deleteProfile(name: string): boolean {
+  const filePath = profilePath(name);
+  if (!fs.existsSync(filePath)) return false;
+  fs.unlinkSync(filePath);
+  return true;
+}
+
+function getSelectedProfileName(argv: string[] = process.argv.slice(2)): string | null {
+  const idx = argv.indexOf('--profile');
+  if (idx !== -1 && argv[idx + 1]) return argv[idx + 1];
+  return readConfig().activeProfile || null;
+}
+
+function getSelectedProfile(argv: string[] = process.argv.slice(2)): GhostrunProfile | null {
+  const name = getSelectedProfileName(argv);
+  return name ? getProfile(name) : null;
+}
+
+function getProjectSecretsDir(): string {
+  ensureProjectWorkspace();
+  const dir = path.join(PROJECT_GHOSTRUN_PATH, 'auth', 'secrets');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function sessionFilePath(name: string): string {
+  return path.join(DATA_PATH, 'sessions', `${name}.json`);
+}
+
+function getProjectStorageStateDir(): string {
+  ensureProjectWorkspace();
+  const dir = path.join(PROJECT_GHOSTRUN_PATH, 'auth', 'storage-state');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function normalizeSecretEnvKey(name: string): string {
+  return name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
+}
+
+function errorSignature(message: string | undefined): string {
+  return (message || 'unknown')
+    .replace(/\d+ms/g, 'Nms')
+    .replace(/[0-9a-f]{8,}/gi, '[id]')
+    .slice(0, 160);
+}
+
+function getRecentFailureRepeatCount(flowId: string, errorMessage: string): number {
+  const signature = errorSignature(errorMessage);
+  return db.listRuns(flowId, 50).filter(run =>
+    run.status === 'failed' &&
+    errorSignature(run.errorMessage || '') === signature
+  ).length;
+}
+
+function getSelectorRepairAttemptCount(proposal: Pick<RepairProposal, 'flowId' | 'nodeId'>): number {
+  return listRepairProposals(500).filter(item =>
+    item.flowId === proposal.flowId &&
+    item.nodeId === proposal.nodeId &&
+    item.status === 'applied'
+  ).length;
+}
+
+function getRepairType(proposal: RepairProposal): RepairType {
+  if (proposal.repairType) return proposal.repairType;
+  if (proposal.proposedSelector) return 'selector';
+  if (proposal.proposedValue && ['assert:text', 'assert:title', 'assert:url', 'assert:response', 'assert:status'].includes(proposal.action || '')) {
+    return 'assertion';
+  }
+  if (proposal.action === 'wait' || proposal.action === 'wait:ms') return 'wait';
+  if (proposal.action === 'navigate') return 'url';
+  if (proposal.repairType === 'visual' || proposal.errorMessage?.includes('[DIFF:')) return 'visual';
+  return 'config';
+}
+
+async function postMonitorWebhook(url: string, payload: MonitorAlertPayload): Promise<void> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      console.log(chalk.yellow(`  notify webhook failed: HTTP ${res.status}`));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  notify webhook error: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+
+async function postSlackAlert(webhookUrl: string, text: string): Promise<void> {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      console.log(chalk.yellow(`  Slack notify failed: HTTP ${res.status}`));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  Slack notify error: ${err instanceof Error ? err.message : String(err)}`));
+  }
+}
+
+function resolveMonitorNotificationTargets(extraArgs: string[], profile: GhostrunProfile | null): {
+  webhookUrl?: string;
+  slackWebhook?: string;
+  threshold: number;
+  enabled: boolean;
+} {
+  const webhookUrl = parseFlagValue(extraArgs, '--notify-webhook')
+    || profile?.metadata?.notifyWebhook
+    || process.env.GHOSTRUN_NOTIFY_WEBHOOK;
+  const slackWebhook = process.env.GHOSTRUN_SLACK_WEBHOOK
+    || profile?.metadata?.slackWebhook;
+  const thresholdRaw = parseFlagValue(extraArgs, '--notify-after')
+    || profile?.metadata?.notifyAfterFailures
+    || '3';
+  const threshold = Math.max(1, parseInt(thresholdRaw, 10) || 3);
+  const disabled = extraArgs.includes('--no-notify')
+    || profile?.metadata?.notifyOnFailure === 'false';
+  return {
+    webhookUrl: webhookUrl || undefined,
+    slackWebhook: slackWebhook || undefined,
+    threshold,
+    enabled: !disabled && Boolean(webhookUrl || slackWebhook),
+  };
+}
+
+async function sendMonitorAlert(opts: {
+  flow: { id: string; name: string };
+  profileName?: string;
+  consecutiveFailures: number;
+  error?: string;
+  webhookUrl?: string;
+  slackWebhook?: string;
+}): Promise<void> {
+  const payload: MonitorAlertPayload = {
+    event: 'ghostrun.monitor.alert',
+    flowId: opts.flow.id,
+    flowName: opts.flow.name,
+    profile: opts.profileName || null,
+    consecutiveFailures: opts.consecutiveFailures,
+    error: opts.error || null,
+    timestamp: new Date().toISOString(),
+  };
+  if (opts.webhookUrl) await postMonitorWebhook(opts.webhookUrl, payload);
+  if (opts.slackWebhook) {
+    const text = `:rotating_light: GhostRun monitor alert: *${opts.flow.name}* failed ${opts.consecutiveFailures}x in a row${opts.error ? `\n> ${opts.error}` : ''}`;
+    await postSlackAlert(opts.slackWebhook, text);
+  }
+}
+
+function buildAuthorContext(profileName?: string | null): string {
+  const hints: string[] = [];
+  if (profileName) {
+    const profile = getProfile(profileName);
+    if (profile?.baseUrl) hints.push(`Active profile "${profileName}" baseUrl: ${profile.baseUrl}`);
+    if (profile?.variables && Object.keys(profile.variables).length) {
+      hints.push(`Profile variables: ${Object.keys(profile.variables).join(', ')}`);
+    }
+  }
+
+  const flows = db.listFlows().slice(0, 8);
+  if (flows.length) {
+    hints.push(`Existing flow patterns: ${flows.map(f => f.name).join(', ')}`);
+  }
+
+  const scrapesDir = SCRAPES_PATH;
+  if (fs.existsSync(scrapesDir)) {
+    const recentScrapes = fs.readdirSync(scrapesDir)
+      .filter(f => f.endsWith('.json'))
+      .sort()
+      .reverse()
+      .slice(0, 2);
+    for (const file of recentScrapes) {
+      try {
+        const scrape = JSON.parse(fs.readFileSync(path.join(scrapesDir, file), 'utf8')) as { pages?: ScrapedPage[] };
+        const page = scrape.pages?.[0];
+        if (page?.forms?.length) {
+          hints.push(`Recent form selectors on ${page.url}: ${page.forms[0].fields.slice(0, 4).map(f => f.selector).join(', ')}`);
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  return hints.length ? `\nProject context:\n${hints.map(h => `- ${h}`).join('\n')}` : '';
+}
+
+function detectFlakyFlows(limit = 10): string[] {
+  const flaky: string[] = [];
+  for (const flow of db.listFlows()) {
+    const runs = db.listRuns(flow.id, limit);
+    if (runs.length < 4) continue;
+    const statuses = runs.map(r => r.status);
+    if (!statuses.includes('passed') || !statuses.includes('failed')) continue;
+    let transitions = 0;
+    for (let i = 1; i < statuses.length; i++) {
+      if (statuses[i] !== statuses[i - 1]) transitions++;
+    }
+    if (transitions >= 2) flaky.push(flow.name);
+  }
+  return flaky;
+}
+
+async function createFailureRepairProposal(params: {
+  action: string;
+  errorMessage: string;
+  page: import('playwright').Page | null;
+  node: Record<string, unknown>;
+  flow: { id: string; name: string };
+  runId: string;
+  stepNum: number;
+  selectedProfile: GhostrunProfile | null;
+}): Promise<RepairProposal | null> {
+  const { action, errorMessage, page, node, flow, runId, stepNum, selectedProfile } = params;
+
+  if (['assert:text', 'assert:title', 'assert:url'].includes(action)) {
+    let actualValue = '';
+    if (page) {
+      if (action === 'assert:text') {
+        actualValue = await page.evaluate(() => document.body.innerText.slice(0, 500)).catch(() => '');
+      } else if (action === 'assert:title') {
+        actualValue = await page.title().catch(() => '');
+      } else if (action === 'assert:url') {
+        actualValue = page.url();
+      }
+    }
+    const expected = String(node.value || '');
+    let proposed = expected;
+    if (action === 'assert:text' && actualValue) {
+      const lines = actualValue.split('\n').map(l => l.trim()).filter(Boolean);
+      const candidate = lines.find(l => l.length > 3 && l.length < 80);
+      if (candidate) proposed = candidate;
+    } else if (action === 'assert:title' && actualValue) {
+      proposed = actualValue.split(' ').slice(0, 5).join(' ');
+    } else if (action === 'assert:url' && actualValue) {
+      try {
+        proposed = new URL(actualValue).pathname;
+      } catch {
+        proposed = actualValue;
+      }
+    }
+    if (proposed === expected) return null;
+    return createRepairProposal({
+      source: 'ai-heal',
+      repairType: 'assertion',
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ''),
+      stepNumber: stepNum,
+      action,
+      currentValue: expected,
+      proposedValue: proposed,
+      errorMessage,
+      rationale: `Assertion failed. Expected "${expected}" but observed "${actualValue.slice(0, 120)}". Review whether the expected value should be updated.`,
+    });
+  }
+
+  if (action === 'wait' || errorMessage.toLowerCase().includes('timeout')) {
+    return createRepairProposal({
+      source: 'ai-heal',
+      repairType: 'wait',
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ''),
+      stepNumber: stepNum,
+      action,
+      currentSelector: node.selector as string | undefined,
+      currentValue: '10000',
+      proposedValue: '20000',
+      errorMessage,
+      rationale: 'Step timed out waiting for an element. Consider increasing wait time or switching to wait:text / wait:url.',
+    });
+  }
+
+  if (action === 'navigate' && /404|net::ERR|Navigation|ENOTFOUND/i.test(errorMessage)) {
+    const profileHint = selectedProfile?.baseUrl
+      ? `Check profile baseUrl (${selectedProfile.baseUrl}) or update the flow URL.`
+      : 'Set baseUrl in your active profile.';
+    return createRepairProposal({
+      source: 'ai-heal',
+      repairType: 'url',
+      flowId: flow.id,
+      flowName: flow.name,
+      runId,
+      nodeId: String(node.id || ''),
+      stepNumber: stepNum,
+      action,
+      currentValue: String(node.url || node.value || ''),
+      proposedValue: selectedProfile?.baseUrl || '',
+      errorMessage,
+      rationale: `Navigation failed. ${profileHint}`,
+    });
+  }
+
+  return null;
+}
+
+async function resolveSecretValue(ref?: string): Promise<string | undefined> {
+  if (!ref) return undefined;
+
+  const envCandidates = [ref, normalizeSecretEnvKey(ref)];
+  for (const key of envCandidates) {
+    if (process.env[key]) return process.env[key];
+  }
+
+  const fileCandidates = [
+    path.join(getProjectSecretsDir(), ref),
+    path.join(getProjectSecretsDir(), `${ref}.txt`),
+  ];
+  for (const filePath of fileCandidates) {
+    if (!fs.existsSync(filePath)) continue;
+    const value = fs.readFileSync(filePath, 'utf8').trim();
+    if (value) return value;
+  }
+
+  try {
+    const vaultModule = await import('./packages/vault/src/vault');
+    const vault = vaultModule.createVault();
+    const credential = await vault.getByName(ref);
+    if (credential?.password) return credential.password;
+  } catch {
+    // Ignore vault errors and fall back to undefined
+  }
+
+  return undefined;
+}
+
+function resolveStorageStatePath(profile: GhostrunProfile): string | undefined {
+  const raw = profile.auth?.storageState?.trim();
+  if (!raw) {
+    const fallback = path.join(getProjectStorageStateDir(), `${profile.name}.json`);
+    return fs.existsSync(fallback) ? fallback : undefined;
+  }
+  const filePath = path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);
+  if (fs.existsSync(filePath)) return filePath;
+  const projectPath = path.join(getProjectStorageStateDir(), raw.endsWith('.json') ? raw : `${raw}.json`);
+  return fs.existsSync(projectPath) ? projectPath : undefined;
+}
+
+interface ResolvedProfileAuth {
+  strategy: NonNullable<GhostrunProfile['auth']>['strategy'];
+  summary: string;
+  sessionLoadName?: string;
+  browserContextOptions?: {
+    storageState?: string;
+    httpCredentials?: { username: string; password: string };
+    extraHTTPHeaders?: Record<string, string>;
+  };
+  apiAuth?: ExecutionContext['profileAuth'];
+  injectedVars?: Record<string, string>;
+}
+
+async function resolveProfileAuth(profile: GhostrunProfile, runVars: Record<string, string>, flowId: string, opts?: { ci?: boolean; visible?: boolean; quiet?: boolean; accountId?: string | null }): Promise<ResolvedProfileAuth | null> {
+  const accountId = opts?.accountId ?? null;
+  const auth = getEffectiveAuthForAccount(profile, accountId);
+  const strategy = auth?.strategy || profile.auth?.strategy || 'none';
+  if (strategy === 'none') return null;
+
+  const injectedVars: Record<string, string> = {};
+  const usernameVar = auth?.usernameVar || profile.auth?.usernameVar;
+  const resolvedUsername = profile.auth?.username
+    || (usernameVar ? runVars[usernameVar] : undefined)
+    || runVars.accountEmail
+    || runVars.testEmail
+    || await resolveSecretValue(auth?.usernameSecret || profile.auth?.usernameSecret)
+    || runVars.PROFILE_AUTH_USERNAME
+    || runVars.AUTH_USERNAME;
+
+  if (resolvedUsername) {
+    injectedVars.PROFILE_AUTH_USERNAME = resolvedUsername;
+    if (usernameVar && !runVars[usernameVar]) {
+      injectedVars[usernameVar] = resolvedUsername;
+    }
+    if (!runVars.testEmail) injectedVars.testEmail = resolvedUsername;
+    if (!runVars.accountEmail) injectedVars.accountEmail = resolvedUsername;
+  }
+
+  switch (strategy) {
+    case 'storage-state': {
+      const storageStatePath = resolveStorageStatePath(profile);
+      if (!storageStatePath) {
+        throw new Error(`Profile "${profile.name}" uses storage-state auth but no storage state file was found.`);
+      }
+      return {
+        strategy: 'storage-state',
+        summary: accountId ? `storage-state:${path.basename(storageStatePath)} (${accountId})` : `storage-state:${path.basename(storageStatePath)}`,
+        browserContextOptions: { storageState: storageStatePath },
+        injectedVars,
+      };
+    }
+    case 'basic-auth': {
+      const password = await resolveSecretValue(auth?.passwordSecret || profile.auth?.passwordSecret);
+      if (!resolvedUsername || !password) {
+        throw new Error(`Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ''} needs email and password for basic-auth.`);
+      }
+      injectedVars.PROFILE_AUTH_PASSWORD = password;
+      return {
+        strategy: 'basic-auth',
+        summary: accountId ? `basic-auth (${accountId})` : 'basic-auth',
+        browserContextOptions: {
+          httpCredentials: { username: resolvedUsername, password },
+        },
+        apiAuth: { type: 'basic', username: resolvedUsername, password },
+        injectedVars,
+      };
+    }
+    case 'bearer-token': {
+      const token = await resolveSecretValue(auth?.tokenSecret || profile.auth?.tokenSecret || auth?.passwordSecret);
+      if (!token) {
+        throw new Error(`Profile "${profile.name}" needs tokenSecret for bearer-token auth.`);
+      }
+      injectedVars.PROFILE_AUTH_TOKEN = token;
+      return {
+        strategy: 'bearer-token',
+        summary: accountId ? `bearer-token (${accountId})` : 'bearer-token',
+        browserContextOptions: {
+          extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+        },
+        apiAuth: { type: 'bearer', token },
+        injectedVars,
+      };
+    }
+    case 'form': {
+      const loginFlow = auth?.loginFlow || profile.auth?.loginFlow;
+      if (!loginFlow) {
+        throw new Error(`Profile "${profile.name}" uses form auth but has no auth.loginFlow configured.`);
+      }
+      const password = await resolveSecretValue(auth?.passwordSecret || profile.auth?.passwordSecret);
+      if (!resolvedUsername) {
+        throw new Error(
+          `Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ''} needs an email for form login. ` +
+          `Set email on the account, emailSecret env var, or variables.testEmail.`,
+        );
+      }
+      if (!password) {
+        throw new Error(
+          `Profile "${profile.name}"${accountId ? ` account "${accountId}"` : ''} needs password secret ` +
+          `"${auth?.passwordSecret || profile.auth?.passwordSecret}".`,
+        );
+      }
+      injectedVars.PROFILE_AUTH_PASSWORD = password;
+      const passKey = auth?.passwordSecret || profile.auth?.passwordSecret;
+      if (passKey && !runVars[passKey]) {
+        injectedVars[passKey] = password;
+      }
+      const sessionLoadName = `profile-auth-${flowId.slice(0, 8)}-${shortHash(`${profile.name}:${accountId || 'default'}:${Date.now()}`)}`;
+      const authRun = await executeFlow(loginFlow, { ...runVars, ...injectedVars }, {
+        visible: opts?.visible,
+        quiet: true,
+        ci: opts?.ci,
+        allowAiSummary: false,
+        sessionSave: sessionLoadName,
+        skipProfileAuth: true,
+      });
+      if (!authRun.passed) {
+        throw new Error(`Profile login flow failed${accountId ? ` (${accountId})` : ''}: ${authRun.error || 'authentication run failed'}`);
+      }
+      return {
+        strategy: 'form',
+        summary: accountId ? `form:${loginFlow} (${accountId})` : `form:${loginFlow}`,
+        sessionLoadName,
+        injectedVars,
+      };
+    }
+    case 'otp-bypass': {
+      const loginFlow = auth?.loginFlow || profile.auth?.loginFlow;
+      if (!loginFlow) {
+        throw new Error(`Profile "${profile.name}" uses otp-bypass auth but has no auth.loginFlow configured.`);
+      }
+      const otpVar = auth?.otpVar || profile.auth?.otpVar || 'testOtp';
+      const otpSecret = auth?.otpSecret || profile.auth?.otpSecret || 'STAGING_TEST_OTP';
+      const otpFromEnv = await resolveSecretValue(otpSecret);
+      const testOtp = otpFromEnv || process.env[otpSecret] || '000000';
+      injectedVars[otpVar] = testOtp;
+      injectedVars.testOtp = testOtp;
+      injectedVars.PROFILE_AUTH_OTP = testOtp;
+      if (otpSecret && !runVars[otpSecret]) injectedVars[otpSecret] = testOtp;
+
+      if (resolvedUsername) {
+        injectedVars.testPhone = resolvedUsername;
+        injectedVars.accountPhone = resolvedUsername;
+      }
+
+      const sessionLoadName = `profile-auth-${flowId.slice(0, 8)}-${shortHash(`${profile.name}:${accountId || 'default'}:otp:${Date.now()}`)}`;
+      const authRun = await executeFlow(loginFlow, { ...runVars, ...injectedVars }, {
+        visible: opts?.visible,
+        quiet: true,
+        ci: opts?.ci,
+        allowAiSummary: false,
+        sessionSave: sessionLoadName,
+        skipProfileAuth: true,
+      });
+      if (!authRun.passed) {
+        throw new Error(`Profile OTP login flow failed${accountId ? ` (${accountId})` : ''}: ${authRun.error || 'authentication run failed'}`);
+      }
+      return {
+        strategy: 'otp-bypass',
+        summary: accountId ? `otp-bypass:${loginFlow} (${accountId})` : `otp-bypass:${loginFlow}`,
+        sessionLoadName,
+        injectedVars,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function isProductionLike(profile: GhostrunProfile | null, startUrl?: string): boolean {
+  if (profile?.name?.toLowerCase() === 'production') return true;
+  if (profile?.metadata?.tier?.toLowerCase() === 'production') return true;
+  if (!startUrl) return false;
+  return getEnvLabel(startUrl).label === 'production';
+}
+
+function getRepairProposalsDir(): string {
+  ensureProjectWorkspace();
+  return path.join(PROJECT_GHOSTRUN_PATH, 'proposals', 'repairs');
+}
+
+function writeRepairProposal(proposal: RepairProposal) {
+  const filePath = path.join(getRepairProposalsDir(), `${proposal.createdAt.replace(/[:.]/g, '-')}-${proposal.id.slice(0, 8)}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(proposal, null, 2));
+}
+
+function countRepairProposalsForRun(runId: string): number {
+  return listRepairProposals(200).filter(p => p.runId === runId).length;
+}
+
+function createRepairProposal(data: Omit<RepairProposal, 'id' | 'createdAt' | 'updatedAt' | 'status'>): RepairProposal | null {
+  const maxAttempts = readConfig().policies?.maxRepairAttemptsPerRun ?? 2;
+  if (data.runId && countRepairProposalsForRun(data.runId) >= maxAttempts) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const proposal: RepairProposal = {
+    id: uuidv4(),
+    createdAt: now,
+    updatedAt: now,
+    status: 'proposed',
+    ...data,
+  };
+  writeRepairProposal(proposal);
+  return proposal;
+}
+
+function listRepairProposals(limit = 50): RepairProposal[] {
+  const dir = getRepairProposalsDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .sort()
+    .reverse()
+    .slice(0, limit)
+    .map(f => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as RepairProposal;
+      } catch {
+        return null;
+      }
+    })
+    .filter((x): x is RepairProposal => Boolean(x));
+}
+
+function findRepairProposal(id: string): { proposal: RepairProposal; filePath: string } | null {
+  const dir = getRepairProposalsDir();
+  if (!fs.existsSync(dir)) return null;
+  for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse()) {
+    const filePath = path.join(dir, file);
+    try {
+      const proposal = JSON.parse(fs.readFileSync(filePath, 'utf8')) as RepairProposal;
+      if (proposal.id.startsWith(id)) return { proposal, filePath };
+    } catch {}
+  }
+  return null;
+}
+
+function updateRepairProposal(id: string, updates: Partial<RepairProposal>): RepairProposal | null {
+  const found = findRepairProposal(id);
+  if (!found) return null;
+  const next: RepairProposal = {
+    ...found.proposal,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(found.filePath, JSON.stringify(next, null, 2));
+  return next;
+}
+
+function getImproveReportsDir(): string {
+  ensureProjectWorkspace();
+  return path.join(PROJECT_GHOSTRUN_PATH, 'reports', 'improve');
+}
+
+function saveImproveReport(report: ImproveReport) {
+  fs.mkdirSync(getImproveReportsDir(), { recursive: true });
+  const filePath = path.join(getImproveReportsDir(), `${report.createdAt.replace(/[:.]/g, '-')}-${report.id.slice(0, 8)}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(report, null, 2));
+  return filePath;
+}
+
+function isCrawleeEnabled(): boolean {
+  return readConfig().features?.crawlee?.enabled === true;
+}
+
+function setCrawleeEnabled(enabled: boolean) {
+  const config = readConfig();
+  config.features = config.features || {};
+  config.features.crawlee = { ...(config.features.crawlee || {}), enabled };
+  writeConfig(config, 'project');
+}
+
+async function loadCrawlee(): Promise<{ PlaywrightCrawler: any; log?: any; LogLevel?: any }> {
+  try {
+    const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
+    return await dynamicImport('crawlee') as { PlaywrightCrawler: any; log?: any; LogLevel?: any };
+  } catch {
+    throw new Error('Crawlee is not installed. Run: npm install crawlee');
+  }
+}
 
 // ============================================
 // PII SANITIZER
@@ -59,6 +1198,13 @@ interface ExecutionContext {
   variables: Record<string, string>;
   lastResponse?: ApiResponse;
   environmentName?: string;
+  profileAuth?: {
+    type: 'basic' | 'bearer';
+    username?: string;
+    password?: string;
+    token?: string;
+  };
+  profileServices?: ProfileServices;
 }
 
 function resolveVarsDeep(value: unknown, ctx: ExecutionContext): unknown {
@@ -108,6 +1254,11 @@ async function executeHttpRequest(node: Record<string, unknown>, ctx: ExecutionC
   } else if (auth?.type === 'apikey' && auth.key) {
     const headerName = auth.header || 'X-API-Key';
     headers[headerName] = resolveVarsDeep(auth.key, ctx) as string;
+  } else if (!headers['Authorization'] && ctx.profileAuth?.type === 'bearer' && ctx.profileAuth.token) {
+    headers['Authorization'] = `Bearer ${ctx.profileAuth.token}`;
+  } else if (!headers['Authorization'] && ctx.profileAuth?.type === 'basic' && ctx.profileAuth.username) {
+    const creds = Buffer.from(`${ctx.profileAuth.username}:${ctx.profileAuth.password || ''}`).toString('base64');
+    headers['Authorization'] = `Basic ${creds}`;
   }
 
   // Build body
@@ -338,7 +1489,9 @@ async function runApiStepDirect(
   timeoutMs: number
 ): Promise<void> {
   const API_ONLY_ACTIONS = new Set(['http:request','assert:response','assert:status','assert:body',
-    'assert:header','assert:time','set:variable','extract:json','env:switch']);
+    'assert:header','assert:time','set:variable','extract:json','env:switch',
+    'email:wait','email:extract-link','email:extract-otp','webhook:wait','webhook:assert',
+    'assert:webhook-signature','services:seed','db:query','db:assert']);
   if (!API_ONLY_ACTIONS.has(action)) return; // skip browser actions silently
 
   if (action === 'http:request') {
@@ -745,34 +1898,88 @@ async function callOllama(prompt: string): Promise<string | null> {
   }
 }
 
-async function callAnthropic(prompt: string): Promise<string | null> {
+async function callAnthropic(prompt: string): Promise<{ text: string | null; usage: AiUsage; model: string } | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
     const client = new Anthropic({ apiKey });
+    const model = 'claude-3-5-haiku-20241022';
     const msg = await client.messages.create({
-      model: 'claude-3-5-haiku-20241022', max_tokens: 1024,
+      model, max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
     });
     const content = msg.content[0];
-    return content.type === 'text' ? content.text.trim() : null;
+    const text = content.type === 'text' ? content.text.trim() : null;
+    const inputTokens = Number((msg as any).usage?.input_tokens || 0);
+    const outputTokens = Number((msg as any).usage?.output_tokens || 0);
+    return {
+      text,
+      model,
+      usage: {
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      },
+    };
   } catch {
     return null;
   }
 }
 
-async function callAI(prompt: string): Promise<{ text: string; provider: string } | null> {
+async function callAI(prompt: string, options?: { mode?: string; metadata?: Record<string, string> }): Promise<{ text: string; provider: string; model: string; usage: AiUsage } | null> {
+  const startedAt = Date.now();
+  const config = readConfig();
   const provider = process.env.GHOSTRUN_AI_PROVIDER; // 'ollama' | 'anthropic' | undefined = auto
+  const interactionMode = getInteractionMode();
+  const promptSanitized = sanitizePII(prompt).slice(0, 4000);
 
   if (provider !== 'anthropic') {
     const result = await callOllama(prompt);
-    if (result) return { text: result, provider: process.env.GHOSTRUN_OLLAMA_MODEL || 'ollama' };
+    if (result) {
+      const model = process.env.GHOSTRUN_OLLAMA_MODEL || 'ollama';
+      const usage: AiUsage = {
+        inputTokens: estimateTokens(prompt),
+        outputTokens: estimateTokens(result),
+        totalTokens: estimateTokens(prompt) + estimateTokens(result),
+      };
+      if (config.ai?.trackUsage !== false) {
+        recordAiSession({
+          mode: options?.mode || 'general',
+          provider: 'ollama',
+          model,
+          interactionMode,
+          durationMs: Date.now() - startedAt,
+          usage,
+          promptHash: shortHash(promptSanitized),
+          promptPreview: promptSanitized.slice(0, 600),
+          responsePreview: sanitizePII(result).slice(0, 600),
+          metadata: options?.metadata,
+        });
+      }
+      return { text: result, provider: 'ollama', model, usage };
+    }
     if (provider === 'ollama') return null;
   }
 
   const result = await callAnthropic(prompt);
-  if (result) return { text: result, provider: 'claude' };
+  if (result?.text) {
+    if (config.ai?.trackUsage !== false) {
+      recordAiSession({
+        mode: options?.mode || 'general',
+        provider: 'anthropic',
+        model: result.model,
+        interactionMode,
+        durationMs: Date.now() - startedAt,
+        usage: result.usage,
+        promptHash: shortHash(promptSanitized),
+        promptPreview: promptSanitized.slice(0, 600),
+        responsePreview: sanitizePII(result.text).slice(0, 600),
+        metadata: options?.metadata,
+      });
+    }
+    return { text: result.text, provider: 'anthropic', model: result.model, usage: result.usage };
+  }
 
   return null;
 }
@@ -781,6 +1988,7 @@ function buildFailurePrompt(ctx: {
   flowName: string;
   steps: Array<{ stepNumber: number; name: string; action: string; selector?: string | null; status: string; errorMessage?: string | null }>;
   failedStep: { name: string; action: string; selector?: string | null; errorMessage: string };
+  scrapeContext?: string;
 }): string {
   const stepsSummary = ctx.steps.map(s =>
     `  Step ${s.stepNumber} [${s.status}]: ${s.name} (${s.action}${s.selector ? ` on "${s.selector}"` : ''})`
@@ -802,6 +2010,7 @@ Error: ${ctx.failedStep.errorMessage}
 
 Error category detected: ${errorType}
 ${selectorHint ? `Selector analysis: ${selectorHint}` : ''}
+${ctx.scrapeContext ? `\nPage scrape context:\n${ctx.scrapeContext}` : ''}
 
 Respond in EXACTLY this format (no extra text, no markdown):
 
@@ -926,6 +2135,27 @@ function askQuestion(question: string): Promise<string> {
   });
 }
 
+async function askWithMode(question: string, autoAnswer = ''): Promise<string> {
+  const mode = getInteractionMode();
+  if (mode === 'auto') {
+    const shown = autoAnswer === '' ? '(empty)' : autoAnswer;
+    info(`Auto mode: ${question.trim()} -> ${shown}`);
+    return autoAnswer;
+  }
+  return askQuestion(question);
+}
+
+async function confirmAction(question: string, defaultAnswer = false): Promise<boolean> {
+  const mode = getInteractionMode();
+  if (mode === 'auto') {
+    info(`Auto mode: ${question.trim()} -> ${defaultAnswer ? 'yes' : 'no'}`);
+    return defaultAnswer;
+  }
+  const answer = (await askQuestion(question)).toLowerCase();
+  if (!answer) return defaultAnswer;
+  return answer === 'y' || answer === 'yes';
+}
+
 function waitForDone(): Promise<void> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -1038,6 +2268,16 @@ function parseVars(argv: string[]): Record<string, string> {
       i++;
     }
   }
+  const profile = getSelectedProfile(argv);
+  if (profile?.variables) {
+    for (const [key, val] of Object.entries(profile.variables)) {
+      if (!(key in vars)) vars[key] = val;
+    }
+  }
+  if (profile?.baseUrl) {
+    if (!('BASE_URL' in vars)) vars.BASE_URL = profile.baseUrl;
+    if (!('__baseUrl' in vars)) vars.__baseUrl = profile.baseUrl;
+  }
   // Also read .ghostrun.env from CWD
   const envFile = path.join(process.cwd(), '.ghostrun.env');
   if (fs.existsSync(envFile)) {
@@ -1065,7 +2305,7 @@ function resolveVars(text: string, vars: Record<string, string>): string {
 // ============================================
 
 async function loadSession(context: import('playwright').BrowserContext, name: string) {
-  const sessionPath = path.join(DATA_PATH, 'sessions', `${name}.json`);
+  const sessionPath = sessionFilePath(name);
   if (!fs.existsSync(sessionPath)) throw new Error(`Session not found: ${name}. Run with --save-session first.`);
   const cookies = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
   await context.addCookies(cookies);
@@ -1074,10 +2314,234 @@ async function loadSession(context: import('playwright').BrowserContext, name: s
 
 async function saveSession(context: import('playwright').BrowserContext, name: string) {
   const cookies = await context.cookies();
-  const sessionPath = path.join(DATA_PATH, 'sessions', `${name}.json`);
+  const sessionPath = sessionFilePath(name);
   fs.writeFileSync(sessionPath, JSON.stringify(cookies, null, 2));
   fs.chmodSync(sessionPath, 0o600);
   return cookies.length;
+}
+
+// ============================================
+// CRAWLEE SCRAPING
+// ============================================
+
+function parseFlagValue(argv: string[], flag: string): string | undefined {
+  const idx = argv.indexOf(flag);
+  return idx >= 0 && argv[idx + 1] && !argv[idx + 1].startsWith('--') ? argv[idx + 1] : undefined;
+}
+
+function parseNumberFlag(argv: string[], flag: string, fallback: number, max: number): number {
+  const raw = parseFlagValue(argv, flag);
+  const n = raw ? parseInt(raw, 10) : fallback;
+  return Math.max(1, Math.min(Number.isFinite(n) ? n : fallback, max));
+}
+
+function summarizeScrapePage(page: ScrapedPage): string {
+  const pieces = [
+    page.title ? `Title: ${page.title}` : '',
+    page.headings.length ? `Headings: ${page.headings.slice(0, 6).join(' | ')}` : '',
+    page.buttons.length ? `Buttons: ${page.buttons.slice(0, 8).map(b => b.text).filter(Boolean).join(' | ')}` : '',
+    page.forms.length ? `Forms: ${page.forms.map(f => f.fields.map(field => field.label || field.name || field.placeholder || field.type).filter(Boolean).join(', ')).filter(Boolean).join(' | ')}` : '',
+    page.text ? `Text: ${page.text.slice(0, 800)}` : '',
+  ].filter(Boolean);
+  return pieces.join('\n');
+}
+
+function extractScrapeText(result: ScrapeResult | null): string | undefined {
+  if (!result?.pages?.length) return undefined;
+  return summarizeScrapePage(result.pages[0]);
+}
+
+async function runCrawleeScrape(url: string, options: {
+  maxPages?: number;
+  selector?: string;
+  reason?: string;
+  runId?: string;
+  stepNumber?: number;
+  exploreReportId?: string;
+  quiet?: boolean;
+  requireEnabled?: boolean;
+} = {}): Promise<ScrapeResult> {
+  if (options.requireEnabled !== false && !isCrawleeEnabled()) {
+    throw new Error('Crawlee scraping is not enabled. Run `ghostrun init` and enable website scraping.');
+  }
+
+  const maxPages = Math.max(1, Math.min(options.maxPages || 1, 100));
+  const reason = options.reason || 'manual';
+  const scrape = db.createScrapeRun({
+    url,
+    reason,
+    maxPages,
+    selector: options.selector,
+    runId: options.runId,
+    stepNumber: options.stepNumber,
+    exploreReportId: options.exploreReportId,
+  });
+  const scrapeDir = path.join(SCRAPES_PATH, scrape.id);
+  fs.mkdirSync(scrapeDir, { recursive: true });
+  const resultPath = path.join(scrapeDir, 'result.json');
+  process.env.CRAWLEE_STORAGE_DIR = path.join(scrapeDir, 'crawlee-storage');
+  const pages: ScrapedPage[] = [];
+
+  try {
+    const crawlee = await loadCrawlee();
+    const { PlaywrightCrawler } = crawlee;
+    if (options.quiet && crawlee.log && crawlee.LogLevel) {
+      crawlee.log.setLevel(crawlee.LogLevel.OFF);
+    }
+    const inputHost = new URL(url).hostname;
+    const allowedHosts = new Set([inputHost, inputHost.startsWith('www.') ? inputHost.slice(4) : `www.${inputHost}`]);
+
+    const crawler = new PlaywrightCrawler({
+      maxRequestsPerCrawl: maxPages,
+      requestHandlerTimeoutSecs: 30,
+      async requestHandler({ request, page, enqueueLinks }: any) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        await page.waitForSelector('body', { state: 'visible', timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(500).catch(() => {});
+
+        const selectedSelector = options.selector || '';
+        const scraped = await page.evaluate((selector: string) => {
+          function cleanText(value: string | null | undefined): string {
+            return (value || '').replace(/\s+/g, ' ').trim();
+          }
+          function bestSelector(el: Element): string {
+            if ((el as HTMLElement).id && !/^\d/.test((el as HTMLElement).id)) return `#${CSS.escape((el as HTMLElement).id)}`;
+            const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-cy');
+            if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+            const name = (el as HTMLInputElement).name;
+            if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+            const aria = el.getAttribute('aria-label');
+            if (aria) return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(aria)}"]`;
+            const text = cleanText((el as HTMLElement).innerText || el.textContent).slice(0, 40);
+            if ((el.tagName === 'BUTTON' || el.tagName === 'A') && text) return `${el.tagName.toLowerCase()}:has-text("${text.replace(/"/g, '\\"')}")`;
+            return el.tagName.toLowerCase();
+          }
+          function labelFor(input: Element): string {
+            const id = (input as HTMLElement).id;
+            if (id) {
+              const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+              if (label) return cleanText((label as HTMLElement).innerText);
+            }
+            const parent = input.closest('label');
+            if (parent) return cleanText((parent as HTMLElement).innerText);
+            return '';
+          }
+          function fieldFor(input: Element) {
+            return {
+              type: (input as HTMLInputElement).type || input.tagName.toLowerCase(),
+              name: (input as HTMLInputElement).name || '',
+              placeholder: (input as HTMLInputElement).placeholder || '',
+              label: labelFor(input),
+              selector: bestSelector(input),
+              required: (input as HTMLInputElement).required || false,
+            };
+          }
+
+          const forms = Array.from(document.querySelectorAll('form')).slice(0, 10).map((form, i) => {
+            const fields = Array.from(form.querySelectorAll('input:not([type="hidden"]), textarea, select')).slice(0, 30).map(fieldFor);
+            const submit = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+            return {
+              selector: bestSelector(form) || `form:nth-of-type(${i + 1})`,
+              fields,
+              submitText: submit ? cleanText((submit as HTMLElement).innerText || (submit as HTMLInputElement).value) : '',
+              submitSelector: submit ? bestSelector(submit) : null,
+            };
+          }).filter(f => f.fields.length > 0 || f.submitText);
+
+          const selected = selector
+            ? Array.from(document.querySelectorAll(selector)).slice(0, 20).map(el => ({
+                selector,
+                text: cleanText((el as HTMLElement).innerText || el.textContent).slice(0, 5000),
+                html: (el as HTMLElement).outerHTML.slice(0, 5000),
+              }))
+            : [];
+
+          return {
+            url: location.href,
+            title: document.title || '',
+            description: (document.querySelector('meta[name="description"]') as HTMLMetaElement | null)?.content || '',
+            headings: Array.from(document.querySelectorAll('h1,h2,h3')).slice(0, 20).map(h => cleanText((h as HTMLElement).innerText)).filter(Boolean),
+            links: Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map(a => ({
+              text: cleanText((a as HTMLElement).innerText || a.textContent).slice(0, 120),
+              href: (a as HTMLAnchorElement).href,
+            })).filter(a => a.href),
+            forms,
+            buttons: Array.from(document.querySelectorAll('button, [role="button"], a.btn, a[class*="button"], a[class*="cta"]')).slice(0, 80).map(btn => ({
+              text: cleanText((btn as HTMLElement).innerText || btn.textContent).slice(0, 120),
+              selector: bestSelector(btn),
+            })).filter(b => b.text),
+            selected,
+            text: cleanText(document.body?.innerText || '').slice(0, 12000),
+          };
+        }, selectedSelector) as ScrapedPage;
+
+        pages.push(scraped);
+
+        await enqueueLinks({
+          strategy: 'same-domain',
+          transformRequestFunction: (req: any) => {
+            try {
+              const host = new URL(req.url).hostname;
+              const noAsset = !req.url.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2|ttf|mp4|webp)(\?|$)/i);
+              return allowedHosts.has(host) && noAsset ? req : false;
+            } catch {
+              return false;
+            }
+          },
+        }).catch(() => {});
+
+        if (!options.quiet) {
+          console.log(chalk.gray(`  scraped ${pages.length}/${maxPages}: ${request.loadedUrl || request.url}`));
+        }
+      },
+      failedRequestHandler({ request, error }: any) {
+        if (!options.quiet) warn(`Scrape skipped ${request.url}: ${error?.message || error}`);
+      },
+    });
+
+    await crawler.run([url]);
+
+    const result: ScrapeResult = {
+      id: scrape.id,
+      url,
+      status: 'complete',
+      reason,
+      maxPages,
+      selector: options.selector,
+      pages,
+      resultPath,
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
+    db.updateScrapeRun(scrape.id, { status: 'complete', pagesCount: pages.length, resultPath });
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const result: ScrapeResult = {
+      id: scrape.id,
+      url,
+      status: 'failed',
+      reason,
+      maxPages,
+      selector: options.selector,
+      pages,
+      resultPath,
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(resultPath, JSON.stringify({ ...result, errorMessage: message }, null, 2));
+    db.updateScrapeRun(scrape.id, { status: 'failed', pagesCount: pages.length, resultPath, errorMessage: message });
+    throw new Error(message);
+  }
+}
+
+function readScrapeResult(resultPath: string | null): ScrapeResult | null {
+  if (!resultPath || !fs.existsSync(resultPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(resultPath, 'utf8')) as ScrapeResult;
+  } catch {
+    return null;
+  }
 }
 
 // ============================================
@@ -1202,7 +2666,7 @@ async function runLearn(url: string, nameOverride?: string) {
     const nodeId = `step-${i + 1}`;
     let node: Record<string, unknown>;
     if (action.type === 'navigate') node = { id: nodeId, type: 'action', label: `Navigate to ${action.url}`, action: 'navigate', url: action.url };
-    else if (action.type === 'click') node = { id: nodeId, type: 'action', label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: 'click', selector: action.selector };
+    else if (action.type === 'click') node = { id: nodeId, type: 'action', label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: 'click', selector: action.selector, intent: action.label ? `Click "${action.label}"` : `Click ${action.selector}` };
     else if (action.type === 'fill') node = { id: nodeId, type: 'action', label: `Fill ${action.selector}`, action: 'fill', selector: action.selector, value: action.value };
     else if (action.type === 'select') node = { id: nodeId, type: 'action', label: `Select "${action.value}" in ${action.selector}`, action: 'select', selector: action.selector, value: action.value };
     else if (action.type === 'check') node = { id: nodeId, type: 'action', label: `${action.value === 'true' ? 'Check' : 'Uncheck'} ${action.selector}`, action: 'check', selector: action.selector, value: action.value };
@@ -1236,10 +2700,18 @@ async function runLearn(url: string, nameOverride?: string) {
 // COMMANDS — run
 // ============================================
 
-async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean; visible?: boolean; onStep?: (idx: number, action: string, selector?: string) => void; onError?: (msg: string) => void }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string>; error?: string }> {
+async function executeFlow(flowId: string, vars?: Record<string, string>, opts?: { sessionLoad?: string; sessionSave?: string; quiet?: boolean; jsonOutput?: boolean; visible?: boolean; ci?: boolean; allowAiSummary?: boolean; skipProfileAuth?: boolean; video?: boolean; trace?: boolean; baseline?: boolean; visualThreshold?: number; onStep?: (idx: number, action: string, selector?: string) => void; onError?: (msg: string) => void }): Promise<{ passed: boolean; runId: string; duration: number; extractedData: Record<string, string>; error?: string; scrapeDiagnostics?: Array<{ scrapeId: string; resultPath: string | null; reason: string | null }> }> {
   const log = (s: string) => { if (!opts?.jsonOutput && !opts?.quiet) process.stdout.write(s + '\n'); };
 
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const projectConfig = readConfig();
+  const baselineMode = opts?.baseline ?? process.argv.includes('--baseline');
+  const visualThreshold = opts?.visualThreshold
+    ?? (() => {
+      const raw = parseFlagValue(process.argv, '--baseline-threshold');
+      return raw ? parseFloat(raw) : (projectConfig.policies?.visualDiffThresholdPercent ?? 5);
+    })();
+
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
 
   let graph: { nodes: Record<string, unknown>[]; edges: object[]; appUrl?: string };
@@ -1251,30 +2723,20 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
     console.log(chalk.gray('  Variables: ' + Object.entries(vars).map(([k, v]) => `${k}=${v}`).join(', ')));
   }
 
-  // Show run header with env + provenance
-  const startUrl = graph.appUrl || flow.appUrl;
-  const { label: envLabel, color: envColor } = getEnvLabel(startUrl || '');
-  const creatorIcon = flow.createdBy === 'agent' ? chalk.magenta(' 🤖') : chalk.blue(' 👤');
-  const verifiedBadge = flow.verified ? chalk.green(' ✓') : '';
-  const provenanceStr = creatorIcon + verifiedBadge;
-  if (!opts?.jsonOutput) {
-    if (envLabel === 'production') {
-      console.log(chalk.red('\n  ┌─────────────────────────────────────┐'));
-      console.log(chalk.red('  │ ⚠ PRODUCTION ENVIRONMENT            │'));
-      console.log(chalk.red('  └─────────────────────────────────────┘'));
-    }
-    console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + provenanceStr);
-    if (startUrl) console.log('  ' + chalk.gray('URL: ') + envColor(startUrl));
-  }
-
   const run = db.createRun(flow.id);
   const screenshotsDir = db.getScreenshotsPath(run.id);
 
   const actionNodes = graph.nodes.filter(n => n.type === 'action') as Array<Record<string, unknown>>;
   let stepNum = 1, failed = false;
   let failedStepInfo: { name: string; action: string; selector?: string | null; errorMessage: string } | null = null;
+  let failureScrapeContext: string | undefined;
+  const scrapeDiagnostics: Array<{ scrapeId: string; resultPath: string | null; reason: string | null }> = [];
   const runStart = Date.now();
   const runVars: Record<string, string> = { ...(vars || {}) };
+  const selectedProfile = getSelectedProfile();
+  let resolvedProfileAuth: ResolvedProfileAuth | null = null;
+  let profileSessionLoadName = opts?.sessionLoad;
+  let cleanupProfileSession = false;
 
   // Load active environment variables into context
   const activeEnv = db.getActiveEnvironment();
@@ -1282,10 +2744,105 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
     Object.assign(runVars, activeEnv.variables);
     if (activeEnv.baseUrl && !runVars['__baseUrl']) runVars['__baseUrl'] = activeEnv.baseUrl;
   }
-  const ctx: ExecutionContext = { variables: runVars, environmentName: activeEnv?.name };
+  if (selectedProfile?.variables) Object.assign(runVars, selectedProfile.variables);
+  const accountKey = selectedProfile ? resolveSelectedAccountKey(selectedProfile, process.argv) : null;
+  if (selectedProfile && accountKey) {
+    try {
+      const applied = await applyProfileAccount(selectedProfile, accountKey, runVars, resolveSecretValue);
+      if (!opts?.jsonOutput && !opts?.quiet) {
+        console.log('  ' + chalk.gray('Account: ') + chalk.cyan(`${applied.accountId}`) +
+          (applied.email ? chalk.gray(` (${applied.email})`) : ''));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errorMsg(msg);
+      db.updateRun(run.id, { status: 'failed', completedAt: new Date(), duration: Date.now() - runStart, errorMessage: msg });
+      return { passed: false, runId: run.id, duration: Date.now() - runStart, extractedData: {}, error: msg };
+    }
+  }
+  if (vars && Object.keys(vars).length > 0) {
+    Object.assign(runVars, vars);
+  }
+  if (selectedProfile?.baseUrl) {
+    if (!runVars['BASE_URL']) runVars['BASE_URL'] = selectedProfile.baseUrl;
+    if (!runVars['__baseUrl']) runVars['__baseUrl'] = selectedProfile.baseUrl;
+  }
+
+  // Show run header with env + provenance
+  const startUrl = runVars['__baseUrl'] || graph.appUrl || flow.appUrl;
+  const { label: envLabel, color: envColor } = getEnvLabel(startUrl || '');
+  const creatorIcon = flow.createdBy === 'agent' ? chalk.magenta(' 🤖') : chalk.blue(' 👤');
+  const verifiedBadge = flow.verified ? chalk.green(' ✓') : '';
+  const provenanceStr = creatorIcon + verifiedBadge;
+  if (!opts?.jsonOutput && !opts?.quiet) {
+    if (envLabel === 'production') {
+      console.log(chalk.red('\n  ┌─────────────────────────────────────┐'));
+      console.log(chalk.red('  │ ⚠ PRODUCTION ENVIRONMENT            │'));
+      console.log(chalk.red('  └─────────────────────────────────────┘'));
+    }
+    console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + provenanceStr);
+    if (startUrl) console.log('  ' + chalk.gray('URL: ') + envColor(startUrl));
+    if (selectedProfile?.name) console.log('  ' + chalk.gray('Profile: ') + chalk.cyan(selectedProfile.name));
+  }
+
+  try {
+    if (selectedProfile && !opts?.skipProfileAuth) {
+      resolvedProfileAuth = await resolveProfileAuth(selectedProfile, runVars, flow.id, {
+        ci: opts?.ci,
+        visible: opts?.visible,
+        quiet: opts?.quiet,
+        accountId: accountKey,
+      });
+      if (resolvedProfileAuth?.injectedVars) Object.assign(runVars, resolvedProfileAuth.injectedVars);
+      if (!profileSessionLoadName && resolvedProfileAuth?.sessionLoadName) {
+        profileSessionLoadName = resolvedProfileAuth.sessionLoadName;
+        cleanupProfileSession = true;
+      }
+      if (!opts?.jsonOutput && !opts?.quiet && resolvedProfileAuth) {
+        console.log('  ' + chalk.gray('Auth: ') + chalk.cyan(resolvedProfileAuth.summary));
+      }
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const duration = Date.now() - runStart;
+    db.updateRun(run.id, {
+      status: 'failed',
+      completedAt: new Date(),
+      duration,
+      errorMessage,
+    });
+    writeEvidenceBundle(run.id, { ci: opts?.ci });
+    if (opts?.jsonOutput) {
+      console.log(JSON.stringify({
+        passed: false,
+        runId: run.id,
+        flowId: flow.id,
+        flowName: flow.name,
+        duration,
+        error: errorMessage,
+        extractedData: {},
+        scrapeDiagnostics,
+      }));
+    } else {
+      errorMsg(errorMessage);
+    }
+    return { passed: false, runId: run.id, duration, extractedData: {}, error: errorMessage, scrapeDiagnostics };
+  }
+
+  const ctx: ExecutionContext = {
+    variables: runVars,
+    environmentName: activeEnv?.name,
+    profileAuth: resolvedProfileAuth?.apiAuth,
+    profileServices: selectedProfile?.services,
+  };
 
   // Determine if any browser actions exist (if not, skip browser entirely)
-  const API_ONLY_ACTIONS = new Set(['http:request','assert:response','assert:status','assert:body','assert:header','assert:time','set:variable','extract:json','env:switch']);
+  const API_ONLY_ACTIONS = new Set([
+    'http:request', 'assert:response', 'assert:status', 'assert:body', 'assert:header', 'assert:time',
+    'set:variable', 'extract:json', 'env:switch',
+    'email:wait', 'email:extract-link', 'email:extract-otp', 'webhook:wait', 'webhook:assert',
+    'assert:webhook-signature', 'services:seed', 'db:query', 'db:assert',
+  ]);
   const hasBrowserActions = actionNodes.some(n => !API_ONLY_ACTIONS.has(n.action as string));
 
   let browser: import('playwright').Browser | null = null;
@@ -1294,13 +2851,23 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
 
   if (hasBrowserActions) {
     browser = await chromium.launch({ headless: !opts?.visible });
-    browserCtx = await browser.newContext();
+    const videoDir = opts?.video ? path.join(PROJECT_GHOSTRUN_PATH, 'runs', run.id) : undefined;
+    if (videoDir && !fs.existsSync(videoDir)) fs.mkdirSync(videoDir, { recursive: true });
+    browserCtx = await browser.newContext({
+      ...(resolvedProfileAuth?.browserContextOptions || {}),
+      ...(videoDir ? { recordVideo: { dir: videoDir } } : {}),
+    });
+
+    if (opts?.trace) {
+      await browserCtx.tracing.start({ screenshots: true, snapshots: true });
+    }
+
     page = await browserCtx.newPage();
 
-    if (opts?.sessionLoad) {
+    if (profileSessionLoadName) {
       try {
-        const count = await loadSession(browserCtx, opts.sessionLoad);
-        if (!opts?.quiet) info(`Session: ${chalk.cyan(opts.sessionLoad)} loaded (${count} cookies)`);
+        const count = await loadSession(browserCtx, profileSessionLoadName);
+        if (!opts?.quiet) info(`Session: ${chalk.cyan(profileSessionLoadName)} loaded (${count} cookies)`);
       } catch (e) { warn(String(e)); }
     }
 
@@ -1309,7 +2876,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
 
   // Load pixelmatch for baseline diffs (optional)
   let PNG: typeof import('pngjs').PNG | null = null;
-  let pixelmatch: ((img1: Uint8Array, img2: Uint8Array, output: Uint8Array | null, width: number, height: number, options?: object) => number) | null = null;
+  let pixelmatch: typeof import('pixelmatch').default | null = null;
   try {
     const pngjs = await import('pngjs');
     PNG = pngjs.PNG;
@@ -1366,14 +2933,35 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
             const diff = new PNG({ width: w, height: h });
             const numDiff = pixelmatch(img1.data, img2.data, diff.data, w, h, { threshold: 0.1 });
             diffPercent = parseFloat(((numDiff / (w * h)) * 100).toFixed(1));
-            if (diffPercent > 5) {
-              log(chalk.yellow(`      ~ visual change: ${diffPercent}%`));
+            if (diffPercent > visualThreshold) {
+              log(chalk.yellow(`      ~ visual change: ${diffPercent}% (threshold ${visualThreshold}%)`));
             }
           } catch { /* skip diff on error */ }
         }
 
+        if (diffPercent !== undefined && diffPercent > visualThreshold) {
+          const proposal = createRepairProposal({
+            source: 'ai-heal',
+            repairType: 'visual',
+            flowId: flow!.id,
+            flowName: flow!.name,
+            runId: run.id,
+            nodeId: String(node.id || ''),
+            stepNumber: stepNum,
+            action,
+            currentValue: `${diffPercent}%`,
+            proposedValue: `Re-capture baseline: ghostrun baseline:set ${flow!.name}`,
+            errorMessage: `[DIFF:${diffPercent}%]`,
+            rationale: `Visual regression on step ${stepNum}: ${diffPercent}% pixel diff exceeds threshold ${visualThreshold}%. Update baseline after intentional UI change with baseline:set.`,
+          });
+          if (proposal) log(chalk.yellow(`      ~ visual repair proposal: ${proposal.id.slice(0, 8)}`));
+          if (baselineMode) {
+            throw new Error(`Visual regression ${diffPercent}% > ${visualThreshold}% on step ${stepNum}`);
+          }
+        }
+
         db.updateStep(step.id, { status: 'passed', duration, screenshotPath: sp, ...(diffPercent !== undefined ? { diffPercent } : {}) });
-        if (diffPercent !== undefined && diffPercent > 5) {
+        if (diffPercent !== undefined && diffPercent > visualThreshold && !baselineMode) {
           db.updateStep(step.id, { errorMessage: `[DIFF:${diffPercent}%]` });
         }
       } else {
@@ -1390,26 +2978,58 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
       }
     } catch (err) {
       const duration = Date.now() - t;
-      let errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      const errorMessage = err instanceof Error ? err.message.split('\n')[0] : String(err);
 
-      // Healing selectors: try AI-suggested selector on click/fill/select failures
+      // Selector repair proposals: suggest but do not silently heal execution
       if (['click', 'fill', 'select'].includes(action) && page) {
         const healed = await attemptHeal(page, label, node.selector as string, action);
         if (healed) {
-          try {
-            const healedNode = { ...node, selector: healed };
-            await executeAction(page, action, healedNode, ctx, run.id, stepNum);
-            if (action === 'click') await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
-            const healDuration = Date.now() - t;
-            const screenshot = await page.screenshot();
-            const sp = path.join(screenshotsDir, `step-${stepNum}.png`);
-            fs.writeFileSync(sp, screenshot);
-            log(chalk.yellow(`      ~ healed selector: ${healed}`));
-            db.updateStep(step.id, { status: 'passed', duration: healDuration, screenshotPath: sp, errorMessage: `[HEALED: ${healed}]` });
-            log(chalk.green(`      ✓ passed after heal (${healDuration}ms)`));
-            stepNum++;
-            continue;
-          } catch { /* healing also failed, fall through */ }
+          const proposal = createRepairProposal({
+            source: 'ai-heal',
+            repairType: 'selector',
+            flowId: flow.id,
+            flowName: flow.name,
+            runId: run.id,
+            nodeId: String(node.id || ''),
+            stepNumber: stepNum,
+            action,
+            currentSelector: node.selector as string | undefined,
+            proposedSelector: healed,
+            errorMessage,
+            rationale: 'Generated from failed execution using selector repair heuristics and optional AI.',
+          });
+          if (proposal) {
+            log(chalk.yellow(`      ~ repair proposal: ${proposal.id.slice(0, 8)} -> ${healed}`));
+            const autoApply = autoApplySelectorRepairProposal(proposal, {
+              ci: opts?.ci,
+              profile: selectedProfile,
+              startUrl: startUrl || undefined,
+              currentSelector: node.selector as string | null | undefined,
+            });
+            if (autoApply.applied) {
+              log(chalk.green(`      ~ auto-applied selector repair: ${proposal.id.slice(0, 8)}`));
+            } else if (readConfig().policies?.allowAutoRepairApply && getInteractionMode() === 'auto') {
+              log(chalk.gray(`      ~ auto-apply blocked: ${autoApply.reason}`));
+            }
+          } else {
+            log(chalk.gray(`      ~ repair proposal skipped: run attempt limit reached`));
+          }
+        }
+      }
+
+      if (page) {
+        const extraProposal = await createFailureRepairProposal({
+          action,
+          errorMessage,
+          page,
+          node,
+          flow,
+          runId: run.id,
+          stepNum,
+          selectedProfile,
+        });
+        if (extraProposal) {
+          log(chalk.yellow(`      ~ repair proposal (${extraProposal.repairType}): ${extraProposal.id.slice(0, 8)}`));
         }
       }
 
@@ -1423,6 +3043,26 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
           db.updateStep(step.id, { status: 'failed', duration, errorMessage });
         }
       } catch { db.updateStep(step.id, { status: 'failed', duration, errorMessage }); }
+
+      if (page && isCrawleeEnabled()) {
+        try {
+          log(chalk.gray('      → scraping failed page for diagnostics...'));
+          const scrape = await runCrawleeScrape(page.url(), {
+            maxPages: 1,
+            reason: 'run-failure',
+            runId: run.id,
+            stepNumber: stepNum,
+            quiet: true,
+            requireEnabled: false,
+          });
+          failureScrapeContext = extractScrapeText(scrape);
+          scrapeDiagnostics.push({ scrapeId: scrape.id, resultPath: scrape.resultPath, reason: scrape.reason });
+          log(chalk.gray(`      → scrape diagnostic: ${scrape.id.slice(0, 8)}`));
+        } catch (scrapeErr) {
+          log(chalk.gray(`      → scrape diagnostic skipped: ${scrapeErr instanceof Error ? scrapeErr.message : scrapeErr}`));
+        }
+      }
+
       log(chalk.red(`      ✗ failed (${duration}ms)`));
       log(chalk.red(`        └─ ${errorMessage}`));
       failedStepInfo = { name: label, action, selector: node.selector as string | null, errorMessage };
@@ -1440,14 +3080,32 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
     } catch (e) { warn(`Could not save session: ${e}`); }
   }
 
+  // Stop Playwright trace before closing browser
+  let traceOutputPath: string | null = null;
+  if (opts?.trace && browserCtx) {
+    traceOutputPath = path.join(PROJECT_GHOSTRUN_PATH, 'runs', run.id, 'trace.zip');
+    const traceDir = path.dirname(traceOutputPath);
+    if (!fs.existsSync(traceDir)) fs.mkdirSync(traceDir, { recursive: true });
+    try { await browserCtx.tracing.stop({ path: traceOutputPath }); } catch { /* ignore trace stop errors */ }
+  }
+
+  // Close browser (also flushes video files if recording)
+  const videoRecordDir = opts?.video ? path.join(PROJECT_GHOSTRUN_PATH, 'runs', run.id) : null;
   if (browser) await browser.close();
+
+  if (cleanupProfileSession && profileSessionLoadName) {
+    const tempSessionPath = sessionFilePath(profileSessionLoadName);
+    if (fs.existsSync(tempSessionPath)) {
+      try { fs.unlinkSync(tempSessionPath); } catch { /* ignore cleanup failure */ }
+    }
+  }
 
   const totalDuration = Date.now() - runStart;
   let summary: string | null = null;
-  if (failed && failedStepInfo) {
+  if (failed && failedStepInfo && opts?.allowAiSummary !== false) {
     if (!opts?.jsonOutput) process.stdout.write(chalk.gray('\n  Analyzing failure...\n'));
     const steps = db.listSteps(run.id);
-    const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo }));
+    const result = await callAI(buildFailurePrompt({ flowName: flow.name, steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })), failedStep: failedStepInfo, scrapeContext: failureScrapeContext }), { mode: 'summary', metadata: { flowId: flow.id, runId: run.id } });
     if (result) {
       summary = result.text;
       if (!opts?.jsonOutput) process.stdout.write(chalk.gray(`  (via ${result.provider})\n`));
@@ -1455,6 +3113,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   }
 
   db.updateRun(run.id, { status: failed ? 'failed' : 'passed', completedAt: new Date(), duration: totalDuration, errorMessage: failedStepInfo?.errorMessage, summary: summary || undefined });
+  writeEvidenceBundle(run.id, { ci: opts?.ci });
 
   // Collect extracted data
   const extractedData: Record<string, string> = {};
@@ -1468,9 +3127,9 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
         stepNumber: s.stepNumber, name: s.name, status: s.status, duration: s.duration,
         screenshotPath: s.screenshotPath, errorMessage: s.errorMessage
       })),
-      extractedData, summary
+      extractedData, summary, scrapeDiagnostics
     }));
-    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
+    return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage, scrapeDiagnostics };
   }
 
   divider();
@@ -1495,8 +3154,18 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   }
   info('Run ID: ' + chalk.gray(run.id.slice(0, 8)));
   info('Screenshots: ' + chalk.cyan(screenshotsDir));
+  if (videoRecordDir) {
+    info('Video: ' + chalk.cyan(videoRecordDir));
+  }
+  if (traceOutputPath && fs.existsSync(traceOutputPath)) {
+    info('Trace: ' + chalk.cyan(traceOutputPath));
+    info('View:  ' + chalk.gray('npx playwright show-trace ' + traceOutputPath));
+  }
+  if (scrapeDiagnostics.length > 0) {
+    info('Scrape diagnostic: ' + chalk.cyan(scrapeDiagnostics[0].resultPath || scrapeDiagnostics[0].scrapeId));
+  }
   console.log();
-  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage };
+  return { passed: !failed, runId: run.id, duration: totalDuration, extractedData, error: failedStepInfo?.errorMessage, scrapeDiagnostics };
 }
 
 async function executeAction(page: import('playwright').Page | null, action: string, node: Record<string, unknown>, ctx?: ExecutionContext, runId?: string, stepNumber?: number) {
@@ -1866,6 +3535,181 @@ async function executeAction(page: import('playwright').Page | null, action: str
       }
       break;
     }
+
+    case 'email:wait': {
+      if (!ctx) throw new Error('email:wait requires execution context');
+      const to = resolveVarsDeep(
+        (node.to as string) || (node.selector as string) || ctx.variables['accountEmail'] || ctx.variables['testEmail'] || '',
+        ctx
+      ) as string;
+      const subjectContains = resolveVarsDeep((node.subject as string) || (node.value as string) || '', ctx) as string;
+      const timeoutMs = node.timeoutMs ? parseInt(String(node.timeoutMs), 10) : undefined;
+      const result = await waitForEmail(ctx.profileServices, {
+        to: to || undefined,
+        subjectContains: subjectContains || undefined,
+        timeoutMs,
+      });
+      const varName = (node.variable as string) || 'lastEmailBody';
+      ctx.variables[varName] = result.body;
+      ctx.variables[`${varName}Subject`] = result.message.Subject;
+      ctx.variables[`${varName}Id`] = result.message.ID;
+      if (result.html) ctx.variables[`${varName}Html`] = result.html;
+      (node as Record<string, unknown>).__extracted = { variable: varName, value: result.body.slice(0, 200) };
+      break;
+    }
+
+    case 'email:extract-link': {
+      if (!ctx) throw new Error('email:extract-link requires execution context');
+      const sourceVar = (node.variable as string) || 'lastEmailBody';
+      const source = ctx.variables[sourceVar] || ctx.variables[`${sourceVar}Html`] || '';
+      const link = extractFirstUrl(source);
+      if (!link) throw new Error(`email:extract-link: no URL found in ${sourceVar}`);
+      const outVar = (node.to as string) || (node.selector as string) || 'magicLink';
+      ctx.variables[outVar] = link;
+      (node as Record<string, unknown>).__extracted = { variable: outVar, value: link };
+      break;
+    }
+
+    case 'email:extract-otp': {
+      if (!ctx) throw new Error('email:extract-otp requires execution context');
+      const sourceVar = (node.variable as string) || 'lastEmailBody';
+      const source = ctx.variables[sourceVar] || '';
+      const length = parseInt((node.value as string) || '6', 10);
+      const code = extractOtpCode(source, length);
+      if (!code) throw new Error(`email:extract-otp: no ${length}-digit code in ${sourceVar}`);
+      const outVar = (node.to as string) || 'otpCode';
+      ctx.variables[outVar] = code;
+      (node as Record<string, unknown>).__extracted = { variable: outVar, value: code };
+      break;
+    }
+
+    case 'email:click-link': {
+      if (!page) throw new Error('email:click-link requires a browser page');
+      if (!ctx) throw new Error('email:click-link requires execution context');
+      const linkVar = (node.variable as string) || 'magicLink';
+      let url = ctx.variables[linkVar];
+      if (!url) {
+        const sourceVar = (node.value as string) || 'lastEmailBody';
+        url = extractFirstUrl(ctx.variables[sourceVar] || ctx.variables[`${sourceVar}Html`] || '') || '';
+      }
+      if (!url) throw new Error(`email:click-link: set ${linkVar} or run email:extract-link first`);
+      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      break;
+    }
+
+    case 'webhook:wait': {
+      if (!ctx) throw new Error('webhook:wait requires execution context');
+      const hookPath = resolveVarsDeep((node.path as string) || (node.value as string) || (node.selector as string) || '', ctx) as string;
+      if (!hookPath) throw new Error('webhook:wait requires path (value or path field)');
+      const timeoutMs = node.timeoutMs ? parseInt(String(node.timeoutMs), 10) : undefined;
+      const capture = await waitForWebhook(ctx.profileServices, { path: hookPath, timeoutMs });
+      const varName = (node.variable as string) || 'lastWebhookBody';
+      ctx.variables[varName] = capture.body;
+      ctx.variables[`${varName}Path`] = capture.path;
+      ctx.variables[`${varName}Headers`] = JSON.stringify(capture.headers);
+      ctx.variables[`${varName}CaptureId`] = capture.id;
+      (node as Record<string, unknown>).__extracted = { variable: varName, value: capture.body.slice(0, 200) };
+      break;
+    }
+
+    case 'webhook:assert': {
+      if (!ctx) throw new Error('webhook:assert requires execution context');
+      const bodyVar = (node.variable as string) || 'lastWebhookBody';
+      const hookPath = resolveVarsDeep((node.path as string) || '', ctx) as string;
+      const bodyFromVar = ctx.variables[bodyVar];
+      const capture = resolveWebhookCapture(listWebhookCaptures(50), {
+        path: hookPath || undefined,
+        body: bodyFromVar,
+      });
+      const assertionsRaw = node.assertions as Array<{ path: string; expected?: string; op?: string }> | undefined;
+      if (assertionsRaw?.length) {
+        assertWebhookPayload(capture.body, assertionsRaw.map(a => ({
+          path: resolveVarsDeep(a.path, ctx) as string,
+          expected: a.expected !== undefined ? resolveVarsDeep(a.expected, ctx) as string : undefined,
+          op: a.op as 'equals' | 'contains' | 'exists' | undefined,
+        })));
+      } else {
+        const jsonPath = resolveVarsDeep((node.value as string) || (node.path as string) || '', ctx) as string;
+        const expected = resolveVarsDeep((node.expected as string) || '', ctx) as string;
+        if (!jsonPath) throw new Error('webhook:assert requires assertions array or value (JSON path) + expected');
+        assertWebhookPayload(capture.body, [{ path: jsonPath, expected, op: (node.op as string) as 'equals' | 'contains' | undefined }]);
+      }
+      break;
+    }
+
+    case 'assert:webhook-signature': {
+      if (!ctx) throw new Error('assert:webhook-signature requires execution context');
+      const bodyVar = (node.variable as string) || 'lastWebhookBody';
+      const hookPath = resolveVarsDeep((node.path as string) || '', ctx) as string;
+      const bodyFromVar = ctx.variables[bodyVar];
+      const headersJson = ctx.variables[`${bodyVar}Headers`];
+      let capture = resolveWebhookCapture(listWebhookCaptures(50), {
+        path: hookPath || undefined,
+        body: bodyFromVar,
+      });
+      if (headersJson && bodyFromVar) {
+        try {
+          capture = { ...capture, headers: JSON.parse(headersJson) as Record<string, string> };
+        } catch { /* use capture headers */ }
+      }
+      const secretRef = (node.secretSecret as string) || (node.secret as string) || 'WEBHOOK_HMAC_SECRET';
+      const secret = await resolveSecretValue(secretRef) || process.env[secretRef];
+      if (!secret) throw new Error(`assert:webhook-signature: secret not found (${secretRef})`);
+      verifyWebhookSignature(capture, {
+        secret,
+        headerName: (node.header as string) || 'X-Webhook-Signature',
+        algorithm: ((node.algorithm as string) || 'sha256') as 'sha256' | 'sha1',
+        prefix: (node.prefix as string) || undefined,
+      });
+      break;
+    }
+
+    case 'db:query': {
+      if (!ctx) throw new Error('db:query requires execution context');
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error('db:query requires profile.services.postgres.connectionSecret');
+      const sql = resolveVarsDeep((node.value as string) || (node.sql as string) || '', ctx) as string;
+      if (!sql) throw new Error('db:query requires value or sql field');
+      const paramsRaw = (node.params as unknown[]) || [];
+      const params = paramsRaw.map(p => resolveVarsDeep(p, ctx));
+      const rows = await runDbQuery(pg.connectionSecret, sql, params);
+      const varName = (node.variable as string) || 'queryResult';
+      ctx.variables[varName] = JSON.stringify(rows);
+      ctx.variables[`${varName}Count`] = String(rows.length);
+      if (rows.length > 0) {
+        const firstVal = Object.values(rows[0])[0];
+        ctx.variables[`${varName}Scalar`] = firstVal === null || firstVal === undefined ? '' : String(firstVal);
+      }
+      (node as Record<string, unknown>).__extracted = { variable: varName, value: JSON.stringify(rows).slice(0, 200) };
+      break;
+    }
+
+    case 'db:assert': {
+      if (!ctx) throw new Error('db:assert requires execution context');
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error('db:assert requires profile.services.postgres.connectionSecret');
+      const sql = resolveVarsDeep((node.value as string) || (node.sql as string) || '', ctx) as string;
+      if (!sql) throw new Error('db:assert requires value or sql field');
+      const expected = resolveVarsDeep((node.expected as string) || '', ctx) as string;
+      const assertType = ((node.assertType as string) || (node.assert as string) || 'scalar') as import('./service-bridge').DbAssertType;
+      const paramsRaw = (node.params as unknown[]) || [];
+      const params = paramsRaw.map(p => resolveVarsDeep(p, ctx));
+      await assertDbQuery(pg.connectionSecret, sql, expected, { assertType, params });
+      break;
+    }
+
+    case 'services:seed': {
+      if (!ctx) throw new Error('services:seed requires execution context');
+      const pg = ctx.profileServices?.postgres;
+      if (!pg?.connectionSecret) throw new Error('services:seed requires profile.services.postgres.connectionSecret');
+      const paths = getProjectPaths();
+      const fixtures = (pg.fixtures || []).map(f =>
+        path.isAbsolute(f) ? f : path.join(paths.fixturesSql, f)
+      );
+      if (fixtures.length === 0) throw new Error('services:seed: no fixtures listed in profile.services.postgres.fixtures');
+      await runSqlFixtures(fixtures, pg.connectionSecret);
+      break;
+    }
   }
 }
 
@@ -1942,7 +3786,7 @@ Return ONLY the selector string, nothing else. Example formats:
   [role="button"]:has-text("Submit")
   a[href*="/login"]`;
 
-    const result = await callAI(prompt);
+    const result = await callAI(prompt, { mode: 'repair', metadata: { selector, step: label } });
     if (result?.text) {
       const healed = result.text.trim().replace(/^['"`]|['"`]$/g, '').split('\n')[0].trim();
       if (healed && !healed.includes(' ') && healed.length < 100) {
@@ -1957,14 +3801,30 @@ Return ONLY the selector string, nothing else. Example formats:
 
 async function runFlow(id: string, vars?: Record<string, string>): Promise<string | null> {
   const visible = process.argv.includes('--visible');
+  const ciMode = process.argv.includes('--ci');
   const outputIdx = process.argv.indexOf('--output');
   const jsonOutput = outputIdx !== -1 && process.argv[outputIdx + 1] === 'json';
+  const video = process.argv.includes('--video');
+  const trace = process.argv.includes('--trace');
+  const baseline = process.argv.includes('--baseline');
+  const thresholdRaw = parseFlagValue(process.argv, '--baseline-threshold');
+  const visualThreshold = thresholdRaw ? parseFloat(thresholdRaw) : undefined;
+  const config = readConfig();
+  const allowAiSummary = !ciMode || (config.policies?.allowAiInCi || 'summary-only') !== 'off';
 
   if (!jsonOutput) { printLogo(); divider(); }
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
-  if (!jsonOutput) console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name) + (visible ? chalk.yellow(' [visible]') : '') + '\n');
-  const result = await executeFlow(id, vars, { visible, jsonOutput });
+  if (!jsonOutput) {
+    console.log(chalk.bold('\n  Running: ') + chalk.white(flow.name)
+      + (visible ? chalk.yellow(' [visible]') : '')
+      + (ciMode ? chalk.cyan(' [ci]') : '')
+      + (baseline ? chalk.magenta(' [baseline]') : '')
+      + (video ? chalk.magenta(' [video]') : '')
+      + (trace ? chalk.blue(' [trace]') : '') + '\n');
+  }
+  const result = await executeFlow(id, vars, { visible, jsonOutput, ci: ciMode, allowAiSummary, video, trace, baseline, visualThreshold });
+  if (!result?.passed) process.exit(1);
   return result?.runId || null;
 }
 
@@ -1974,7 +3834,7 @@ async function runFlow(id: string, vars?: Record<string, string>): Promise<strin
 
 async function runFixFlow(id: string) {
   printLogo(); divider();
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
 
   console.log(chalk.bold(`\n  Fixing: ${flow.name}\n`));
@@ -2218,8 +4078,8 @@ async function runListFlows() {
 async function runDeleteFlow(id: string) {
   const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
-  const confirm = await askQuestion(`  Delete "${chalk.yellow(flow.name)}"? (y/N) `);
-  if (confirm.toLowerCase() !== 'y') { warn('Cancelled'); return; }
+  const confirm = await confirmAction(`  Delete "${chalk.yellow(flow.name)}"? (y/N) `, false);
+  if (!confirm) { warn('Cancelled'); return; }
   db.deleteFlow(flow.id);
   success(`Deleted: ${flow.name}`);
   console.log();
@@ -2378,7 +4238,7 @@ async function runFlowFromCurl(curlStr?: string) {
   }
 
   const graph = { nodes, edges: [] };
-  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, appUrl: null, graph });
+  const created = db.createFlow({ name: flowName, description: `Imported from curl: ${method} ${url}`, graph });
 
   console.log();
   success(`Flow created: ${chalk.white(flowName)}`);
@@ -2572,7 +4432,7 @@ async function runFlowFromSpec(filepath: string) {
 
   console.log();
   for (const f of flowsToCreate) {
-    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || null, graph: { nodes: f.nodes, edges: [] } });
+    const created = db.createFlow({ name: f.name, description: f.description, appUrl: baseUrl || undefined, graph: { nodes: f.nodes, edges: [] } });
     success(`Created: ${chalk.white(f.name)} ${chalk.gray('(' + f.nodes.length + ' steps, id: ' + created.id.slice(0, 8) + ')')}`);
   }
   console.log(chalk.gray(`\n  ${flowsToCreate.length} flow(s) created. Run with: ghostrun run "<name>"`));
@@ -2626,6 +4486,14 @@ async function runShowRun(id: string) {
     if (step.screenshotPath) console.log(`         ${chalk.gray('📷 ' + step.screenshotPath)}`);
   }
 
+  const scrapeDiagnostics = db.listScrapeRunsForRun(run.id);
+  if (scrapeDiagnostics.length > 0) {
+    console.log(chalk.bold('\n  Scrape Diagnostics\n'));
+    for (const s of scrapeDiagnostics) {
+      console.log(`    ${chalk.gray(s.id.slice(0, 8))}  ${chalk.white(s.reason || 'diagnostic')}  ${chalk.gray(s.resultPath || '')}`);
+    }
+  }
+
   // Show or auto-generate AI analysis for failed runs
   if (run.status === 'failed') {
     let summary = run.summary;
@@ -2637,7 +4505,7 @@ async function runShowRun(id: string) {
           flowName: flow?.name || 'Unknown',
           steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })),
           failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || 'Unknown error' },
-        }));
+        }), { mode: 'summary', metadata: { flowId: flow?.id || '', runId: run.id } });
         if (result) {
           summary = result.text;
           db.updateRun(run.id, { summary });
@@ -2664,32 +4532,499 @@ async function runShowRun(id: string) {
   console.log();
 }
 
-function escapeHtml(s: string): string {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function buildFailureHeadline(
+  flowName: string,
+  failedStep: { stepNumber: number; action: string; name: string; errorMessage: string }
+): string {
+  const err = failedStep.errorMessage.slice(0, 120);
+  return `Step ${failedStep.stepNumber}: ${failedStep.action} failed in "${flowName}" — ${err}`;
 }
 
-async function generateRunReport(runId: string, outFile: string) {
-  const run = db.findRunByPartialId(runId);
+function getRunEvidenceDir(runId: string): string {
+  return path.join(PROJECT_GHOSTRUN_PATH, 'runs', runId);
+}
+
+function buildFailureV1(params: {
+  runId: string;
+  flowId: string;
+  flowName: string;
+  profile: string | null;
+  status: string;
+  durationMs: number;
+  failedStep: {
+    number: number;
+    action: string;
+    name: string;
+    selector?: string | null;
+    durationMs: number;
+    error: string;
+    url?: string;
+    screenshot?: string;
+  };
+  repairProposalId?: string;
+  similarFailures30d?: number;
+}): Record<string, unknown> {
+  const headline = buildFailureHeadline(params.flowName, {
+    stepNumber: params.failedStep.number,
+    action: params.failedStep.action,
+    name: params.failedStep.name,
+    errorMessage: params.failedStep.error,
+  });
+  return {
+    schemaVersion: '1.0',
+    runId: params.runId,
+    flowId: params.flowId,
+    flowName: params.flowName,
+    profile: params.profile,
+    status: params.status,
+    headline,
+    intent: params.failedStep.name,
+    failedStep: params.failedStep,
+    context: {
+      similarFailures30d: params.similarFailures30d ?? 0,
+      repairProposalId: params.repairProposalId,
+    },
+    actions: {
+      rerun: `ghostrun run ${params.flowName}${params.profile ? ` --profile ${params.profile}` : ''}`,
+      openReport: 'report.html',
+      viewProposals: 'ghostrun repair list',
+      ...(params.repairProposalId
+        ? { applyRepair: `ghostrun repair apply ${params.repairProposalId.slice(0, 8)}` }
+        : {}),
+    },
+    integrations: {},
+  };
+}
+
+const GITHUB_ISSUE_DEFAULT_LABEL = 'ghostrun';
+
+type GitHubIssueCreateTrigger = 'ci-failure' | 'monitor-failure' | 'local-failure';
+
+function githubIssueDedupMarker(runId: string, flowId: string): string {
+  return `ghostrun-run:${runId}\nghostrun-flow:${flowId}`;
+}
+
+function issueBodyHasDedupMarker(body: string, runId: string, flowId: string): boolean {
+  return body.includes(`ghostrun-run:${runId}`) && body.includes(`ghostrun-flow:${flowId}`);
+}
+
+function shouldCreateGitHubIssue(
+  config: GhostrunConfig,
+  trigger: GitHubIssueCreateTrigger
+): boolean {
+  const gh = config.integrations?.github;
+  if (!gh?.enabled) return false;
+  const createOn = gh.createOn;
+  if (!createOn?.length) return true;
+  return createOn.includes(trigger);
+}
+
+function formatGitHubIssueBody(
+  failure: Record<string, unknown>,
+  manifest: Record<string, unknown>
+): string {
+  const runId = String(failure.runId || manifest.runId || '—');
+  const flowId = String(failure.flowId || manifest.flowId || '—');
+  const flowName = String(failure.flowName || manifest.flowName || '—');
+  const profile = String(failure.profile ?? manifest.profile ?? '—');
+  const failed = failure.failedStep as Record<string, unknown> | undefined;
+  const actions = failure.actions as Record<string, string> | undefined;
+  const headline = String(failure.headline || 'Test failed');
+
+  const lines = [
+    '## GhostRun failure',
+    '',
+    `**${headline}**`,
+    '',
+    '| | |',
+    '|---|---|',
+    `| Flow | ${flowName} |`,
+    `| Profile | ${profile} |`,
+    `| Run | \`${runId}\` |`,
+    `| Flow ID | \`${flowId}\` |`,
+    '',
+    '### Failed step',
+    '',
+    '```',
+    `Step ${failed?.number ?? '?'}: ${failed?.action ?? 'unknown'}`,
+    String(failed?.error || 'Unknown error'),
+    '```',
+    '',
+    '### Commands',
+    '',
+    '```bash',
+    actions?.rerun || `ghostrun run ${flowName}`,
+    actions?.viewProposals || 'ghostrun repair list',
+    '```',
+    '',
+    '<!-- ghostrun-integration:v1 -->',
+    githubIssueDedupMarker(runId, flowId),
+    '',
+    '_Created by GhostRun `report publish --create-issues`_',
+  ];
+  return lines.join('\n');
+}
+
+function formatGitHubIssueTitle(failure: Record<string, unknown>): string {
+  const headline = String(failure.headline || '');
+  const flowName = String(failure.flowName || 'flow');
+  const title = headline ? `[GhostRun] ${headline}` : `[GhostRun] ${flowName} failed`;
+  return title.length > 256 ? title.slice(0, 253) + '...' : title;
+}
+
+function getGitHubToken(): string | undefined {
+  return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+}
+
+function resolveGitHubIssueLabels(config: GhostrunConfig): string[] {
+  const configured = config.integrations?.github?.labels;
+  if (configured?.length) return configured;
+  return [GITHUB_ISSUE_DEFAULT_LABEL];
+}
+
+async function githubRestFetch(
+  token: string,
+  url: string,
+  init?: RequestInit
+): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+      ...(init?.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
+async function findOpenGitHubIssueForFailure(
+  owner: string,
+  repo: string,
+  token: string,
+  runId: string,
+  flowId: string,
+  labels: string[]
+): Promise<{ number: number; html_url: string } | null> {
+  const labelParam = labels.map(l => encodeURIComponent(l)).join(',');
+  const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=100&labels=${labelParam}`;
+  const res = await githubRestFetch(token, url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub issues search failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  const issues = (await res.json()) as Array<{
+    number: number;
+    html_url: string;
+    body: string | null;
+    pull_request?: unknown;
+  }>;
+  for (const issue of issues) {
+    if (issue.pull_request) continue;
+    if (issueBodyHasDedupMarker(issue.body || '', runId, flowId)) {
+      return { number: issue.number, html_url: issue.html_url };
+    }
+  }
+  return null;
+}
+
+function patchFailureGitHubIssueUrl(
+  failurePath: string,
+  issueUrl: string
+): void {
+  const failure = JSON.parse(fs.readFileSync(failurePath, 'utf8')) as Record<string, unknown>;
+  const integrations = (failure.integrations as Record<string, unknown>) || {};
+  integrations.githubIssue = issueUrl;
+  failure.integrations = integrations;
+  fs.writeFileSync(failurePath, JSON.stringify(failure, null, 2));
+}
+
+async function createGitHubIssueFromFailure(
+  failure: Record<string, unknown>,
+  manifest: Record<string, unknown>,
+  config: GhostrunConfig,
+  opts?: { publishFailurePath?: string; evidenceFailurePath?: string }
+): Promise<{
+  created: boolean;
+  skipped?: 'duplicate' | 'disabled' | 'config';
+  issueUrl?: string;
+  issueNumber?: number;
+}> {
+  const gh = config.integrations?.github;
+  if (!gh?.enabled) return { created: false, skipped: 'disabled' };
+  if (!gh.owner || !gh.repo) return { created: false, skipped: 'config' };
+
+  const token = getGitHubToken();
+  if (!token) {
+    throw new Error('GITHUB_TOKEN or GH_TOKEN not set.');
+  }
+
+  const runId = String(failure.runId || manifest.runId || '');
+  const flowId = String(failure.flowId || manifest.flowId || '');
+  if (!runId || !flowId) {
+    throw new Error('failure.v1.json missing runId or flowId.');
+  }
+
+  const labels = resolveGitHubIssueLabels(config);
+  const existing = await findOpenGitHubIssueForFailure(
+    gh.owner,
+    gh.repo,
+    token,
+    runId,
+    flowId,
+    labels
+  );
+  if (existing) {
+    const paths = [opts?.publishFailurePath, opts?.evidenceFailurePath].filter(
+      (p): p is string => !!p && fs.existsSync(p)
+    );
+    for (const p of paths) patchFailureGitHubIssueUrl(p, existing.html_url);
+    return {
+      created: false,
+      skipped: 'duplicate',
+      issueUrl: existing.html_url,
+      issueNumber: existing.number,
+    };
+  }
+
+  const body = formatGitHubIssueBody(failure, manifest);
+  const title = formatGitHubIssueTitle(failure);
+  const createRes = await githubRestFetch(
+    token,
+    `https://api.github.com/repos/${gh.owner}/${gh.repo}/issues`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ title, body, labels }),
+    }
+  );
+  if (!createRes.ok) {
+    const text = await createRes.text();
+    throw new Error(`GitHub issue create failed (${createRes.status}): ${text.slice(0, 300)}`);
+  }
+  const created = (await createRes.json()) as { number: number; html_url: string };
+  const paths = [opts?.publishFailurePath, opts?.evidenceFailurePath].filter(
+    (p): p is string => !!p && fs.existsSync(p)
+  );
+  for (const p of paths) patchFailureGitHubIssueUrl(p, created.html_url);
+
+  return {
+    created: true,
+    issueUrl: created.html_url,
+    issueNumber: created.number,
+  };
+}
+
+function writeEvidenceBundle(runId: string, opts?: { ci?: boolean }): string {
+  ensureProjectWorkspace();
+  const run = db.getRun(runId);
+  if (!run) return '';
+  const flow = db.getFlow(run.flowId);
+  const steps = db.listSteps(runId);
+  const evidenceDir = getRunEvidenceDir(runId);
+  fs.mkdirSync(evidenceDir, { recursive: true });
+
+  const profile = readConfig().activeProfile || null;
+  const flowName = flow?.name || run.flowId;
+  const pkgVersion = (() => {
+    try {
+      const pkgPath = path.join(path.dirname(fs.realpathSync(process.argv[1])), 'package.json');
+      return JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version as string;
+    } catch {
+      return 'unknown';
+    }
+  })();
+
+  const stepsJsonl = steps.map(s => JSON.stringify({
+    stepNumber: s.stepNumber,
+    name: s.name,
+    action: s.action,
+    status: s.status,
+    duration: s.duration,
+    selector: s.selector,
+    errorMessage: s.errorMessage,
+    screenshot: s.screenshotPath,
+  })).join('\n');
+  fs.writeFileSync(path.join(evidenceDir, 'steps.jsonl'), stepsJsonl + (stepsJsonl ? '\n' : ''));
+
+  const screenshotRefs: string[] = [];
+  for (const step of steps) {
+    if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
+      const dest = path.join(evidenceDir, 'screenshots', path.basename(step.screenshotPath));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(step.screenshotPath, dest);
+      screenshotRefs.push(path.relative(evidenceDir, dest));
+    }
+  }
+
+  const failedStep = steps.find(s => s.status === 'failed');
+  let failurePath: string | undefined;
+  let headline: string | undefined;
+  if (run.status === 'failed' && failedStep) {
+    const proposals = listRepairProposals(20).filter(p => p.runId === runId);
+    const failure = buildFailureV1({
+      runId: run.id,
+      flowId: run.flowId,
+      flowName,
+      profile,
+      status: run.status,
+      durationMs: run.duration || 0,
+      failedStep: {
+        number: failedStep.stepNumber,
+        action: failedStep.action || 'unknown',
+        name: failedStep.name,
+        selector: failedStep.selector,
+        durationMs: failedStep.duration || 0,
+        error: failedStep.errorMessage || run.errorMessage || 'Unknown error',
+        screenshot: screenshotRefs.find(r => r.includes(String(failedStep.stepNumber))) || screenshotRefs[0],
+      },
+      repairProposalId: proposals[0]?.id,
+      similarFailures30d: getRecentFailureRepeatCount(run.flowId, failedStep.errorMessage || ''),
+    });
+    headline = failure.headline as string;
+    failurePath = path.join(evidenceDir, 'failure.v1.json');
+    fs.writeFileSync(failurePath, JSON.stringify(failure, null, 2));
+  }
+
+  const reportPath = path.join(evidenceDir, 'report.html');
+  generateRunReportSync(runId, reportPath, headline);
+
+  const manifest = {
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    ghostrunVersion: pkgVersion,
+    publishedAt: new Date().toISOString(),
+    runId: run.id,
+    flowId: run.flowId,
+    flowName,
+    profile,
+    status: run.status,
+    ci: !!opts?.ci,
+    durationMs: run.duration || 0,
+    headline: headline || (run.status === 'passed' ? `Flow "${flowName}" passed` : undefined),
+    artifacts: {
+      report: 'report.html',
+      steps: 'steps.jsonl',
+      failure: failurePath ? 'failure.v1.json' : undefined,
+      screenshots: screenshotRefs,
+    },
+  };
+  const manifestPath = path.join(evidenceDir, 'manifest.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  return manifestPath;
+}
+
+function generateRunReportSync(runId: string, outFile: string, headlineOverride?: string): void {
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
   if (!run) return;
+  const html = buildRunReportHtml(runId, headlineOverride);
+  if (html) fs.writeFileSync(outFile, html);
+}
+
+function resolveStepScreenshotSrc(
+  step: { screenshotPath?: string | null },
+  evidenceDir: string
+): string | null {
+  const bundled = step.screenshotPath
+    ? path.join(evidenceDir, 'screenshots', path.basename(step.screenshotPath))
+    : null;
+  if (bundled && fs.existsSync(bundled)) {
+    return `screenshots/${path.basename(bundled)}`;
+  }
+  if (step.screenshotPath && fs.existsSync(step.screenshotPath)) {
+    return `screenshots/${path.basename(step.screenshotPath)}`;
+  }
+  return null;
+}
+
+function loadFailureV1ForRun(runId: string): Record<string, unknown> | null {
+  const failurePath = path.join(getRunEvidenceDir(runId), 'failure.v1.json');
+  if (!fs.existsSync(failurePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(failurePath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRepairProposalsForRun(
+  runId: string,
+  failureV1: Record<string, unknown> | null
+): RepairProposalView[] {
+  let proposals = listRepairProposals(20).filter(p => p.runId === runId);
+  if (proposals.length === 0 && failureV1?.context && typeof failureV1.context === 'object') {
+    const repairProposalId = (failureV1.context as { repairProposalId?: string }).repairProposalId;
+    if (repairProposalId) {
+      const found = findRepairProposal(repairProposalId);
+      if (found) proposals = [found.proposal];
+    }
+  }
+  return proposals.map(p => ({
+    id: p.id,
+    repairType: getRepairType(p),
+    status: p.status,
+    stepNumber: p.stepNumber,
+    currentSelector: p.currentSelector,
+    proposedSelector: p.proposedSelector,
+    currentValue: p.currentValue,
+    proposedValue: p.proposedValue,
+    rationale: p.rationale,
+    action: p.action,
+  }));
+}
+
+function getGhostrunPkgVersion(): string {
+  try {
+    const pkgPath = path.join(path.dirname(fs.realpathSync(process.argv[1])), 'package.json');
+    return JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version as string;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function buildRunReportHtml(runId: string, headlineOverride?: string): string | null {
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) return null;
   const flow = db.getFlow(run.flowId);
   const steps = db.listSteps(run.id);
-  const apiResps = db.getApiResponses ? db.getApiResponses(run.id) : [];
+  const scrapeDiagnostics = db.listScrapeRunsForRun(run.id);
+  const evidenceDir = getRunEvidenceDir(run.id);
+  const failureV1 = loadFailureV1ForRun(run.id);
+  const profile = (failureV1?.profile as string | null | undefined)
+    ?? readConfig().activeProfile
+    ?? null;
 
-  const statusColor = run.status === 'passed' ? '#56d364' : '#f85149';
-  const durStr = run.duration ? (run.duration >= 1000 ? (run.duration / 1000).toFixed(2) + 's' : run.duration + 'ms') : '—';
+  const failedStep = steps.find(s => s.status === 'failed');
+  const headline = headlineOverride
+    || (failureV1?.headline as string | undefined)
+    || (failedStep
+      ? buildFailureHeadline(flow?.name || runId, {
+        stepNumber: failedStep.stepNumber,
+        action: failedStep.action || 'step',
+        name: failedStep.name,
+        errorMessage: failedStep.errorMessage || run.errorMessage || 'Unknown error',
+      })
+      : undefined);
+
+  const statusColor = run.status === 'passed' ? '#56d364' : run.status === 'failed' ? '#f85149' : '#e3b341';
+  const statusBadgeClass = run.status === 'passed' || run.status === 'failed' ? run.status : 'other';
+  const durStr = formatReportDuration(run.duration);
+  const flowHash = computeFlowGraphHash(flow?.graph);
+  const pkgVersion = getGhostrunPkgVersion();
+  const generatedAt = new Date().toISOString();
 
   const stepsHtml = steps.map((step, i) => {
     const icon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '○';
     const color = step.status === 'passed' ? '#56d364' : step.status === 'failed' ? '#f85149' : '#e3b341';
-    const dur = step.duration ? (step.duration >= 1000 ? (step.duration/1000).toFixed(2)+'s' : step.duration+'ms') : '—';
+    const dur = formatReportDuration(step.duration);
     const errHtml = step.errorMessage ? `<div class="step-error">${escapeHtml(step.errorMessage)}</div>` : '';
-    const screenshotHtml = step.screenshotPath && fs.existsSync(step.screenshotPath)
-      ? `<img class="step-screenshot" src="file://${step.screenshotPath}" loading="lazy" />`
+    const shotSrc = resolveStepScreenshotSrc(step, evidenceDir);
+    const screenshotHtml = shotSrc
+      ? `<img class="step-screenshot" src="${escapeHtml(shotSrc)}" loading="lazy" alt="Step ${i + 1} screenshot" />`
       : '';
     return `<div class="step ${step.status}">
       <div class="step-header">
         <span class="step-icon" style="color:${color}">${icon}</span>
-        <span class="step-num">${i+1}</span>
+        <span class="step-num">${i + 1}</span>
         <span class="step-action">${escapeHtml(step.action || '')}</span>
         <span class="step-label">${escapeHtml(step.name || '')}</span>
         <span class="step-dur">${dur}</span>
@@ -2698,48 +5033,113 @@ async function generateRunReport(runId: string, outFile: string) {
     </div>`;
   }).join('\n');
 
-  const html = `<!DOCTYPE html>
+  const scrapeHtml = scrapeDiagnostics.length
+    ? `<section class="panel"><h2>Scrape diagnostics</h2>${scrapeDiagnostics.map(s =>
+      `<div class="step"><div class="step-header"><span class="step-action">${escapeHtml(s.reason || 'diagnostic')}</span><span class="step-label">${escapeHtml(s.resultPath || s.id)}</span></div></div>`
+    ).join('\n')}</section>`
+    : '';
+
+  const headlineHtml = headline ? `<div class="headline">${escapeHtml(headline)}</div>` : '';
+
+  const historyRuns = db.listRuns(run.flowId, 30);
+  const historyHtml = buildRunHistorySparklineHtml(
+    historyRuns.map(r => ({ id: r.id, status: r.status })),
+    run.id
+  );
+
+  const repairProposals = run.status === 'failed' ? resolveRepairProposalsForRun(run.id, failureV1) : [];
+  const repairHtml = buildRepairPanelHtml(repairProposals);
+
+  const flowName = flow?.name || runId;
+  const failureActions = failureV1?.actions as {
+    rerun?: string;
+    viewProposals?: string;
+    applyRepair?: string;
+    openReport?: string;
+  } | undefined;
+  const nextStepsHtml = buildNextStepsPanelHtml({
+    rerunCommand: failureActions?.rerun || `ghostrun run ${flowName}${profile ? ` --profile ${profile}` : ''}`,
+    repairListCommand: failureActions?.viewProposals || 'ghostrun repair list',
+    reportPath: failureActions?.openReport || 'report.html',
+    applyRepairCommand: failureActions?.applyRepair
+      || (repairProposals[0] ? `ghostrun repair apply ${repairProposals[0].id.slice(0, 8)}` : undefined),
+  });
+
+  const intent = (failureV1?.intent as string | undefined) || failedStep?.name || '';
+  const intentHtml = buildIntentBlockHtml(intent);
+
+  let failurePanelHtml = '';
+  if (run.status === 'failed' && failedStep) {
+    const failedShot = resolveStepScreenshotSrc(failedStep, evidenceDir);
+    failurePanelHtml = buildFailurePanelHtml({
+      stepNumber: failedStep.stepNumber,
+      action: failedStep.action || 'step',
+      name: failedStep.name,
+      error: failedStep.errorMessage || run.errorMessage || 'Unknown error',
+      selector: failedStep.selector,
+      screenshotSrc: failedShot,
+    });
+  }
+
+  const passedCount = steps.filter(s => s.status === 'passed').length;
+  const failedCount = steps.filter(s => s.status === 'failed').length;
+
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GhostRun Report — ${escapeHtml(flow?.name || runId)}</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#080c10;color:#cdd9e5;font-family:'Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;padding:40px}
-h1{font-size:28px;color:#f0f6fc;margin-bottom:6px}
-.meta{color:#768390;font-size:13px;margin-bottom:32px}
-.summary{display:flex;gap:24px;margin-bottom:32px;flex-wrap:wrap}
-.stat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:16px 24px}
-.stat-val{font-size:26px;font-weight:600;color:${statusColor}}
-.stat-label{font-size:12px;color:#768390;text-transform:uppercase;letter-spacing:.05em}
-.steps{display:flex;flex-direction:column;gap:8px}
-.step{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden}
-.step.failed{border-color:#f85149}
-.step.passed{border-color:#21262d}
-.step-header{display:flex;align-items:center;gap:10px;padding:12px 16px;font-family:monospace;font-size:13px}
-.step-icon{font-size:16px;min-width:20px}
-.step-num{color:#768390;min-width:24px}
-.step-action{color:#39d0d8;min-width:140px}
-.step-label{color:#f0f6fc;flex:1}
-.step-dur{color:#768390;font-size:12px;text-align:right}
-.step-error{padding:10px 16px 12px 50px;color:#f85149;font-size:13px;font-family:monospace;background:#160b0b;border-top:1px solid #30363d}
-.step-screenshot{width:100%;max-height:400px;object-fit:contain;display:block;border-top:1px solid #30363d;background:#000}
-footer{margin-top:48px;color:#768390;font-size:12px}
-</style>
+<title>GhostRun Report — ${escapeHtml(flowName)}</title>
+<style>${RUN_REPORT_V2_STYLES}</style>
 </head>
 <body>
-<h1>${escapeHtml(flow?.name || runId)}</h1>
-<div class="meta">Run ID: ${run.id.slice(0,8)} &nbsp;·&nbsp; ${new Date(run.startedAt).toLocaleString()}</div>
+<div class="report">
+<section class="hero" aria-labelledby="report-title">
+  <div class="hero-top">
+    <h1 id="report-title">${escapeHtml(flowName)}</h1>
+    <span class="status-badge ${statusBadgeClass}">${run.status.toUpperCase()}</span>
+  </div>
+  ${headlineHtml}
+  <div class="hero-meta">
+    <span>Run ${run.id.slice(0, 8)}</span>
+    <span>${new Date(run.startedAt).toLocaleString()}</span>
+    ${profile ? `<span>Profile ${escapeHtml(profile)}</span>` : ''}
+    <span>Duration ${durStr}</span>
+    ${flowHash ? `<span>Flow hash ${flowHash}</span>` : ''}
+  </div>
+</section>
+
 <div class="summary">
   <div class="stat"><div class="stat-val" style="color:${statusColor}">${run.status.toUpperCase()}</div><div class="stat-label">Status</div></div>
   <div class="stat"><div class="stat-val">${durStr}</div><div class="stat-label">Duration</div></div>
-  <div class="stat"><div class="stat-val">${steps.filter(s => s.status === 'passed').length}</div><div class="stat-label">Passed</div></div>
-  <div class="stat"><div class="stat-val" style="color:${run.status==='failed'?'#f85149':'#56d364'}">${steps.filter(s => s.status === 'failed').length}</div><div class="stat-label">Failed</div></div>
+  <div class="stat"><div class="stat-val">${passedCount}</div><div class="stat-label">Passed</div></div>
+  <div class="stat"><div class="stat-val" style="color:${failedCount ? '#f85149' : '#56d364'}">${failedCount}</div><div class="stat-label">Failed</div></div>
 </div>
-<div class="steps">${stepsHtml}</div>
-<footer>Generated by GhostRun · ${new Date().toISOString()}</footer>
-</body></html>`;
 
+${nextStepsHtml}
+${failurePanelHtml}
+${intentHtml}
+${repairHtml}
+${historyHtml}
+
+<section class="timeline" aria-labelledby="timeline-heading">
+  <h2 id="timeline-heading">Timeline</h2>
+  <div class="steps">${stepsHtml}</div>
+</section>
+
+${scrapeHtml}
+
+<footer class="report-footer">
+  <span>GhostRun ${escapeHtml(pkgVersion)}</span>
+  <span>Evidence schema ${EVIDENCE_SCHEMA_VERSION}</span>
+  <span>Generated ${generatedAt}</span>
+</footer>
+</div>
+</body></html>`;
+}
+
+async function generateRunReport(runId: string, outFile: string) {
+  const html = buildRunReportHtml(runId);
+  if (!html) return;
   fs.writeFileSync(outFile, html);
   success(`HTML report: ${chalk.cyan(outFile)}`);
 }
@@ -2753,11 +5153,14 @@ async function runAnalyzeRun(id: string) {
   if (!failedStep) { info('Run passed — no failures to analyze.'); return; }
 
   info('Analyzing failure...');
+  const latestScrape = db.listScrapeRunsForRun(run.id)[0];
+  const scrapeContext = extractScrapeText(readScrapeResult(latestScrape?.resultPath || null));
   const result = await callAI(buildFailurePrompt({
     flowName: flow?.name || 'Unknown',
     steps: steps.map(s => ({ stepNumber: s.stepNumber, name: s.name, action: s.action, selector: s.selector, status: s.status, errorMessage: s.errorMessage })),
     failedStep: { name: failedStep.name, action: failedStep.action, selector: failedStep.selector, errorMessage: failedStep.errorMessage || 'Unknown error' },
-  }));
+    scrapeContext,
+  }), { mode: 'summary', metadata: { flowId: flow?.id || '', runId: run.id } });
 
   if (result) {
     db.updateRun(run.id, { summary: result.text });
@@ -2776,7 +5179,7 @@ async function runAnalyzeRun(id: string) {
 // ============================================
 
 async function runScheduleAdd(id: string, cronExpr: string) {
-  let flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
+  const flow = db.findFlowByPartialId(id) || db.findFlowByName(id);
   if (!flow) { errorMsg('Flow not found: ' + id); process.exit(1); }
 
   // Validate cron expression
@@ -2790,8 +5193,54 @@ async function runScheduleAdd(id: string, cronExpr: string) {
   info(`ID:   ${chalk.gray(schedule.id.slice(0, 8))}`);
   console.log();
   console.log(chalk.gray('  Start the scheduler daemon with:'));
-  console.log('  ' + chalk.cyan('ghostrun serve'));
+  console.log('  ' + chalk.cyan('ghostrun monitor daemon'));
+  console.log('  ' + chalk.gray('(or: ghostrun serve --daemon)'));
   console.log();
+}
+
+async function runMonitorCommand(monitorArgs: string[]) {
+  const sub = monitorArgs[0];
+  if (!sub) {
+    printLogo(); divider();
+    console.log(chalk.bold('\n  GhostRun Monitor\n'));
+    console.log(`  ${chalk.cyan('ghostrun monitor <flow> --interval 60s')}     ${chalk.gray('Poll a flow on an interval')}`);
+    console.log(`  ${chalk.cyan('ghostrun monitor daemon')}                  ${chalk.gray('Run cron schedules (PID file)')}`);
+    console.log(`  ${chalk.cyan('ghostrun monitor schedule list')}             ${chalk.gray('List cron schedules')}`);
+    console.log(`  ${chalk.cyan('ghostrun monitor schedule add <id> "<cron>"')} ${chalk.gray('Add schedule')}`);
+    console.log(`  ${chalk.cyan('ghostrun monitor schedule remove <id>')}      ${chalk.gray('Remove schedule')}`);
+    console.log();
+    return;
+  }
+
+  if (sub === 'daemon') {
+    await runServe(['--daemon', ...monitorArgs.slice(1)]);
+    return;
+  }
+
+  if (sub === 'schedule') {
+    const action = monitorArgs[1] || 'list';
+    if (action === 'list') {
+      await runScheduleList();
+      return;
+    }
+    if (action === 'add') {
+      if (!monitorArgs[2] || !monitorArgs[3]) {
+        errorMsg('Usage: ghostrun monitor schedule add <flow-id> "<cron>"');
+        process.exit(1);
+      }
+      await runScheduleAdd(monitorArgs[2], monitorArgs[3]);
+      return;
+    }
+    if (action === 'remove') {
+      if (!monitorArgs[2]) { errorMsg('Schedule ID required'); process.exit(1); }
+      await runScheduleRemove(monitorArgs[2]);
+      return;
+    }
+    errorMsg('Unknown schedule action. Use: list, add, remove');
+    process.exit(1);
+  }
+
+  await runMonitor(sub, monitorArgs.slice(1));
 }
 
 async function runScheduleList() {
@@ -2820,12 +5269,32 @@ async function runScheduleRemove(id: string) {
 
 async function runServe(serveArgs: string[] = []) {
   const withUI = serveArgs.includes('--ui');
+  const daemon = serveArgs.includes('--daemon');
   const portIdx = serveArgs.indexOf('--port');
   const port = portIdx !== -1 ? parseInt(serveArgs[portIdx + 1], 10) || 3000 : 3000;
 
   if (withUI) {
     await runServeDashboard(port);
     return;
+  }
+
+  ensureProjectWorkspace();
+  const pidPath = getSchedulerPidPath();
+
+  if (daemon) {
+    if (fs.existsSync(pidPath)) {
+      const existingPid = parseInt(fs.readFileSync(pidPath, 'utf8'), 10);
+      if (!Number.isNaN(existingPid) && isProcessRunning(existingPid)) {
+        errorMsg(`Scheduler already running (PID ${existingPid}). Stop it first or remove ${pidPath}`);
+        process.exit(1);
+      }
+      fs.unlinkSync(pidPath);
+    }
+    fs.writeFileSync(pidPath, String(process.pid));
+    const cleanupPid = () => { try { if (fs.existsSync(pidPath)) fs.unlinkSync(pidPath); } catch { /* ignore */ } };
+    process.on('SIGINT', cleanupPid);
+    process.on('SIGTERM', cleanupPid);
+    process.on('exit', cleanupPid);
   }
 
   printLogo(); divider();
@@ -2835,13 +5304,15 @@ async function runServe(serveArgs: string[] = []) {
   const schedules = db.listSchedules();
   if (schedules.length === 0) {
     warn('No schedules configured. Add one first:');
-    info('ghostrun flow:schedule <id> "0 9 * * *"');
+    info('ghostrun monitor schedule add <id> "0 9 * * *"');
     process.exit(0);
   }
 
   console.log(chalk.bold(`\n  Scheduler started — ${schedules.length} schedule${schedules.length > 1 ? 's' : ''} active\n`));
+  if (daemon) info(`PID file: ${chalk.cyan(pidPath)}`);
   schedules.forEach(s => info(`${s.name} → ${chalk.cyan(s.cronExpression)}`));
   console.log(chalk.gray('\n  Press Ctrl+C to stop.\n'));
+  console.log(chalk.gray('  Production tip: use GitHub Actions schedule for always-on monitoring.\n'));
 
   for (const schedule of schedules) {
     nodeCron.schedule(schedule.cronExpression, async () => {
@@ -2870,12 +5341,37 @@ async function runServe(serveArgs: string[] = []) {
 async function runServeDashboard(port: number) {
   const http = await import('http');
   const { EventEmitter } = await import('events');
+  const { spawn } = await import('child_process');
 
   const logBus = new EventEmitter();
   logBus.setMaxListeners(100);
 
   // Active run SSE subscribers: flowId → Set<response>
   const sseClients = new Set<any>();
+  const commandHistory: Array<{
+    id: string;
+    command: string;
+    args: string[];
+    status: 'running' | 'passed' | 'failed';
+    exitCode: number | null;
+    duration: number | null;
+    output: string;
+    startedAt: string;
+    completedAt: string | null;
+  }> = [];
+  const allowedDashboardCommands = new Set([
+    'status',
+    'flow:list',
+    'run:list',
+    'env:list',
+    'suite:list',
+    'schedule:list',
+    'perf:list',
+    'scrape:list',
+    'store:list',
+    'store',
+    'run',
+  ]);
 
   function broadcast(event: string, data: unknown) {
     const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -3242,6 +5738,7 @@ async function runServeDashboard(port: number) {
 <div class="tabs">
   <div class="tab active" data-tab="flows">Flows</div>
   <div class="tab" data-tab="runs">Run History</div>
+  <div class="tab" data-tab="commands">Commands</div>
   <div class="tab" data-tab="chat">Chat</div>
 </div>
 <div class="main">
@@ -3293,6 +5790,28 @@ async function runServeDashboard(port: number) {
     </table>
   </div>
 
+  <!-- COMMANDS TAB -->
+  <div id="tab-commands" class="panel-hidden">
+    <div class="section-header"><span class="section-title">CLI Commands</span></div>
+    <div class="log-container" style="height:auto;min-height:180px;margin-bottom:16px;">
+      <div class="log-header">
+        <span class="log-title">Run allowlisted commands through GhostRun</span>
+      </div>
+      <div style="display:flex;gap:10px;padding:14px;align-items:center;flex-wrap:wrap;">
+        <select id="command-select" class="chat-input" style="max-width:220px;"></select>
+        <input id="command-args" class="chat-input" placeholder="optional args, e.g. flow-id --output json" />
+        <button id="command-run" class="chat-send" onclick="runCommand()">Run</button>
+      </div>
+      <pre id="command-output" class="log-body" style="height:180px;white-space:pre-wrap;">Select a command and run it.</pre>
+    </div>
+    <table class="runs-table">
+      <thead>
+        <tr><th>Command</th><th>Status</th><th>Duration</th><th>When</th><th>Output</th></tr>
+      </thead>
+      <tbody id="commands-tbody"></tbody>
+    </table>
+  </div>
+
   <!-- CHAT TAB -->
   <div id="tab-chat" class="panel-hidden">
     <div class="chat-container">
@@ -3317,12 +5836,13 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     const id = t.dataset.tab;
-    ['flows','runs','chat'].forEach(tab => {
+    ['flows','runs','commands','chat'].forEach(tab => {
       const el = document.getElementById('tab-' + tab);
       if (tab === id) el.classList.remove('panel-hidden');
       else el.classList.add('panel-hidden');
     });
     if (id === 'runs') loadRuns();
+    if (id === 'commands') loadCommands();
   });
 });
 
@@ -3366,6 +5886,59 @@ function renderFlows(flows) {
       </td>
     </tr>
   \`).join('');
+}
+
+// ─── Commands tab ────────────────────────────────────────────────
+async function loadCommands() {
+  const r = await fetch('/api/commands');
+  const data = await r.json();
+  const select = document.getElementById('command-select');
+  select.innerHTML = data.allowed.map(cmd => '<option value="' + cmd + '">' + cmd + '</option>').join('');
+  renderCommandHistory(data.history);
+}
+
+function renderCommandHistory(history) {
+  const tbody = document.getElementById('commands-tbody');
+  window.__commandHistory = history;
+  if (!history.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No dashboard commands run yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = history.map(item => \`
+    <tr>
+      <td>\${item.command} \${(item.args || []).join(' ')}</td>
+      <td>\${badgeHtml(item.status)}</td>
+      <td>\${item.duration ? item.duration + 'ms' : '—'}</td>
+      <td>\${item.startedAt ? timeAgo(item.startedAt) : '—'}</td>
+      <td><button class="btn btn-run" onclick="showCommandOutput('\${item.id}')">Output</button></td>
+    </tr>
+  \`).join('');
+}
+
+async function runCommand() {
+  const command = document.getElementById('command-select').value;
+  const argsText = document.getElementById('command-args').value.trim();
+  const button = document.getElementById('command-run');
+  button.disabled = true;
+  document.getElementById('command-output').textContent = 'Running ' + command + (argsText ? ' ' + argsText : '') + '...';
+  try {
+    const r = await fetch('/api/commands/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ command, args: argsText ? argsText.split(/\\s+/) : [] })
+    });
+    const data = await r.json();
+    document.getElementById('command-output').textContent = data.output || data.error || '(no output)';
+    await loadCommands();
+  } catch (err) {
+    document.getElementById('command-output').textContent = 'Error: ' + err.message;
+  }
+  button.disabled = false;
+}
+
+function showCommandOutput(id) {
+  const item = (window.__commandHistory || []).find(x => x.id === id);
+  document.getElementById('command-output').textContent = item ? item.output : '(not found)';
 }
 
 function badgeHtml(status) {
@@ -3523,6 +6096,99 @@ setInterval(loadFlows, 10000); // refresh every 10s
 </body>
 </html>`;
 
+  function parseJsonBody(req: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+        if (body.length > 64_000) {
+          reject(new Error('Request body too large'));
+          req.destroy();
+        }
+      });
+      req.on('end', () => {
+        try {
+          resolve(body ? JSON.parse(body) : {});
+        } catch (err) {
+          reject(err);
+        }
+      });
+      req.on('error', reject);
+    });
+  }
+
+  function normalizeDashboardCommand(command: string, args: string[]): { command: string; args: string[] } {
+    let normalizedCommand = command.trim();
+    let normalizedArgs = args.map(a => String(a).trim()).filter(Boolean);
+    if (normalizedCommand === 'store:list') {
+      normalizedCommand = 'store';
+      normalizedArgs = ['list', ...normalizedArgs];
+    }
+    if (!allowedDashboardCommands.has(normalizedCommand)) {
+      throw new Error(`Command is not allowed from the dashboard: ${command}`);
+    }
+    if (normalizedCommand === 'store' && normalizedArgs[0] !== 'list') {
+      throw new Error('Only `store list` is allowed from the dashboard.');
+    }
+    if (normalizedCommand === 'run' && normalizedArgs.length === 0) {
+      throw new Error('Run requires a flow ID or name.');
+    }
+    if (normalizedArgs.length > 8) {
+      throw new Error('Too many arguments.');
+    }
+    for (const arg of normalizedArgs) {
+      if (!/^[\w:./=@-]+$/.test(arg)) {
+        throw new Error(`Argument contains unsupported characters: ${arg}`);
+      }
+    }
+    return { command: normalizedCommand, args: normalizedArgs };
+  }
+
+  function runDashboardCommand(command: string, args: string[]): Promise<(typeof commandHistory)[number]> {
+    const normalized = normalizeDashboardCommand(command, args);
+    const record: (typeof commandHistory)[number] = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      command: normalized.command === 'store' && normalized.args[0] === 'list' ? 'store:list' : normalized.command,
+      args: normalized.command === 'store' && normalized.args[0] === 'list' ? normalized.args.slice(1) : normalized.args,
+      status: 'running',
+      exitCode: null,
+      duration: null,
+      output: '',
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    commandHistory.unshift(record);
+    commandHistory.splice(50);
+
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const child = spawn(process.execPath, [process.argv[1], normalized.command, ...normalized.args], {
+        cwd: process.cwd(),
+        env: { ...process.env, NO_COLOR: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.on('error', (err) => {
+        record.status = 'failed';
+        record.exitCode = 1;
+        record.duration = Date.now() - started;
+        record.completedAt = new Date().toISOString();
+        record.output = err.message;
+        resolve(record);
+      });
+      child.on('close', (code) => {
+        record.exitCode = code;
+        record.status = code === 0 ? 'passed' : 'failed';
+        record.duration = Date.now() - started;
+        record.completedAt = new Date().toISOString();
+        record.output = output.slice(-20_000);
+        resolve(record);
+      });
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url!, `http://localhost:${port}`);
     const path = url.pathname;
@@ -3586,6 +6252,32 @@ setInterval(loadFlows, 10000); // refresh every 10s
       const runsWithName = runs.map(r => ({ ...r, flowName: flowMap[r.flowId] || r.flowId }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(runsWithName));
+      return;
+    }
+
+    // ── GET /api/commands
+    if (req.method === 'GET' && path === '/api/commands') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        allowed: ['status', 'flow:list', 'run:list', 'env:list', 'suite:list', 'schedule:list', 'perf:list', 'scrape:list', 'store:list', 'run'],
+        history: commandHistory,
+      }));
+      return;
+    }
+
+    // ── POST /api/commands/run
+    if (req.method === 'POST' && path === '/api/commands/run') {
+      try {
+        const body = await parseJsonBody(req);
+        const command = String(body.command || '');
+        const args = Array.isArray(body.args) ? body.args.map(String) : [];
+        const result = await runDashboardCommand(command, args);
+        res.writeHead(result.status === 'passed' ? 200 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
 
@@ -3776,6 +6468,11 @@ async function runStatus() {
 
   console.log();
   console.log('  ' + chalk.gray('Data Path:    ') + chalk.white(DATA_PATH));
+  console.log('  ' + chalk.gray('Project Path: ') + chalk.white(PROJECT_GHOSTRUN_PATH));
+  console.log('  ' + chalk.gray('Mode:         ') + chalk.white(getInteractionMode()));
+  console.log('  ' + chalk.gray('Profile:      ') + chalk.white(readConfig().activeProfile || '(none)'));
+  console.log('  ' + chalk.gray('Auto-improve: ') + chalk.white(readConfig().policies?.autoImproveEnabled ? 'enabled' : 'disabled'));
+  console.log('  ' + chalk.gray('Loop Guard:   ') + chalk.white(`iter=${readConfig().policies?.maxAutoImproveIterations ?? 3}, repeats=${readConfig().policies?.maxSameFailureRepeats ?? 2}`));
 
   // AI provider detection
   const ollamaModel = await isOllamaRunning();
@@ -3787,6 +6484,782 @@ async function runStatus() {
     console.log('  ' + chalk.gray('AI Provider:  ') + chalk.gray('none (run ollama locally or set ANTHROPIC_API_KEY)'));
   }
   console.log();
+}
+
+async function runAiStatus() {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const ollamaModel = await isOllamaRunning();
+  const provider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? 'Anthropic' : 'none';
+  const usage = aggregateAiUsage();
+
+  console.log(chalk.bold('\n  AI Status\n'));
+  console.log('  ' + chalk.gray('Interaction:  ') + chalk.white(config.interactionMode || 'assist'));
+  console.log('  ' + chalk.gray('Configured:   ') + chalk.white(config.ai?.provider || 'auto'));
+  console.log('  ' + chalk.gray('Available:    ') + (provider === 'none' ? chalk.gray(provider) : chalk.green(provider)));
+  console.log('  ' + chalk.gray('Track Usage:  ') + chalk.white(config.ai?.trackUsage === false ? 'no' : 'yes'));
+  console.log('  ' + chalk.gray('Store Logs:   ') + chalk.white(config.ai?.storeSanitizedTranscripts === false ? 'no' : 'yes'));
+  console.log('  ' + chalk.gray('CI Policy:    ') + chalk.white(config.policies?.allowAiInCi || 'summary-only'));
+  console.log('  ' + chalk.gray('Sessions:     ') + chalk.white(String(usage.calls)));
+  console.log('  ' + chalk.gray('Tokens:       ') + chalk.white(String(usage.totalTokens)));
+  console.log();
+}
+
+async function runAiUsage() {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const usage = aggregateAiUsage();
+  console.log(chalk.bold('\n  AI Usage\n'));
+  console.log(`  Calls:         ${chalk.white(String(usage.calls))}`);
+  console.log(`  Input tokens:  ${chalk.white(String(usage.inputTokens))}`);
+  console.log(`  Output tokens: ${chalk.white(String(usage.outputTokens))}`);
+  console.log(`  Total tokens:  ${chalk.white(String(usage.totalTokens))}`);
+  if (usage.estimatedCostUsd > 0) {
+    console.log(`  Est. cost:     ${chalk.white('$' + usage.estimatedCostUsd.toFixed(4))}`);
+  }
+  const providerKeys = Object.keys(usage.byProvider);
+  if (providerKeys.length > 0) {
+    console.log(chalk.bold('\n  By Provider\n'));
+    for (const key of providerKeys) {
+      const row = usage.byProvider[key];
+      console.log(`  ${chalk.cyan(key.padEnd(30))} ${chalk.white(String(row.calls).padStart(4))} calls  ${chalk.gray(String(row.totalTokens) + ' tokens')}`);
+    }
+  }
+  console.log();
+}
+
+async function runAiSessions(limitArg?: string) {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const limit = limitArg ? Math.max(1, parseInt(limitArg, 10) || 10) : 10;
+  const sessions = listAiSessions(limit);
+  console.log(chalk.bold(`\n  AI Sessions (${sessions.length})\n`));
+  if (sessions.length === 0) {
+    warn('No AI sessions recorded yet.');
+    console.log();
+    return;
+  }
+  for (const session of sessions) {
+    console.log(`  ${chalk.gray(session.id.slice(0, 8))}  ${chalk.cyan(session.mode.padEnd(10))}  ${chalk.white(session.provider.padEnd(10))}  ${chalk.gray(session.model)}  ${chalk.white(String(session.usage.totalTokens || 0).padStart(6))} tok  ${chalk.gray(timeAgo(session.timestamp))}`);
+    console.log(`           ${chalk.gray(session.promptPreview.slice(0, 120).replace(/\s+/g, ' '))}`);
+  }
+  console.log();
+}
+
+async function runConfigMode(mode?: string) {
+  const config = readConfig();
+  if (!mode) {
+    printLogo(); divider();
+    console.log(chalk.bold('\n  Interaction Mode\n'));
+    console.log('  ' + chalk.white(config.interactionMode || 'assist'));
+    console.log();
+    return;
+  }
+  if (mode !== 'assist' && mode !== 'auto') {
+    errorMsg('Mode must be "assist" or "auto"');
+    process.exit(1);
+  }
+  config.interactionMode = mode;
+  writeConfig(config, 'project');
+  success(`Interaction mode set to: ${mode}`);
+}
+
+async function runProfileList() {
+  printLogo(); divider();
+  const config = readConfig();
+  const profiles = listProfiles();
+  console.log(chalk.bold(`\n  Profiles (${profiles.length})\n`));
+  if (profiles.length === 0) {
+    warn('No profiles found. Create one: ghostrun profile:create staging https://staging.example.com');
+    console.log();
+    return;
+  }
+  for (const profile of profiles) {
+    const active = config.activeProfile === profile.name ? chalk.green(' *') : '  ';
+    const auth = profile.auth?.strategy || 'none';
+    const acctCount = listAccountIds(profile).length;
+    const acctHint = acctCount > 0 ? chalk.gray(`  ${acctCount} account(s)`) : '';
+    console.log(`  ${chalk.white(profile.name)}${active}  ${chalk.gray((profile.baseUrl || '—').padEnd(36).slice(0, 36))}  ${chalk.cyan(auth)}${acctHint}`);
+  }
+  console.log();
+}
+
+async function runProfileShow(name: string) {
+  printLogo(); divider();
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg('Profile not found: ' + name);
+    process.exit(1);
+  }
+  console.log(chalk.bold(`\n  Profile: ${profile.name}\n`));
+  console.log(`  Base URL: ${chalk.white(profile.baseUrl || '—')}`);
+  console.log(`  Auth:     ${chalk.white(profile.auth?.strategy || 'none')}`);
+  if (profile.auth?.loginFlow) console.log(`  Login:    ${chalk.white(profile.auth.loginFlow)}`);
+  if (profile.auth?.storageState) console.log(`  State:    ${chalk.white(profile.auth.storageState)}`);
+  if (profile.auth?.usernameVar) console.log(`  User Var: ${chalk.white(profile.auth.usernameVar)}`);
+  if (profile.auth?.usernameSecret) console.log(`  User Sec: ${chalk.white(profile.auth.usernameSecret)}`);
+  if (profile.auth?.passwordSecret) console.log(`  Pass Sec: ${chalk.white(profile.auth.passwordSecret)}`);
+  if (profile.auth?.tokenSecret) console.log(`  Token:    ${chalk.white(profile.auth.tokenSecret)}`);
+  const accountIds = listAccountIds(profile);
+  if (accountIds.length) {
+    console.log(chalk.bold('\n  Accounts:\n'));
+    for (const id of accountIds) {
+      const acc = getProfileAccount(profile, id)!;
+      const def = profile.defaultAccount === id ? chalk.green(' (default)') : '';
+      console.log(`  ${chalk.cyan(id)}${def}  ${chalk.gray(acc.label || '')}`);
+      console.log(`    emailVar: ${chalk.yellow(acc.emailVar || 'testEmail')}  passwordSecret: ${chalk.yellow(acc.passwordSecret)}`);
+      if (acc.emailSecret) console.log(`    emailSecret: ${chalk.yellow(acc.emailSecret)}`);
+      if (acc.loginFlow) console.log(`    loginFlow: ${chalk.white(acc.loginFlow)}`);
+    }
+    console.log(chalk.gray('\n  Run: ghostrun run <flow> --profile ' + profile.name + ' --account <id>'));
+  }
+  const vars = profile.variables || {};
+  console.log(`  Vars:     ${chalk.white(String(Object.keys(vars).length))}`);
+  for (const [key, value] of Object.entries(vars)) {
+    console.log(`    ${chalk.yellow(key)}=${chalk.gray(value)}`);
+  }
+  console.log();
+}
+
+async function runProfileCreate(name: string, baseUrl?: string) {
+  ensureProjectWorkspace();
+  if (getProfile(name)) {
+    errorMsg(`Profile already exists: ${name}`);
+    process.exit(1);
+  }
+  const profile: GhostrunProfile = {
+    name,
+    baseUrl: baseUrl || '',
+    variables: {},
+    auth: { strategy: 'none' },
+    metadata: {},
+  };
+  saveProfile(profile);
+  success(`Created profile: ${name}`);
+  if (baseUrl) info(`Base URL: ${baseUrl}`);
+}
+
+async function runProfileUse(name: string) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg('Profile not found: ' + name);
+    process.exit(1);
+  }
+  const config = readConfig();
+  config.activeProfile = name;
+  writeConfig(config, 'project');
+  success(`Active profile set to: ${name}`);
+}
+
+async function runProfileSet(name: string, key: string, value: string) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg('Profile not found: ' + name);
+    process.exit(1);
+  }
+  if (key === 'baseUrl') {
+    profile.baseUrl = value;
+  } else if (key.startsWith('auth.')) {
+    profile.auth = profile.auth || {};
+    (profile.auth as Record<string, string>)[key.slice(5)] = value;
+  } else if (key.startsWith('meta.')) {
+    profile.metadata = profile.metadata || {};
+    profile.metadata[key.slice(5)] = value;
+  } else {
+    profile.variables = profile.variables || {};
+    profile.variables[key] = value;
+  }
+  saveProfile(profile);
+  success(`Updated profile "${name}": ${key}`);
+}
+
+async function runProfileDelete(name: string) {
+  const profile = getProfile(name);
+  if (!profile) {
+    errorMsg('Profile not found: ' + name);
+    process.exit(1);
+  }
+  const approved = await confirmAction(`  Delete profile "${chalk.yellow(name)}"? (y/N) `, false);
+  if (!approved) {
+    warn('Cancelled.');
+    return;
+  }
+  deleteProfile(name);
+  const config = readConfig();
+  if (config.activeProfile === name) {
+    delete config.activeProfile;
+    writeConfig(config, 'project');
+  }
+  success(`Deleted profile: ${name}`);
+}
+
+async function runProfileAccountAdd(
+  profileName: string,
+  accountId: string,
+  opts: { email?: string; emailSecret?: string; passwordSecret?: string; loginFlow?: string; label?: string; default?: boolean },
+) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg('Profile not found: ' + profileName);
+    process.exit(1);
+  }
+  const id = normalizeAccountId(accountId);
+  const secrets = secretNamesForAccount(id);
+  const passSecret = opts.passwordSecret || secrets.password;
+  const account = buildAccountFromSecrets({
+    id,
+    label: opts.label || id,
+    email: opts.email,
+    emailSecret: opts.emailSecret || secrets.email,
+    passwordSecret: passSecret,
+    loginFlow: opts.loginFlow,
+  });
+  profile.accounts = profile.accounts || {};
+  profile.accounts[id] = account;
+  if (opts.default || !profile.defaultAccount) profile.defaultAccount = id;
+  if (!profile.auth || profile.auth.strategy === 'none') {
+    profile.auth = {
+      strategy: 'form',
+      loginFlow: opts.loginFlow || profile.auth?.loginFlow || 'login',
+      usernameVar: account.emailVar || 'testEmail',
+    };
+  }
+  saveProfile(profile);
+  success(`Added account "${id}" to profile "${profileName}"`);
+  info(`Email var: ${account.emailVar}  → export ${account.emailSecret}=...`);
+  info(`Password:  export ${account.passwordSecret}=...`);
+  info(`Run: ghostrun run <flow> --profile ${profileName} --account ${id}`);
+}
+
+async function runProfileAccountsList(profileName: string) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg('Profile not found: ' + profileName);
+    process.exit(1);
+  }
+  const ids = listAccountIds(profile);
+  console.log(chalk.bold(`\n  Accounts on profile "${profileName}" (${ids.length})\n`));
+  if (!ids.length) {
+    warn('No accounts defined. Add one: ghostrun profile account add staging admin --email qa-admin@co.com');
+    console.log();
+    return;
+  }
+  for (const id of ids) {
+    const acc = getProfileAccount(profile, id)!;
+    const def = profile.defaultAccount === id ? chalk.green(' (default)') : '';
+    console.log(`  ${chalk.cyan(id)}${def}  ${chalk.gray(acc.label || '')}`);
+    console.log(`    ${chalk.yellow(acc.emailVar || 'testEmail')}  password: ${chalk.yellow(acc.passwordSecret)}`);
+    if (acc.emailSecret) console.log(`    email env: ${chalk.yellow(acc.emailSecret)}`);
+  }
+  console.log();
+}
+
+async function runProfileAccountShow(profileName: string, accountId: string) {
+  const profile = getProfile(profileName);
+  if (!profile) {
+    errorMsg('Profile not found: ' + profileName);
+    process.exit(1);
+  }
+  const acc = getProfileAccount(profile, accountId);
+  if (!acc) {
+    errorMsg(`Account not found: ${accountId}. Defined: ${listAccountIds(profile).join(', ') || '(none)'}`);
+    process.exit(1);
+  }
+  console.log(chalk.bold(`\n  Account: ${normalizeAccountId(accountId)} (${profileName})\n`));
+  console.log(JSON.stringify(acc, null, 2));
+  console.log();
+}
+
+async function setupProfileAccountsInteractive(staging: GhostrunProfile, clack: {
+  confirm: typeof import('@clack/prompts').confirm;
+  text: typeof import('@clack/prompts').text;
+  isCancel: typeof import('@clack/prompts').isCancel;
+  note: typeof import('@clack/prompts').note;
+}) {
+  const { confirm, text, isCancel, note } = clack;
+  const addAccounts = await confirm({
+    message: 'Configure QA accounts (superadmin, admin, manager, guest)?',
+    initialValue: true,
+  });
+  if (isCancel(addAccounts) || !addAccounts) return;
+
+  const loginFlow = await text({
+    message: 'Login flow name (record this first if missing):',
+    placeholder: 'login',
+    defaultValue: 'login',
+  });
+  const flowName = !isCancel(loginFlow) && loginFlow ? String(loginFlow) : 'login';
+
+  staging.auth = {
+    strategy: 'form',
+    loginFlow: flowName,
+    usernameVar: 'testEmail',
+  };
+
+  const useDefaults = await confirm({
+    message: 'Create all four roles now (superadmin, admin, manager, guest)?',
+    initialValue: true,
+  });
+  if (!isCancel(useDefaults) && useDefaults) {
+    const domain = await text({
+      message: 'Email domain for QA users:',
+      placeholder: 'yourapp.com',
+      defaultValue: 'yourapp.com',
+    });
+    const emailDomain = !isCancel(domain) && domain ? String(domain) : 'yourapp.com';
+    staging.accounts = buildDefaultSaaSAccounts(flowName, emailDomain);
+    staging.defaultAccount = 'manager';
+    staging.metadata = { ...staging.metadata, accountTypes: DEFAULT_SAAS_ACCOUNT_IDS.join(',') };
+    saveProfile(staging);
+    const lines = DEFAULT_SAAS_ACCOUNT_IDS.map(id => {
+      const a = staging.accounts![id];
+      return `  export ${a.emailSecret}='qa-${id}@${emailDomain}'\n  export ${a.passwordSecret}='...'`;
+    });
+    note(
+      `Set passwords (emails are suggested defaults):\n${lines.join('\n')}\n\nRun by role:\n  ghostrun run <flow> --profile staging --account superadmin`,
+      'Accounts: superadmin, admin, manager, guest'
+    );
+    return;
+  }
+
+  let addMore = true;
+  while (addMore) {
+    const role = await text({
+      message: 'Account type id (superadmin, admin, manager, guest, …):',
+      placeholder: 'manager',
+      validate: v => (!v || !v.trim()) ? 'Required' : undefined,
+    });
+    if (isCancel(role) || !role) break;
+    const id = normalizeAccountId(String(role));
+    const email = await text({
+      message: `Email for "${id}":`,
+      placeholder: `qa-${id}@yourapp.com`,
+      validate: v => (!v || !v.includes('@')) ? 'Enter a valid email' : undefined,
+    });
+    if (isCancel(email) || !email) break;
+    const secrets = secretNamesForAccount(id);
+    const account = buildAccountFromSecrets({
+      id,
+      label: id,
+      email: String(email),
+      emailSecret: secrets.email,
+      passwordSecret: secrets.password,
+      loginFlow: flowName,
+    });
+    staging.accounts = staging.accounts || {};
+    staging.accounts[id] = account;
+    if (!staging.defaultAccount) staging.defaultAccount = id;
+
+    const another = await confirm({ message: 'Add another account type?', initialValue: false });
+    addMore = !isCancel(another) && !!another;
+  }
+
+  saveProfile(staging);
+  const lines = listAccountIds(staging).map(id => {
+    const a = staging.accounts![id];
+    return `  export ${a.emailSecret}='...'\n  export ${a.passwordSecret}='...'`;
+  });
+  note(
+    `Set secrets before running flows:\n${lines.join('\n')}\n\nRun as a role:\n  ghostrun run checkout --profile staging --account admin`,
+    'Multi-account staging'
+  );
+}
+
+async function runImprove() {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const runs = db.listRuns(undefined, 50);
+  const proposals = listRepairProposals(50);
+  const sessions = listAiSessions(50);
+  const activeProfile = config.activeProfile;
+  const findings: string[] = [];
+  const actions: string[] = [];
+  const safeguards: string[] = [];
+
+  const repeatedFailures = new Map<string, number>();
+  for (const run of runs.filter(r => r.status === 'failed')) {
+    const key = (run.errorMessage || 'unknown').slice(0, 120);
+    repeatedFailures.set(key, (repeatedFailures.get(key) || 0) + 1);
+  }
+
+  const maxRepeats = config.policies?.maxSameFailureRepeats ?? 2;
+  const repeatedEntries = Array.from(repeatedFailures.entries()).filter(([, count]) => count > 1);
+  if (repeatedEntries.length > 0) {
+    for (const [message, count] of repeatedEntries.slice(0, 5)) {
+      findings.push(`Repeated failure (${count}x): ${message}`);
+      if (count >= maxRepeats) safeguards.push(`Same failure exceeded repeat threshold (${maxRepeats}): ${message}`);
+    }
+  }
+
+  const openProposals = proposals.filter(p => p.status === 'proposed');
+  if (openProposals.length > 0) {
+    findings.push(`${openProposals.length} open repair proposal(s) available.`);
+    actions.push(`Review with: ghostrun repair list`);
+  }
+
+  const staleProposals = openProposals.filter(p => Date.now() - new Date(p.createdAt).getTime() > 7 * 86400000);
+  if (staleProposals.length > 0) {
+    findings.push(`${staleProposals.length} repair proposal(s) are older than 7 days.`);
+    actions.push('Review stale proposals with: ghostrun repair list');
+  }
+
+  const neverRunFlows: string[] = [];
+  const highFailureFlows: Array<{ name: string; rate: number; runs: number }> = [];
+  const alwaysPassFlows: string[] = [];
+  for (const flow of db.listFlows()) {
+    const stats = db.getFlowStats(flow.id);
+    if (stats.totalRuns === 0) neverRunFlows.push(flow.name);
+    else if (stats.totalRuns >= 5 && stats.passRate < 80) {
+      highFailureFlows.push({ name: flow.name, rate: stats.passRate, runs: stats.totalRuns });
+    } else if (stats.totalRuns >= 10 && stats.passRate === 100) {
+      alwaysPassFlows.push(flow.name);
+    }
+  }
+  if (neverRunFlows.length) {
+    findings.push(`${neverRunFlows.length} flow(s) have never been run: ${neverRunFlows.slice(0, 5).join(', ')}`);
+    actions.push('Add never-run flows to a smoke suite or remove dead assets.');
+  }
+  if (highFailureFlows.length) {
+    for (const item of highFailureFlows.slice(0, 5)) {
+      findings.push(`High failure rate (${item.rate.toFixed(0)}% over ${item.runs} runs): ${item.name}`);
+    }
+    actions.push('Inspect high-failure flows with ghostrun run:show and ghostrun repair list');
+  }
+  if (alwaysPassFlows.length) {
+    findings.push(`${alwaysPassFlows.length} flow(s) always pass — possible coverage gaps: ${alwaysPassFlows.slice(0, 5).join(', ')}`);
+  }
+
+  const flakyFlows = detectFlakyFlows();
+  if (flakyFlows.length) {
+    findings.push(`Flaky flows detected: ${flakyFlows.slice(0, 5).join(', ')}`);
+    actions.push('Stabilize flaky flows with stronger waits or isolated setup steps.');
+  }
+
+  const aiUsage = aggregateAiUsage();
+  const authorSessions = sessions.filter(s => s.mode === 'author' || s.mode === 'create');
+  if (authorSessions.length >= 5) {
+    findings.push(`AI authoring used ${authorSessions.length} times recently (~$${aiUsage.estimatedCostUsd.toFixed(2)} estimated).`);
+  }
+
+  if (!activeProfile) {
+    findings.push('No active profile is set.');
+    actions.push('Create and select a profile for staging or production runs.');
+  }
+
+  if (runs.length === 0) {
+    findings.push('No runs recorded yet.');
+    actions.push('Run a smoke flow before using improve.');
+  }
+
+  if (sessions.length === 0) {
+    findings.push('No AI sessions recorded yet.');
+  }
+
+  const blocked = safeguards.length > 0 && config.policies?.autoImproveEnabled;
+  let summary: string | undefined;
+
+  const prompt = [
+    'You are improving a local-first test automation project.',
+    'Summarize the highest-value next actions in 4 bullet points max.',
+    'Do not suggest infinite retry loops.',
+    '',
+    `Auto improve enabled: ${config.policies?.autoImproveEnabled ? 'yes' : 'no'}`,
+    `Active profile: ${activeProfile || 'none'}`,
+    `Open repair proposals: ${openProposals.length}`,
+    `Recent failed runs: ${runs.filter(r => r.status === 'failed').length}`,
+    '',
+    'Findings:',
+    ...findings.map(f => `- ${f}`),
+    '',
+    'Safeguards:',
+    ...(safeguards.length ? safeguards.map(s => `- ${s}`) : ['- none']),
+  ].join('\n');
+
+  if (config.policies?.autoImproveEnabled && !blocked) {
+    const ai = await callAI(prompt, { mode: 'improve', metadata: { profile: activeProfile || '', openProposals: String(openProposals.length) } });
+    if (ai?.text) summary = ai.text;
+  }
+
+  const report: ImproveReport = {
+    id: uuidv4(),
+    createdAt: new Date().toISOString(),
+    status: blocked ? 'blocked' : 'generated',
+    autoImproveEnabled: Boolean(config.policies?.autoImproveEnabled),
+    interactionMode: getInteractionMode(),
+    activeProfile: activeProfile || undefined,
+    findings,
+    actions,
+    summary,
+    safeguards,
+  };
+  const reportPath = saveImproveReport(report);
+  const markdownPath = path.join(path.dirname(reportPath), `${path.basename(reportPath, '.json')}.md`);
+  const markdown = [
+    '# GhostRun Improve Report',
+    '',
+    `- Generated: ${report.createdAt}`,
+    `- Profile: ${activeProfile || '(none)'}`,
+    `- Open repair proposals: ${openProposals.length}`,
+    `- Stale proposals (>7d): ${staleProposals.length}`,
+    `- High-failure flows: ${highFailureFlows.length}`,
+    `- Never-run flows: ${neverRunFlows.length}`,
+    `- Flaky flows: ${flakyFlows.length}`,
+    '',
+    '## Findings',
+    ...(findings.length ? findings.map(f => `- ${f}`) : ['- none']),
+    '',
+    '## Suggested Actions',
+    ...(actions.length ? actions.map(a => `- ${a}`) : ['- none']),
+    ...(summary ? ['', '## AI Summary', summary] : []),
+  ].join('\n');
+  fs.writeFileSync(markdownPath, markdown);
+
+  console.log(chalk.bold('\n  Improve Report\n'));
+  console.log(`  Status:     ${blocked ? chalk.red('blocked') : chalk.green('generated')}`);
+  console.log(`  Profile:    ${chalk.white(activeProfile || '(none)')}`);
+  console.log(`  Open fixes: ${chalk.white(String(openProposals.length))}`);
+  console.log(`  Failures:   ${chalk.white(String(runs.filter(r => r.status === 'failed').length))}`);
+  if (findings.length) {
+    console.log(chalk.bold('\n  Findings'));
+    for (const finding of findings) console.log(`  - ${finding}`);
+  }
+  if (actions.length) {
+    console.log(chalk.bold('\n  Suggested Actions'));
+    for (const action of actions) console.log(`  - ${action}`);
+  }
+  if (summary) {
+    console.log(chalk.bold('\n  AI Summary'));
+    for (const line of summary.split('\n')) {
+      if (line.trim()) console.log(`  ${line}`);
+    }
+  }
+  if (safeguards.length) {
+    console.log(chalk.bold('\n  Safeguards'));
+    for (const s of safeguards) console.log(`  - ${chalk.yellow(s)}`);
+  }
+  console.log();
+  info(`Saved: ${chalk.cyan(reportPath)}`);
+  info(`Markdown: ${chalk.cyan(markdownPath)}`);
+  console.log();
+}
+
+async function runRepairList() {
+  printLogo(); divider();
+  const proposals = listRepairProposals(50);
+  console.log(chalk.bold(`\n  Repair Proposals (${proposals.length})\n`));
+  if (proposals.length === 0) {
+    warn('No repair proposals found.');
+    console.log();
+    return;
+  }
+  console.log(chalk.gray('  ID        Type       Status     Flow                       Step  Proposal'));
+  console.log(chalk.gray('  ' + '─'.repeat(86)));
+  for (const proposal of proposals) {
+    const statusColor = proposal.status === 'applied' ? chalk.green : proposal.status === 'rejected' ? chalk.red : chalk.yellow;
+    const repairType = getRepairType(proposal);
+    const proposalText = proposal.proposedSelector
+      || proposal.proposedValue
+      || proposal.rationale?.slice(0, 24)
+      || '—';
+    console.log(`  ${chalk.gray(proposal.id.slice(0, 8))}  ${chalk.white(repairType.padEnd(10))} ${statusColor(proposal.status.padEnd(10))} ${chalk.white((proposal.flowName || '').padEnd(26).slice(0, 26))} ${chalk.gray(String(proposal.stepNumber || '—').padStart(4))}  ${chalk.cyan(String(proposalText).slice(0, 26))}`);
+  }
+  console.log();
+}
+
+async function runRepairShow(id: string) {
+  printLogo(); divider();
+  const found = findRepairProposal(id);
+  if (!found) {
+    errorMsg('Repair proposal not found: ' + id);
+    process.exit(1);
+  }
+  const proposal = found.proposal;
+  const repairType = getRepairType(proposal);
+  console.log(chalk.bold(`\n  Repair Proposal: ${proposal.id.slice(0, 8)}\n`));
+  console.log(`  Type:      ${chalk.white(repairType)}`);
+  console.log(`  Flow:      ${chalk.white(proposal.flowName)}`);
+  console.log(`  Status:    ${chalk.white(proposal.status)}`);
+  console.log(`  Step:      ${chalk.white(String(proposal.stepNumber || '—'))}`);
+  console.log(`  Action:    ${chalk.white(proposal.action || '—')}`);
+  if (proposal.currentSelector) console.log(`  Selector:  ${chalk.gray(proposal.currentSelector)} → ${chalk.cyan(proposal.proposedSelector || '—')}`);
+  if (proposal.currentValue || proposal.proposedValue) {
+    console.log(`  Value:     ${chalk.gray(proposal.currentValue || '—')} → ${chalk.cyan(proposal.proposedValue || '—')}`);
+  }
+  if (proposal.errorMessage) console.log(`  Error:     ${chalk.red(proposal.errorMessage)}`);
+  if (proposal.rationale) console.log(`  Why:       ${chalk.gray(proposal.rationale)}`);
+  if (proposal.runId) console.log(`  Run:       ${chalk.gray(proposal.runId.slice(0, 8))}`);
+  console.log();
+}
+
+function applyRepairProposal(id: string, mode: 'interactive' | 'auto' = 'interactive'): { ok: boolean; message: string; flowName?: string } {
+  const found = findRepairProposal(id);
+  if (!found) return { ok: false, message: `Repair proposal not found: ${id}` };
+  const proposal = found.proposal;
+  if (!proposal.flowId || !proposal.nodeId) {
+    return { ok: false, message: 'Repair proposal is missing flow or node information.' };
+  }
+
+  const repairType = getRepairType(proposal);
+  if (repairType === 'config' || repairType === 'url' || repairType === 'visual') {
+    if (repairType === 'visual') {
+      updateRepairProposal(proposal.id, {
+        status: 'applied',
+        rationale: `${proposal.rationale || ''} Acknowledged — re-run ghostrun baseline:set after UI changes.`,
+      });
+      return {
+        ok: true,
+        message: `Visual proposal acknowledged. Re-capture baselines: ghostrun baseline:set "${proposal.flowName}"`,
+        flowName: proposal.flowName,
+      };
+    }
+    return {
+      ok: false,
+      message: repairType === 'url'
+        ? 'URL/config repairs must be applied manually to the profile or flow URL.'
+        : 'Configuration repairs must be applied manually.',
+    };
+  }
+
+  const flow = db.getFlow(proposal.flowId);
+  if (!flow) return { ok: false, message: 'Flow not found for proposal.' };
+
+  let graph: { nodes: Record<string, unknown>[]; edges: object[]; appUrl?: string };
+  try {
+    graph = JSON.parse(flow.graph);
+  } catch {
+    return { ok: false, message: 'Flow graph is invalid.' };
+  }
+
+  const node = graph.nodes.find(n => String(n.id) === proposal.nodeId);
+  if (!node) return { ok: false, message: 'Target node not found in flow.' };
+
+  switch (repairType) {
+    case 'selector':
+      if (!proposal.proposedSelector) return { ok: false, message: 'Selector repair proposal is incomplete.' };
+      node.selector = proposal.proposedSelector;
+      break;
+    case 'assertion':
+      if (!proposal.proposedValue) return { ok: false, message: 'Assertion repair proposal is incomplete.' };
+      node.value = proposal.proposedValue;
+      break;
+    case 'wait':
+      node.action = 'wait:ms';
+      node.value = proposal.proposedValue || '20000';
+      break;
+    default:
+      return { ok: false, message: `Unsupported repair type: ${repairType}` };
+  }
+
+  db.updateFlow(flow.id, { graph });
+  const rationale = proposal.rationale
+    ? `${proposal.rationale} ${mode === 'auto' ? 'Auto-applied by GhostRun after policy and loop-guard checks.' : 'Applied by user review.'}`
+    : (mode === 'auto' ? 'Auto-applied by GhostRun after policy and loop-guard checks.' : 'Applied by user review.');
+  updateRepairProposal(proposal.id, { status: 'applied', rationale });
+  return { ok: true, message: `Applied ${repairType} repair proposal to flow "${flow.name}"`, flowName: flow.name };
+}
+
+function applySelectorRepairProposal(id: string, mode: 'interactive' | 'auto' = 'interactive'): { ok: boolean; message: string; flowName?: string } {
+  return applyRepairProposal(id, mode);
+}
+
+function autoApplySelectorRepairProposal(proposal: RepairProposal, context: { ci?: boolean; profile: GhostrunProfile | null; startUrl?: string; currentSelector?: string | null }): { applied: boolean; reason?: string } {
+  const config = readConfig();
+  const interactionMode = getInteractionMode();
+  if (!config.policies?.allowAutoRepairApply) {
+    return { applied: false, reason: 'config disallows auto-apply' };
+  }
+  if (interactionMode !== 'auto') {
+    return { applied: false, reason: 'interaction mode is assist' };
+  }
+  if (context.ci) {
+    return { applied: false, reason: 'CI mode forbids flow mutation' };
+  }
+  if (isProductionLike(context.profile, context.startUrl)) {
+    return { applied: false, reason: 'production-like targets require review' };
+  }
+  if (!proposal.flowId || !proposal.nodeId || !proposal.proposedSelector) {
+    return { applied: false, reason: 'proposal is incomplete' };
+  }
+  if (context.currentSelector && proposal.currentSelector && context.currentSelector !== proposal.currentSelector) {
+    return { applied: false, reason: 'flow selector changed after proposal creation' };
+  }
+
+  const attemptCount = getSelectorRepairAttemptCount({ flowId: proposal.flowId, nodeId: proposal.nodeId });
+  const maxAttempts = config.policies?.maxRepairAttemptsPerRun ?? 2;
+  if (attemptCount >= maxAttempts) {
+    return { applied: false, reason: `selector repair attempt limit reached (${maxAttempts})` };
+  }
+
+  const repeatCount = getRecentFailureRepeatCount(proposal.flowId, proposal.errorMessage || '');
+  const maxRepeats = config.policies?.maxSameFailureRepeats ?? 2;
+  if (repeatCount >= maxRepeats) {
+    return { applied: false, reason: `same failure repeat limit reached (${maxRepeats})` };
+  }
+
+  const result = applySelectorRepairProposal(proposal.id, 'auto');
+  return result.ok ? { applied: true } : { applied: false, reason: result.message };
+}
+
+async function runRepairApply(id: string) {
+  const found = findRepairProposal(id);
+  if (!found) {
+    errorMsg('Repair proposal not found: ' + id);
+    process.exit(1);
+  }
+  const proposal = found.proposal;
+  const repairType = getRepairType(proposal);
+  if (!proposal.flowId || !proposal.nodeId) {
+    errorMsg('Repair proposal is missing flow or node information.');
+    process.exit(1);
+  }
+  const flow = db.getFlow(proposal.flowId);
+  if (!flow) {
+    errorMsg('Flow not found for proposal.');
+    process.exit(1);
+  }
+
+  console.log(chalk.bold(`\n  Apply Repair Proposal ${proposal.id.slice(0, 8)}\n`));
+  console.log(`  Type:     ${chalk.white(repairType)}`);
+  console.log(`  Flow:     ${chalk.white(flow.name)}`);
+  if (proposal.proposedSelector) {
+    console.log(`  Selector: ${chalk.gray(proposal.currentSelector || '—')} → ${chalk.cyan(proposal.proposedSelector)}`);
+  }
+  if (proposal.proposedValue) {
+    console.log(`  Value:    ${chalk.gray(proposal.currentValue || '—')} → ${chalk.cyan(proposal.proposedValue)}`);
+  }
+  if (repairType === 'url' || repairType === 'config') {
+    warn('This proposal must be applied manually to the profile or flow URL.');
+    if (proposal.rationale) console.log(chalk.gray(`  Hint: ${proposal.rationale}`));
+    return;
+  }
+  if (repairType === 'visual') {
+    console.log(chalk.bold(`\n  Visual Regression Proposal ${proposal.id.slice(0, 8)}\n`));
+    console.log(`  Flow:     ${chalk.white(flow.name)}`);
+    console.log(`  Diff:     ${chalk.yellow(proposal.currentValue || '—')}`);
+    console.log(chalk.gray(`  ${proposal.proposedValue || 'Run ghostrun baseline:set after intentional UI changes.'}`));
+    const approved = await confirmAction(chalk.cyan('  Acknowledge and mark applied? (Y/n) '), true);
+    if (!approved) { warn('Cancelled.'); return; }
+    const result = applyRepairProposal(proposal.id, 'interactive');
+    if (!result.ok) { errorMsg(result.message); process.exit(1); }
+    success(result.message);
+    return;
+  }
+  console.log();
+
+  const approved = await confirmAction(chalk.cyan(`  Apply this ${repairType} change? (Y/n) `), true);
+  if (!approved) {
+    warn('Cancelled.');
+    return;
+  }
+
+  const result = applyRepairProposal(proposal.id, 'interactive');
+  if (!result.ok) {
+    errorMsg(result.message);
+    process.exit(1);
+  }
+  success(result.message);
 }
 
 // ============================================
@@ -3852,6 +7325,57 @@ interface FlowStep {
   value?: string;
   url?: string;
   label?: string;
+}
+
+function pageSignalScore(page: PageData): number {
+  return page.interactives.forms.length * 4 +
+    page.interactives.searchInputs.length * 3 +
+    page.interactives.standaloneInputs.length * 2 +
+    page.interactives.ctaButtons.length +
+    Math.min(page.links.length, 8) * 0.25;
+}
+
+function shouldUseScrapeForExplore(pages: PageData[], candidates: FlowCandidate[]): boolean {
+  if (!isCrawleeEnabled()) return false;
+  if (pages.length === 0 || candidates.length === 0) return true;
+  const usefulPages = pages.filter(p => pageSignalScore(p) >= 2).length;
+  const genericButtonCount = pages.reduce((sum, p) =>
+    sum + p.interactives.ctaButtons.filter(b => /^(learn more|read more|submit|continue|next|start|open|click)$/i.test(b.text.trim())).length, 0);
+  const totalButtons = pages.reduce((sum, p) => sum + p.interactives.ctaButtons.length, 0);
+  const hasSpaHints = pages.some(p => p.spaIndicators?.hasRouter || p.spaIndicators?.hasVueApp || p.spaIndicators?.hasNgApp || p.spaIndicators?.hasLoadingState);
+  return usefulPages === 0 || (totalButtons > 0 && genericButtonCount / totalButtons > 0.6) || (hasSpaHints && candidates.length < 2);
+}
+
+function pageDataFromScrapedPage(p: ScrapedPage): PageData {
+  const searchInputs = p.forms.flatMap(form => form.fields).filter(field =>
+    field.type === 'search' || /search|query|find/i.test(`${field.name} ${field.placeholder} ${field.label}`)
+  );
+  const forms: PageForm[] = p.forms.map(form => ({
+    selector: form.selector,
+    method: 'get',
+    fields: form.fields,
+    submitSelector: form.submitSelector,
+    submitText: form.submitText || 'Submit',
+  }));
+  return {
+    url: p.url,
+    title: p.title,
+    headings: p.headings,
+    links: p.links.map(l => l.href),
+    screenshotPath: null,
+    interactives: {
+      forms,
+      searchInputs,
+      standaloneInputs: [],
+      ctaButtons: p.buttons,
+    },
+    spaIndicators: {
+      hasRouter: /react|next|router|__next|vite|app/i.test(p.text.slice(0, 2000)),
+      hasVueApp: /vue|data-v-/.test(p.text.slice(0, 2000)),
+      hasNgApp: /ng-|angular/i.test(p.text.slice(0, 2000)),
+      hasLoadingState: /loading|spinner|skeleton/i.test(p.text.slice(0, 2000)),
+    },
+  };
 }
 
 async function bfsCrawl(
@@ -4062,8 +7586,8 @@ async function bfsCrawl(
           hasLoadingState: !!document.querySelector('[class*="loading"], [class*="skeleton"], [class*="spinner"]'),
         };
 
-        return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8) };
-      }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [] }));
+        return { forms, searchInputs, standaloneInputs: standaloneInputs.slice(0, 5), ctaButtons: ctaButtons.slice(0, 8), spaIndicators };
+      }).catch(() => ({ forms: [], searchInputs: [], standaloneInputs: [], ctaButtons: [], spaIndicators: undefined }));
       // ── End interactive extraction ────────────────────────────────
 
       const ssPath = path.join(screenshotsDir, `page-${pages.length + 1}.jpg`);
@@ -4262,7 +7786,7 @@ Reply with ONLY this JSON, nothing else: {"name": "...", "description": "..."}`;
         let name = p.title || new URL(p.url).pathname;
         let description = `Automated interaction on ${p.title || p.url}`;
 
-        const result = await callAI(prompt);
+        const result = await callAI(prompt, { mode: 'author', metadata: { source: 'explore' } });
         if (result) {
           try {
             const match = result.text.replace(/```json\n?|\n?```/g, '').match(/\{[^{}]+\}/);
@@ -4562,6 +8086,36 @@ async function runExplore(url: string) {
     note('No AI available — generated flows from detected page elements. Set up Ollama or ANTHROPIC_API_KEY for better names.', 'Note');
   }
 
+  if (shouldUseScrapeForExplore(pages, candidates)) {
+    const sScrape = spinner();
+    sScrape.start('Explorer confidence is low — using Crawlee scrape fallback...');
+    try {
+      const scrape = await runCrawleeScrape(url, {
+        maxPages: Math.min(Math.max(1, maxPages), 3),
+        reason: 'explore-fallback',
+        exploreReportId: report.id,
+        quiet: true,
+        requireEnabled: false,
+      });
+      const scrapePages = scrape.pages.map(pageDataFromScrapedPage);
+      const combinedPages = deduplicatePages([...pages, ...scrapePages]);
+      const scrapeCandidates = hasAI ? await analyzePages(combinedPages) : combinedPages.flatMap(p =>
+        buildStepsFromInteractives(p).map(steps => ({
+          name: p.title ? `${p.title} — ${steps.find(s => s.action !== 'navigate')?.action || 'check'}` : `Check ${new URL(p.url).pathname}`,
+          description: `Automated flow enriched by Crawlee scrape on ${p.title || p.url}`,
+          route: p.url,
+          steps,
+        }))
+      );
+      pages.push(...scrapePages.filter(sp => !pages.some(p => p.url === sp.url)));
+      candidates = [...candidates, ...scrapeCandidates];
+      sScrape.stop(`Crawlee fallback added ${scrape.pages.length} scraped page${scrape.pages.length !== 1 ? 's' : ''}`);
+    } catch (err) {
+      sScrape.stop('Crawlee fallback skipped');
+      note(err instanceof Error ? err.message : String(err), 'Scrape fallback unavailable');
+    }
+  }
+
   // Deduplicate by route (same URL = same candidate)
   const seenRoutes = new Set<string>();
   candidates = candidates.filter(c => {
@@ -4771,25 +8325,43 @@ async function runSuiteRun(name: string, vars?: Record<string, string>) {
   const flows = db.getSuiteFlows(suite.id);
   if (flows.length === 0) { warn('No flows in this suite.'); return; }
 
-  console.log(chalk.bold(`\n  Suite: ${suite.name}\n`));
+  const parallelMode = process.argv.includes('--parallel');
+  console.log(chalk.bold(`\n  Suite: ${suite.name}${parallelMode ? chalk.gray('  [parallel]') : ''}\n`));
   const lineWidth = 45;
   console.log(chalk.gray('  ' + '─'.repeat(lineWidth)));
 
   const results: Array<{ index: number; name: string; passed: boolean; duration: number; error?: string }> = [];
   const suiteStart = Date.now();
 
-  for (let i = 0; i < flows.length; i++) {
-    const sf = flows[i];
-    process.stdout.write(`   ${chalk.gray(String(i + 1))}  ${chalk.white(sf.flowName.padEnd(22).slice(0, 22))}  `);
-    try {
-      const result = await executeFlow(sf.flowId, vars);
-      const dur = result.duration;
-      process.stdout.write(result.passed ? chalk.green('✓') : chalk.red('✗'));
-      process.stdout.write('  ' + chalk.gray(dur + 'ms') + '\n');
-      results.push({ index: i + 1, name: sf.flowName, passed: result.passed, duration: dur });
-    } catch (err) {
-      process.stdout.write(chalk.red('✗') + '  ' + chalk.gray('error') + '\n');
-      results.push({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) });
+  if (parallelMode) {
+    const settled = await Promise.all(
+      flows.map((sf, i) =>
+        executeFlow(sf.flowId, vars, { quiet: true })
+          .then(result => ({ index: i + 1, name: sf.flowName, passed: result.passed, duration: result.duration }))
+          .catch(err => ({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) }))
+      )
+    );
+    results.push(...settled);
+
+    // Print summary table after all complete
+    results.forEach(r => {
+      const status = r.passed ? chalk.green('✓') : chalk.red('✗');
+      console.log(`   ${chalk.gray(String(r.index))}  ${chalk.white(r.name.padEnd(22).slice(0, 22))}  ${status}  ${chalk.gray(r.duration + 'ms')}`);
+    });
+  } else {
+    for (let i = 0; i < flows.length; i++) {
+      const sf = flows[i];
+      process.stdout.write(`   ${chalk.gray(String(i + 1))}  ${chalk.white(sf.flowName.padEnd(22).slice(0, 22))}  `);
+      try {
+        const result = await executeFlow(sf.flowId, vars);
+        const dur = result.duration;
+        process.stdout.write(result.passed ? chalk.green('✓') : chalk.red('✗'));
+        process.stdout.write('  ' + chalk.gray(dur + 'ms') + '\n');
+        results.push({ index: i + 1, name: sf.flowName, passed: result.passed, duration: dur });
+      } catch (err) {
+        process.stdout.write(chalk.red('✗') + '  ' + chalk.gray('error') + '\n');
+        results.push({ index: i + 1, name: sf.flowName, passed: false, duration: 0, error: String(err) });
+      }
     }
   }
 
@@ -4864,26 +8436,60 @@ async function runBaselineShow(id: string) {
 // COMMANDS — natural language create
 // ============================================
 
-async function runCreate(description?: string) {
-  printLogo(); divider();
+async function runCreate(description?: string, extraArgs: string[] = []) {
+  const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
+  const preview = extraArgs.includes('--preview');
+  const noSave = preview || extraArgs.includes('--no-save');
+  const profileName = parseFlagValue(extraArgs, '--profile') || readConfig().activeProfile || undefined;
+
+  if (!jsonOutput) {
+    printLogo(); divider();
+  }
 
   if (!description) {
+    const positional = extraArgs.filter(a => !a.startsWith('--') && extraArgs.indexOf(a) === extraArgs.lastIndexOf(a));
+    description = positional.join(' ').trim();
+  }
+  if (!description) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'Description required' }));
+      process.exit(1);
+    }
     description = await askQuestion(chalk.cyan('\n  Describe the automation flow: '));
     if (!description) { errorMsg('Description required'); process.exit(1); }
   }
 
-  const baseUrl = await askQuestion(chalk.cyan('  Base URL for this flow (e.g. http://localhost:3000): '));
-  if (!baseUrl) { errorMsg('Base URL required'); process.exit(1); }
+  let baseUrl = parseFlagValue(extraArgs, '--base-url');
+  if (!baseUrl && profileName) {
+    baseUrl = getProfile(profileName)?.baseUrl;
+  }
+  if (!baseUrl) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'Base URL required. Pass --base-url or --profile with baseUrl.' }));
+      process.exit(1);
+    }
+    baseUrl = await askQuestion(chalk.cyan('  Base URL for this flow (e.g. http://localhost:3000): '));
+    if (!baseUrl) { errorMsg('Base URL required'); process.exit(1); }
+  }
 
   const hasAI = !!(await isOllamaRunning()) || !!process.env.ANTHROPIC_API_KEY;
-  if (!hasAI) { errorMsg('No AI provider available. Run Ollama locally or set ANTHROPIC_API_KEY.'); process.exit(1); }
+  if (!hasAI) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'No AI provider available. Set ANTHROPIC_API_KEY or run Ollama.' }));
+      process.exit(1);
+    }
+    errorMsg('No AI provider available. Run Ollama locally or set ANTHROPIC_API_KEY.');
+    process.exit(1);
+  }
 
-  info('Generating flow from description...');
+  if (!jsonOutput) info('Generating flow from description...');
 
+  const authorContext = buildAuthorContext(profileName);
   const prompt = `Convert this automation test description into a Playwright test flow.
 
 Description: "${description}"
 Base URL: "${baseUrl}"
+${authorContext}
 
 Output ONLY a valid JSON array of steps, no other text:
 [
@@ -4891,7 +8497,7 @@ Output ONLY a valid JSON array of steps, no other text:
 ]
 
 Rules:
-- Use "navigate" for page navigation (include full URL)
+- Use "navigate" for page navigation (include full URL or {{baseUrl}} paths)
 - Use "click" for button/link clicks (guess a reasonable selector)
 - Use "fill" for text inputs (include the test value)
 - Use "assert:text" to verify text appears on page
@@ -4899,8 +8505,15 @@ Rules:
 - Only include fields relevant to each action
 - selector and url fields must be CSS selectors or full URLs`;
 
-  const result = await callAI(prompt);
-  if (!result) { errorMsg('AI failed to generate flow.'); process.exit(1); }
+  const result = await callAI(prompt, { mode: 'author', metadata: { source: 'create', profile: profileName || '' } });
+  if (!result) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'AI failed to generate flow.' }));
+      process.exit(1);
+    }
+    errorMsg('AI failed to generate flow.');
+    process.exit(1);
+  }
 
   let steps: Array<{ name: string; action: string; url?: string; selector?: string; value?: string }>;
   try {
@@ -4908,22 +8521,24 @@ Rules:
     steps = JSON.parse(cleaned);
     if (!Array.isArray(steps)) throw new Error('Not an array');
   } catch {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'AI returned invalid JSON.', preview: result.text.slice(0, 200) }));
+      process.exit(1);
+    }
     errorMsg('AI returned invalid JSON. Try again with a clearer description.');
     console.log(chalk.gray('  AI response: ' + result.text.slice(0, 200)));
     process.exit(1);
     return;
   }
 
-  // Generate a clean short flow name via AI
   let flowName = 'Generated Flow';
   {
-    const nameResult = await callAI(`Give a short (2-5 words) flow name for this automation: "${description}". Reply with ONLY the name, title-cased, no punctuation. Examples: "Login Flow", "Checkout Guest", "Search Products".`);
+    const nameResult = await callAI(`Give a short (2-5 words) flow name for this automation: "${description}". Reply with ONLY the name, title-cased, no punctuation. Examples: "Login Flow", "Checkout Guest", "Search Products".`, { mode: 'author', metadata: { source: 'flow-naming' } });
     if (nameResult?.text) {
       const candidate = nameResult.text.replace(/[^a-zA-Z0-9 ]/g, '').trim().slice(0, 40);
       if (candidate.length >= 3) flowName = candidate;
     }
     if (flowName === 'Generated Flow') {
-      // Fallback: title-case the first 5 words of description
       flowName = description.trim().split(/\s+/).slice(0, 5).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     }
   }
@@ -4946,7 +8561,39 @@ Rules:
   nodes.push({ id: 'end', type: 'end', label: 'End' });
   edges.push({ id: `e${steps.length}`, source: prevId, target: 'end' });
 
-  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph: { nodes, edges, appUrl: baseUrl }, createdBy: 'agent' });
+  const graph = { nodes, edges, appUrl: baseUrl };
+
+  if (preview || noSave) {
+    const payload = { preview: true, name: flowName, description, baseUrl, steps, graph };
+    if (jsonOutput) {
+      console.log(JSON.stringify(payload));
+      return;
+    }
+    divider();
+    info('Preview generated flow (not saved):');
+    console.log(JSON.stringify(payload, null, 2));
+    const saveApproved = await confirmAction(chalk.cyan('\n  Save this flow? (Y/n) '), true);
+    if (!saveApproved) {
+      warn('Preview only — flow not saved.');
+      return;
+    }
+  }
+
+  const flow = db.createFlow({ name: flowName, description, appUrl: baseUrl, graph, createdBy: 'agent' });
+
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      flowId: flow.id,
+      flowIdShort: flow.id.slice(0, 8),
+      name: flowName,
+      description,
+      baseUrl,
+      stepCount: steps.length,
+      steps,
+      runHint: `ghostrun run ${flow.id.slice(0, 8)}`,
+    }));
+    return;
+  }
 
   divider();
   success(`Flow created: ${chalk.white(flowName)}`);
@@ -5140,8 +8787,8 @@ async function runStoreInstall(slug: string) {
   const existing = db.findFlowByName(t.flow.name);
   if (existing) {
     warn(`Flow "${t.flow.name}" already installed (id: ${existing.id.slice(0, 8)})`);
-    const overwrite = await askQuestion(chalk.cyan('  Overwrite? (y/N) '));
-    if (overwrite.toLowerCase() !== 'y') { info('Skipped.'); return; }
+    const overwrite = await confirmAction(chalk.cyan('  Overwrite? (y/N) '), false);
+    if (!overwrite) { info('Skipped.'); return; }
     db.deleteFlow(existing.id);
   }
 
@@ -5173,7 +8820,8 @@ async function runStoreInstall(slug: string) {
 // COMMANDS — init wizard
 // ============================================
 
-async function runInit() {
+async function runInit(extraArgs: string[] = []) {
+  const nonInteractive = extraArgs.includes('--yes') || extraArgs.includes('-y') || extraArgs.includes('--ci');
   printLogo(); divider();
   console.log(chalk.bold('\n  GhostRun Setup Wizard\n'));
 
@@ -5182,6 +8830,9 @@ async function runInit() {
   fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
   fs.mkdirSync(path.join(DATA_PATH, 'sessions'), { recursive: true });
   success('Data directory ready: ' + chalk.cyan(DATA_PATH));
+
+  ensureProjectWorkspace();
+  success('Project workspace ready: ' + chalk.cyan(PROJECT_GHOSTRUN_PATH));
 
   // 2. Check Playwright / Chromium
   const { execSync } = require('child_process') as typeof import('child_process');
@@ -5193,8 +8844,8 @@ async function runInit() {
   } catch { warn('Playwright not found'); }
 
   if (!chromiumOk) {
-    const installPw = await askQuestion(chalk.cyan('  Install Playwright + Chromium? (Y/n) '));
-    if (installPw.toLowerCase() !== 'n') {
+    const installPw = nonInteractive || await confirmAction(chalk.cyan('  Install Playwright + Chromium? (Y/n) '), true);
+    if (installPw) {
       console.log(chalk.gray('  Running: npm install playwright...\n'));
       try {
         execSync('npm install playwright', { stdio: 'inherit', cwd: __dirname });
@@ -5207,8 +8858,8 @@ async function runInit() {
     try {
       execSync('npx playwright install chromium --dry-run', { stdio: 'ignore' });
     } catch {
-      const installBrowser = await askQuestion(chalk.cyan('  Chromium browser not found. Install it? (Y/n) '));
-      if (installBrowser.toLowerCase() !== 'n') {
+      const installBrowser = nonInteractive || await confirmAction(chalk.cyan('  Chromium browser not found. Install it? (Y/n) '), true);
+      if (installBrowser) {
         execSync('npx playwright install chromium', { stdio: 'inherit' });
         success('Chromium installed');
       }
@@ -5231,8 +8882,8 @@ async function runInit() {
     console.log(`  ${chalk.cyan('B)')} Anthropic ${chalk.gray('(cloud — needs API key)')}`);
     console.log(chalk.gray('     export ANTHROPIC_API_KEY=sk-ant-...\n'));
 
-    const choice = await askQuestion(chalk.cyan('  Try to start Ollama now? (y/N) '));
-    if (choice.toLowerCase() === 'y') {
+    const choice = nonInteractive ? false : await confirmAction(chalk.cyan('  Try to start Ollama now? (y/N) '), false);
+    if (choice) {
       try {
         const { spawn: sp } = require('child_process') as typeof import('child_process');
         sp('ollama', ['serve'], { detached: true, stdio: 'ignore' }).unref();
@@ -5247,7 +8898,25 @@ async function runInit() {
     }
   }
 
-  // 4. Create .ghostrun.env template in CWD if missing
+  // 4. Optional Crawlee scraping support
+  console.log();
+  if (isCrawleeEnabled()) {
+    success('Scraping: Crawlee enabled');
+  } else {
+    const enableScraping = nonInteractive ? false : await confirmAction(chalk.cyan('  Enable optional website scraping with Crawlee? (y/N) '), false);
+    if (enableScraping) {
+      try {
+        await loadCrawlee();
+        setCrawleeEnabled(true);
+        success('Scraping: Crawlee enabled');
+      } catch {
+        warn('Crawlee package not found. Install it, then rerun init:');
+        console.log(chalk.cyan('  npm install crawlee'));
+      }
+    }
+  }
+
+  // 5. Create .ghostrun.env template in CWD if missing
   console.log();
   const envFile = path.join(process.cwd(), '.ghostrun.env');
   if (!fs.existsSync(envFile)) {
@@ -5263,11 +8932,19 @@ async function runInit() {
     info('.ghostrun.env already exists');
   }
 
+  const projectConfig = readConfig();
+  info(`Interaction mode: ${projectConfig.interactionMode || 'assist'}`);
+  info(`AI usage tracking: ${projectConfig.ai?.trackUsage === false ? 'disabled' : 'enabled'}`);
+  info('Run `ghostrun audit` to check for secret leaks before committing');
+
   divider();
   console.log(chalk.bold.green('\n  Setup complete!\n'));
   console.log('  ' + chalk.gray('Record a flow:   ') + chalk.cyan('ghostrun learn https://your-app.com'));
   console.log('  ' + chalk.gray('Run a flow:      ') + chalk.cyan('ghostrun run <name>'));
   console.log('  ' + chalk.gray('Run (visible):   ') + chalk.cyan('ghostrun run <name> --visible'));
+  if (isCrawleeEnabled()) {
+    console.log('  ' + chalk.gray('Scrape a site:   ') + chalk.cyan('ghostrun scrape https://your-app.com --output json'));
+  }
   console.log('  ' + chalk.gray('Ask the bot:     ') + chalk.cyan('ghostrun chat'));
   console.log('  ' + chalk.gray('Browse templates:') + chalk.cyan('ghostrun store list'));
   console.log();
@@ -5277,7 +8954,7 @@ async function runInit() {
 // COMMANDS — monitor (extract + diff)
 // ============================================
 
-async function runMonitor(flowId: string) {
+async function runMonitorOnce(flowId: string) {
   printLogo(); divider();
 
   const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
@@ -5290,7 +8967,7 @@ async function runMonitor(flowId: string) {
 
   // Get previous run's extracted data for diff
   const previousRuns = db.listRuns(flow.id, 2);
-  let prevData: Record<string, string> = {};
+  const prevData: Record<string, string> = {};
   if (previousRuns.length > 0) {
     db.getRunData(previousRuns[0].id).forEach(d => { prevData[d.variableName] = d.variableValue; });
   }
@@ -5337,6 +9014,141 @@ async function runMonitor(flowId: string) {
     console.log('\n' + JSON.stringify({ flowId: flow.id, flowName: flow.name, runId: result.runId, extractedData, hasChanges }, null, 2));
   }
   console.log();
+}
+
+// ============================================
+// COMMANDS — scrape
+// ============================================
+
+async function runScrapeCommand(url: string, extraArgs: string[] = []) {
+  const maxPages = parseNumberFlag(extraArgs, '--max-pages', 1, 100);
+  const selector = parseFlagValue(extraArgs, '--selector');
+  const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
+
+  if (!jsonOutput) {
+    printLogo(); divider();
+    console.log(chalk.bold('\n  Scrape Website\n'));
+    info('URL: ' + chalk.cyan(url));
+    info('Max pages: ' + chalk.white(String(maxPages)));
+    if (selector) info('Selector: ' + chalk.white(selector));
+    console.log();
+  }
+
+  try {
+    const result = await runCrawleeScrape(url, { maxPages, selector, reason: 'manual', quiet: jsonOutput });
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrapeId: result.id,
+        status: result.status,
+        url: result.url,
+        pages: result.pages.length,
+        resultPath: result.resultPath,
+        data: result.pages,
+      }));
+      return;
+    }
+    success(`Scraped ${result.pages.length} page${result.pages.length !== 1 ? 's' : ''}`);
+    info('Scrape ID: ' + chalk.gray(result.id.slice(0, 8)));
+    info('Result: ' + chalk.cyan(result.resultPath));
+    const first = result.pages[0];
+    if (first) {
+      console.log();
+      console.log(chalk.bold('  Preview\n'));
+      if (first.title) console.log('  ' + chalk.gray('Title:   ') + chalk.white(first.title));
+      if (first.headings.length) console.log('  ' + chalk.gray('Headings: ') + first.headings.slice(0, 4).join(chalk.gray(' · ')));
+      if (first.buttons.length) console.log('  ' + chalk.gray('Buttons: ') + first.buttons.slice(0, 6).map(b => b.text).join(chalk.gray(' · ')));
+    }
+    console.log();
+  } catch (err) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ status: 'failed', error: err instanceof Error ? err.message : String(err) }));
+    } else {
+      errorMsg(err instanceof Error ? err.message : String(err));
+    }
+    process.exitCode = 1;
+  }
+}
+
+async function runScrapeAndFlowCommand(url: string, extraArgs: string[] = []) {
+  const flowId = parseFlagValue(extraArgs, '--flow');
+  if (!flowId) { errorMsg('Usage: scrape:run <url> --flow <id|name> [--max-pages N] [--output json]'); process.exit(1); }
+
+  const maxPages = parseNumberFlag(extraArgs, '--max-pages', 1, 100);
+  const selector = parseFlagValue(extraArgs, '--selector');
+  const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
+
+  let scrapeResult: ScrapeResult | null = null;
+  try {
+    scrapeResult = await runCrawleeScrape(url, { maxPages, selector, reason: 'scrape-run', quiet: jsonOutput });
+    const runResult = await executeFlow(flowId, globalVars, { jsonOutput, quiet: jsonOutput });
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrape: {
+          scrapeId: scrapeResult.id,
+          status: scrapeResult.status,
+          pages: scrapeResult.pages.length,
+          resultPath: scrapeResult.resultPath,
+          data: scrapeResult.pages,
+        },
+        run: runResult,
+      }));
+      return;
+    }
+    divider();
+    success(`Scraped ${scrapeResult.pages.length} page${scrapeResult.pages.length !== 1 ? 's' : ''} and ran flow`);
+    info('Scrape ID: ' + chalk.gray(scrapeResult.id.slice(0, 8)));
+    info('Run ID: ' + chalk.gray(runResult.runId.slice(0, 8)));
+    console.log();
+  } catch (err) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({
+        scrape: scrapeResult ? { scrapeId: scrapeResult.id, resultPath: scrapeResult.resultPath } : null,
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    } else {
+      errorMsg(err instanceof Error ? err.message : String(err));
+    }
+    process.exitCode = 1;
+  }
+}
+
+async function runScrapeList() {
+  const scrapes = db.listScrapeRuns(20);
+  console.log(chalk.bold('\n  Scrapes\n'));
+  if (scrapes.length === 0) {
+    warn('No scrapes found. Run: ' + chalk.cyan('ghostrun scrape <url>'));
+    console.log();
+    return;
+  }
+  console.log(chalk.gray('  ID        Status     Pages  Reason          URL'));
+  console.log(chalk.gray('  ' + '─'.repeat(86)));
+  for (const s of scrapes) {
+    const status = s.status === 'complete' ? chalk.green('complete') : s.status === 'failed' ? chalk.red('failed') : chalk.yellow(s.status);
+    console.log(`  ${chalk.gray(s.id.slice(0, 8))}  ${status.padEnd(18)} ${chalk.white(String(s.pagesCount).padEnd(5))}  ${chalk.gray((s.reason || '').padEnd(14).slice(0, 14))} ${chalk.cyan(s.url.slice(0, 44))}`);
+  }
+  console.log();
+}
+
+async function runScrapeShow(id: string) {
+  const scrape = db.findScrapeRunByPartialId(id);
+  if (!scrape) { errorMsg('Scrape not found: ' + id); process.exit(1); }
+  const result = readScrapeResult(scrape.resultPath);
+  console.log(JSON.stringify({
+    scrapeId: scrape.id,
+    status: scrape.status,
+    url: scrape.url,
+    reason: scrape.reason,
+    maxPages: scrape.maxPages,
+    selector: scrape.selector,
+    pagesCount: scrape.pagesCount,
+    resultPath: scrape.resultPath,
+    runId: scrape.runId,
+    stepNumber: scrape.stepNumber,
+    exploreReportId: scrape.exploreReportId,
+    errorMessage: scrape.errorMessage,
+    data: result?.pages || [],
+  }, null, 2));
 }
 
 // ============================================
@@ -5494,6 +9306,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       try {
         const msg = await client.messages.create({
+          model: 'claude-3-5-haiku-20241022',
           max_tokens: 1024,
           system: buildSystemPrompt(),
           messages: conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
@@ -5559,12 +9372,151 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
 }
 
 // ============================================
+// HOME — zero-config entry (just `ghostrun`)
+// ============================================
+
+interface HomeState {
+  globalReady: boolean;
+  projectReady: boolean;
+  hasFlows: boolean;
+  flowCount: number;
+  hasProfiles: boolean;
+  profileCount: number;
+  openRepairs: number;
+  lastFailedRun: { id: string; flowName: string } | null;
+  cwd: string;
+  projectName: string | null;
+  activeProfile: string | null;
+}
+
+function detectHomeState(): HomeState {
+  const globalReady = fs.existsSync(path.join(DATA_PATH, 'data', 'ghostrun.db'));
+  const projectReady = fs.existsSync(PROJECT_CONFIG_PATH);
+  const flows = db.listFlows();
+  const profilesDir = path.join(PROJECT_GHOSTRUN_PATH, 'profiles');
+  const profileCount = fs.existsSync(profilesDir)
+    ? fs.readdirSync(profilesDir).filter(f => f.endsWith('.json')).length
+    : 0;
+  const openRepairs = listRepairProposals(50).filter(p => p.status === 'proposed').length;
+  const recentRuns = db.listRuns(undefined, 10);
+  const lastFail = recentRuns.find(r => r.status === 'failed');
+  const config = readConfig();
+  return {
+    globalReady,
+    projectReady,
+    hasFlows: flows.length > 0,
+    flowCount: flows.length,
+    hasProfiles: profileCount > 0,
+    profileCount,
+    openRepairs,
+    lastFailedRun: lastFail
+      ? { id: lastFail.id, flowName: db.getFlow(lastFail.flowId)?.name || 'Unknown' }
+      : null,
+    cwd: process.cwd(),
+    projectName: config.project?.name || null,
+    activeProfile: config.activeProfile || null,
+  };
+}
+
+async function runSetupFunnel(state: HomeState): Promise<void> {
+  const clack = await import('@clack/prompts');
+  const { intro, confirm, isCancel, note, outro, text } = clack;
+
+  if (!state.globalReady) {
+    console.clear();
+    printLogo();
+    intro(chalk.cyan(' Welcome to GhostRun '));
+    note(
+      'First-time setup installs Playwright Chromium and creates ~/.ghostrun/\nYou only do this once per machine.',
+      'Setup required'
+    );
+    const setup = await confirm({ message: 'Set up GhostRun now?', initialValue: true });
+    if (isCancel(setup) || !setup) {
+      outro('Run ghostrun init when you are ready.');
+      process.exit(0);
+    }
+    console.log();
+    await runInit(['--yes']);
+    return runSetupFunnel(detectHomeState());
+  }
+
+  if (!state.projectReady) {
+    console.clear();
+    printLogo();
+    intro(chalk.cyan(' New project '));
+    note(
+      `No ${chalk.cyan('.ghostrun/')} in:\n  ${state.cwd}\n\nFlows, profiles, baselines, and CI artifacts live here — commit .ghostrun/ to git (exclude secrets).`,
+      'Project workspace'
+    );
+    const initProject = await confirm({ message: 'Initialize GhostRun in this folder?', initialValue: true });
+    if (isCancel(initProject) || !initProject) {
+      outro('Open your app repo and run ghostrun again, or run ghostrun init.');
+      process.exit(0);
+    }
+    ensureProjectWorkspace();
+    const config = readConfig();
+    if (!config.project?.name) {
+      const name = await text({
+        message: 'Project name (for reports):',
+        placeholder: path.basename(state.cwd),
+        defaultValue: path.basename(state.cwd),
+      });
+      if (!isCancel(name) && name) {
+        config.project = { ...config.project, name: String(name), workspaceVersion: '1' };
+        writeConfig(config);
+      }
+    }
+    if (!state.hasProfiles) {
+      const addProfile = await confirm({ message: 'Create a staging profile with a base URL?', initialValue: true });
+      if (!isCancel(addProfile) && addProfile) {
+        const baseUrl = await text({
+          message: 'Staging / app URL:',
+          placeholder: 'https://staging.yourapp.com',
+          validate: v => (!v || !v.startsWith('http')) ? 'Enter a URL starting with http' : undefined,
+        });
+        if (!isCancel(baseUrl) && baseUrl) {
+          await runProfileCreate('staging', String(baseUrl));
+          const staging = getProfile('staging');
+          if (staging) {
+            await setupProfileAccountsInteractive(staging, { confirm, text, isCancel, note });
+            const useMailpit = await confirm({
+              message: 'Enable Mailpit for magic-link email flows? (optional — skip if you use password login)',
+              initialValue: false,
+            });
+            if (!isCancel(useMailpit) && useMailpit) {
+              staging.services = {
+                ...staging.services,
+                email: { provider: 'mailpit', apiUrl: 'http://localhost:8025', timeoutMs: 45000 },
+              };
+              saveProfile(staging);
+              copyDevServicesTemplate();
+              note(
+                'Start Mailpit when needed:\n  docker compose -f .ghostrun/services/dev.compose.yml --profile mailpit up -d',
+                'Optional email'
+              );
+            }
+          }
+          await runProfileUse('staging');
+        }
+      }
+    }
+  }
+}
+
+async function runHome() {
+  let state = detectHomeState();
+  await runSetupFunnel(state);
+  state = detectHomeState();
+  await runInteractive(state);
+}
+
+// ============================================
 // INTERACTIVE MODE
 // ============================================
 
-async function runInteractive() {
+async function runInteractive(initialState?: HomeState) {
   const clack = await import('@clack/prompts');
-  const { intro, outro, select, text, confirm, spinner, isCancel, note, log } = clack;
+  const { intro, outro, select, text, isCancel, note, log } = clack;
 
   console.clear();
   printLogo();
@@ -5577,8 +9529,19 @@ async function runInteractive() {
   const agentFlows = flows.filter(f => f.createdBy === 'agent').length;
   const ollamaModel = await isOllamaRunning();
   const aiProvider = ollamaModel ? `Ollama (${ollamaModel})` : process.env.ANTHROPIC_API_KEY ? 'Anthropic' : 'none';
+  const activeProfile = readConfig().activeProfile || '(none)';
 
-  intro(chalk.cyan(' GhostRun — Memory-driven Web Automation '));
+  intro(chalk.cyan(' GhostRun — your QA agent '));
+
+  let homeState = initialState || detectHomeState();
+  const hints: string[] = [];
+  if (!homeState.hasFlows) hints.push('→ Record your first flow to get started');
+  if (homeState.hasFlows && !homeState.activeProfile) hints.push('→ Set a profile: ghostrun profile use staging');
+  if (homeState.lastFailedRun) hints.push(`→ Last failure: ${homeState.lastFailedRun.flowName}`);
+  if (homeState.openRepairs > 0) hints.push(`→ ${homeState.openRepairs} repair proposal(s) waiting for review`);
+  if (hints.length) {
+    note(hints.map(h => `  ${h}`).join('\n'), 'Suggested');
+  }
 
   const passRateBar = runs.length > 0 ? progressBar(passed, runs.length, 12) : '';
   const passRatePct = runs.length > 0 ? `  ${Math.round(passed / runs.length * 100)}%` : '';
@@ -5591,31 +9554,136 @@ async function runInteractive() {
       flowsLine,
       `  Runs:     ${chalk.white(String(runs.length))}  ${chalk.green(String(passed) + ' passed')}  ${failed > 0 ? chalk.red(String(failed) + ' failed') : chalk.gray('0 failed')}`,
       runs.length > 0 ? `  Rate:     ${passRateBar}${chalk.gray(passRatePct)}` : '',
+      `  Profile:  ${chalk.cyan(activeProfile)}`,
       `  AI:       ${ollamaModel ? chalk.green(aiProvider) : process.env.ANTHROPIC_API_KEY ? chalk.cyan(aiProvider) : chalk.gray('none — run Ollama or set ANTHROPIC_API_KEY')}`,
     ].filter(Boolean).join('\n'),
     'Status'
   );
 
   while (true) {
+    homeState = detectHomeState();
+    const menuOptions: Array<{ value: string; label: string; hint?: string }> = [];
+
+    if (homeState.lastFailedRun) {
+      menuOptions.push({
+        value: 'last-failure',
+        label: '🔴 Review last failure',
+        hint: homeState.lastFailedRun.flowName,
+      });
+    }
+    if (homeState.openRepairs > 0) {
+      menuOptions.push({
+        value: 'repair',
+        label: '🛠  Review repair proposals',
+        hint: `${homeState.openRepairs} open`,
+      });
+    }
+    if (!homeState.hasFlows) {
+      menuOptions.push({
+        value: 'author',
+        label: '✍  Record your first flow',
+        hint: 'opens browser — no commands to memorize',
+      });
+    } else {
+      menuOptions.push({
+        value: 'run',
+        label: '▶  Run a flow',
+        hint: `${homeState.flowCount} saved`,
+      });
+      menuOptions.push({
+        value: 'author',
+        label: '✍  Create or capture flows',
+        hint: 'record, generate, explore, API',
+      });
+    }
+    menuOptions.push(
+      { value: 'suite', label: '🧪 Run a test suite', hint: 'multiple flows' },
+      { value: 'profiles', label: '🗂  Manage profiles', hint: homeState.activeProfile || 'none set' },
+      { value: 'improve', label: '📈 Improve & analyze', hint: 'flaky flows, gaps' },
+      { value: 'reports', label: '📋 View run reports', hint: runs.length > 0 ? `${runs.length} runs` : 'no runs yet' },
+      { value: 'monitor', label: '🕐 Monitor & schedules', hint: 'interval + cron' },
+      { value: 'services', label: '📬 Service Bridge', hint: 'optional — Mailpit, webhooks' },
+      { value: 'doctor', label: '🩺 Health check', hint: 'doctor + audit' },
+      { value: 'chat', label: '💬 Ask GhostRun Bot', hint: 'natural language' },
+      { value: 'serve', label: '🌐  Web dashboard', hint: 'local UI' },
+      { value: 'exit', label: '✕  Exit' },
+    );
+
     const action = await select({
       message: 'What do you want to do?',
-      options: [
-        { value: 'run',      label: '▶  Run a flow',              hint: flows.length > 0 ? `${flows.length} saved` : 'no flows yet' },
-        { value: 'record',   label: '⏺  Record a new flow',       hint: 'opens real browser' },
-        { value: 'suite',    label: '🧪 Run a test suite',          hint: 'run multiple flows' },
-        { value: 'reports',  label: '📋 View run reports',         hint: runs.length > 0 ? `${runs.length} runs` : 'no runs yet' },
-        { value: 'explore',  label: '🔍 Explore a URL',            hint: 'auto-discover flows with AI' },
-        { value: 'schedule', label: '🕐 Manage schedules',         hint: 'cron-based automation' },
-        { value: 'status',   label: '📊 System status',            hint: 'stats + AI provider' },
-        { value: 'chat',     label: '💬 Ask GhostRun Bot',           hint: 'Q&A + run flows by name' },
-        { value: 'serve',    label: '🌐  Open web dashboard',       hint: 'Local web UI' },
-        { value: 'exit',     label: '✕  Exit' },
-      ],
+      options: menuOptions,
     });
 
     if (isCancel(action) || action === 'exit') {
       outro(chalk.gray('Bye.'));
       process.exit(0);
+    }
+
+    if (action === 'last-failure' && homeState.lastFailedRun) {
+      console.log();
+      await runShowRun(homeState.lastFailedRun.id.slice(0, 8));
+      const evidenceReport = path.join(getRunEvidenceDir(homeState.lastFailedRun.id), 'report.html');
+      if (fs.existsSync(evidenceReport)) {
+        log.info(`Full report: ${evidenceReport}`);
+      }
+      console.log();
+      await _pause();
+      continue;
+    }
+
+    if (action === 'doctor') {
+      console.log();
+      await runDoctor();
+      await runSecurityAudit(false);
+      console.log();
+      await _pause();
+      continue;
+    }
+
+    if (action === 'services') {
+      const svc = await select({
+        message: 'Service Bridge:',
+        options: [
+          { value: 'doctor', label: 'Health check (Mailpit + hooks)' },
+          { value: 'inbox', label: 'Show Mailpit inbox' },
+          { value: 'hooks', label: 'List webhook captures' },
+          { value: 'up', label: 'Show docker compose command' },
+          { value: 'back', label: '← Back' },
+        ],
+      });
+      if (isCancel(svc) || svc === 'back') continue;
+      console.log();
+      if (svc === 'up') await runServicesCommand(['up']);
+      else await runServicesCommand([svc as string]);
+      await _pause();
+      continue;
+    }
+
+    if (action === 'monitor') {
+      const mon = await select({
+        message: 'Monitoring:',
+        options: [
+          { value: 'schedule-list', label: 'List schedules' },
+          { value: 'schedule-add', label: 'Add schedule' },
+          { value: 'daemon', label: 'Start scheduler daemon' },
+          { value: 'back', label: '← Back' },
+        ],
+      });
+      if (isCancel(mon) || mon === 'back') continue;
+      if (mon === 'schedule-list') { console.log(); await runScheduleList(); await _pause(); }
+      else if (mon === 'daemon') { console.log(); await runServe(['--daemon']); }
+      else if (mon === 'schedule-add') {
+        const flowsNow = db.listFlows();
+        if (!flowsNow.length) { log.warn('Record a flow first.'); continue; }
+        const fc = await select({ message: 'Flow:', options: flowsNow.map(f => ({ value: f.id, label: f.name })) });
+        if (isCancel(fc)) continue;
+        const cron = await text({ message: 'Cron expression:', placeholder: '0 9 * * *', defaultValue: '0 9 * * *' });
+        if (isCancel(cron)) continue;
+        const flow = db.getFlow(fc as string);
+        if (flow) await runScheduleAdd(flow.name, String(cron));
+        await _pause();
+      }
+      continue;
     }
 
     // ── RUN A FLOW ──────────────────────────────────────────
@@ -5641,24 +9709,58 @@ async function runInteractive() {
       await _pause();
     }
 
-    // ── RECORD ──────────────────────────────────────────────
-    else if (action === 'record') {
-      const url = await text({
-        message: 'URL to record:',
-        placeholder: 'https://yourapp.com',
-        validate: v => (!v || !v.startsWith('http')) ? 'Enter a valid URL starting with http' : undefined,
+    // ── AUTHOR ──────────────────────────────────────────────
+    else if (action === 'author') {
+      const authorAction = await select({
+        message: 'How do you want to create a flow?',
+        options: [
+          { value: 'record',  label: 'Record browser flow', hint: 'capture clicks and fills' },
+          { value: 'generate', label: 'Generate from description', hint: 'AI draft flow' },
+          { value: 'explore', label: 'Explore a URL', hint: 'discover candidate flows' },
+          { value: 'api',     label: 'Build API flow', hint: 'interactive HTTP flow builder' },
+          { value: 'back',    label: '← Back' },
+        ],
       });
-      if (isCancel(url)) continue;
+      if (isCancel(authorAction) || authorAction === 'back') continue;
 
-      const name = await text({
-        message: 'Flow name:',
-        placeholder: 'e.g. Login Flow',
-        defaultValue: new URL(url as string).hostname,
-      });
-      if (isCancel(name)) continue;
-
-      console.log();
-      await runLearn(url as string, name as string);
+      if (authorAction === 'record') {
+        const url = await text({
+          message: 'URL to record:',
+          placeholder: 'https://yourapp.com',
+          validate: v => (!v || !v.startsWith('http')) ? 'Enter a valid URL starting with http' : undefined,
+        });
+        if (isCancel(url)) continue;
+        const name = await text({
+          message: 'Flow name:',
+          placeholder: 'e.g. Login Flow',
+          defaultValue: new URL(url as string).hostname,
+        });
+        if (isCancel(name)) continue;
+        console.log();
+        await runLearn(url as string, name as string);
+      } else if (authorAction === 'generate') {
+        const description = await text({
+          message: 'Describe the flow:',
+          placeholder: 'Login as admin and verify dashboard loads',
+          validate: v => !v ? 'Description required' : undefined,
+        });
+        if (isCancel(description)) continue;
+        console.log();
+        await runCreate(description as string);
+      } else if (authorAction === 'explore') {
+        const url = await text({
+          message: 'URL to explore:',
+          placeholder: 'https://yourapp.com',
+          validate: v => (!v || !v.startsWith('http')) ? 'Enter a valid URL starting with http' : undefined,
+        });
+        if (isCancel(url)) continue;
+        console.log();
+        await runExplore(url as string);
+        await _pause();
+      } else if (authorAction === 'api') {
+        console.log();
+        await runApiLearn();
+      }
     }
 
     // ── SUITE ───────────────────────────────────────────────
@@ -5708,18 +9810,86 @@ async function runInteractive() {
       await _pause();
     }
 
-    // ── EXPLORE ─────────────────────────────────────────────
-    else if (action === 'explore') {
-      const url = await text({
-        message: 'URL to explore:',
-        placeholder: 'https://yourapp.com',
-        validate: v => (!v || !v.startsWith('http')) ? 'Enter a valid URL starting with http' : undefined,
+    // ── REPAIR ──────────────────────────────────────────────
+    else if (action === 'repair') {
+      const repairAction = await select({
+        message: 'Repair proposals:',
+        options: [
+          { value: 'list', label: 'List proposals' },
+          { value: 'apply', label: 'Apply a proposal' },
+          { value: 'back', label: '← Back' },
+        ],
       });
-      if (isCancel(url)) continue;
+      if (isCancel(repairAction) || repairAction === 'back') continue;
+      if (repairAction === 'list') {
+        console.log();
+        await runRepairList();
+        await _pause();
+      } else if (repairAction === 'apply') {
+        const proposals = listRepairProposals(20).filter(p => p.status === 'proposed');
+        if (proposals.length === 0) {
+          log.warn('No open repair proposals.');
+          continue;
+        }
+        const choice = await select({
+          message: 'Which repair proposal?',
+          options: proposals.map(p => ({
+            value: p.id,
+            label: `${p.flowName} · step ${p.stepNumber || '—'}`,
+            hint: (p.proposedSelector || '').slice(0, 40),
+          })),
+        });
+        if (isCancel(choice)) continue;
+        console.log();
+        await runRepairApply(choice as string);
+        await _pause();
+      }
+    }
 
+    // ── PROFILES ────────────────────────────────────────────
+    else if (action === 'profiles') {
+      const profileAction = await select({
+        message: 'Profile management:',
+        options: [
+          { value: 'list', label: 'List profiles' },
+          { value: 'create', label: 'Create profile' },
+          { value: 'use', label: 'Use profile' },
+          { value: 'show', label: 'Show profile' },
+          { value: 'back', label: '← Back' },
+        ],
+      });
+      if (isCancel(profileAction) || profileAction === 'back') continue;
+      if (profileAction === 'list') {
+        console.log();
+        await runProfileList();
+        await _pause();
+      } else if (profileAction === 'create') {
+        const name = await text({ message: 'Profile name:', placeholder: 'staging', validate: v => !v ? 'Required' : undefined });
+        if (isCancel(name)) continue;
+        const url = await text({ message: 'Base URL (optional):', placeholder: 'https://staging.example.com' });
+        if (isCancel(url)) continue;
+        await runProfileCreate(name as string, (url as string) || undefined);
+      } else if (profileAction === 'use') {
+        const profiles = listProfiles();
+        if (profiles.length === 0) { log.warn('No profiles found.'); continue; }
+        const choice = await select({ message: 'Which profile?', options: profiles.map(p => ({ value: p.name, label: p.name, hint: p.baseUrl || '' })) });
+        if (isCancel(choice)) continue;
+        await runProfileUse(choice as string);
+      } else if (profileAction === 'show') {
+        const profiles = listProfiles();
+        if (profiles.length === 0) { log.warn('No profiles found.'); continue; }
+        const choice = await select({ message: 'Which profile?', options: profiles.map(p => ({ value: p.name, label: p.name, hint: p.baseUrl || '' })) });
+        if (isCancel(choice)) continue;
+        console.log();
+        await runProfileShow(choice as string);
+        await _pause();
+      }
+    }
+
+    // ── IMPROVE ─────────────────────────────────────────────
+    else if (action === 'improve') {
       console.log();
-      await runExplore(url as string);
-      console.log();
+      await runImprove();
       await _pause();
     }
 
@@ -5964,7 +10134,7 @@ async function runEnvDelete(envName: string) {
 }
 
 async function runVarDump(runId: string) {
-  let run = db.findRunByPartialId(runId) || db.getRun(runId);
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
   if (!run) { errorMsg('Run not found: ' + runId); process.exit(1); }
   printLogo(); divider();
   const data = db.getRunData(run.id);
@@ -6069,7 +10239,7 @@ async function runPerfRun(flowId: string, extraArgs: string[]): Promise<void> {
   const config = parsePerfArgs(extraArgs);
   printLogo(); divider();
 
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
 
   console.log(chalk.bold(`\n  Load Test: ${chalk.white(flow.name)}`));
@@ -6107,7 +10277,7 @@ async function runPerfExport(flowId: string, extraArgs: string[]): Promise<void>
   const outputFlag = extraArgs.indexOf('--output');
   const outputFile = outputFlag !== -1 ? extraArgs[outputFlag + 1] : '';
 
-  let flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
   if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
 
   const graph = JSON.parse(flow.graph) as { nodes?: Record<string, unknown>[] };
@@ -6333,17 +10503,862 @@ footer{margin-top:48px;color:#768390;font-size:12px}
 }
 
 // ============================================
+// AUDIT — security & secret leak checks
+// ============================================
+
+const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
+  { name: 'Anthropic API key', pattern: /sk-ant-api[a-zA-Z0-9_-]{10,}/ },
+  { name: 'OpenAI-style key', pattern: /\bsk-[a-zA-Z0-9]{20,}\b/ },
+  { name: 'GitHub token', pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/ },
+  { name: 'AWS access key', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: 'Private key block', pattern: /-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
+  { name: 'npm token', pattern: /\bnpm_[a-zA-Z0-9]{36}\b/ },
+];
+
+const PLACEHOLDER_OK = [
+  /sk-ant-\.\.\./,
+  /example\.com/,
+  /your-app\.com/,
+  /test@example\.com/,
+  /PASSWORD=secret/,
+  /s3cr3t/,
+  /STAGING_API_TOKEN/,
+  /AUTH_PASSWORD/,
+];
+
+function lineLooksLikePlaceholder(line: string): boolean {
+  return PLACEHOLDER_OK.some(re => re.test(line));
+}
+
+function scanTextForSecrets(label: string, content: string, filePath: string): string[] {
+  const findings: string[] = [];
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (lineLooksLikePlaceholder(line)) continue;
+    for (const { name, pattern } of SECRET_PATTERNS) {
+      if (pattern.test(line)) {
+        findings.push(`${filePath}:${i + 1} — possible ${name}`);
+      }
+    }
+    if (/"password"\s*:\s*"[^"]{3,}"/i.test(line) && !/secret|example|test123|placeholder/i.test(line)) {
+      findings.push(`${filePath}:${i + 1} — plaintext password in JSON`);
+    }
+  }
+  return findings;
+}
+
+function collectProjectScanFiles(): string[] {
+  const files: string[] = [];
+  const roots = [
+    PROJECT_GHOSTRUN_PATH,
+    process.cwd(),
+  ];
+  const names = ['.ghostrun.env', '.env'];
+  for (const root of roots) {
+    for (const name of names) {
+      const p = path.join(root, name);
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) files.push(p);
+    }
+  }
+
+  const walk = (dir: string) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (['node_modules', '.git', 'runs', 'reports', 'ai'].includes(entry.name)) continue;
+        walk(full);
+        continue;
+      }
+      if (!/\.(json|env|flow\.json|txt|yaml|yml)$/.test(entry.name)) continue;
+      if (full.includes(`${path.sep}auth${path.sep}storage-state${path.sep}`)) continue;
+      if (full.includes(`${path.sep}auth${path.sep}secrets${path.sep}`)) continue;
+      files.push(full);
+    }
+  };
+
+  walk(path.join(PROJECT_GHOSTRUN_PATH, 'profiles'));
+  walk(path.join(PROJECT_GHOSTRUN_PATH, 'flows'));
+  if (fs.existsSync(PROJECT_CONFIG_PATH)) files.push(PROJECT_CONFIG_PATH);
+  return [...new Set(files)];
+}
+
+async function runSecurityAudit(exitOnFailure = true) {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  GhostRun Security Audit\n'));
+
+  const findings: string[] = [];
+  const warnings: string[] = [];
+  const passes: string[] = [];
+
+  ensureProjectWorkspace();
+
+  const gitignorePath = path.join(PROJECT_GHOSTRUN_PATH, '.gitignore');
+  if (fs.existsSync(gitignorePath)) {
+    const gi = fs.readFileSync(gitignorePath, 'utf8');
+    if (gi.includes('auth/secrets/') && gi.includes('auth/storage-state/')) {
+      passes.push('Project .gitignore excludes auth secrets and storage state');
+    } else {
+      findings.push('Project .gitignore should exclude auth/secrets/ and auth/storage-state/');
+    }
+  } else {
+    findings.push('Missing .ghostrun/.gitignore');
+  }
+
+  const rootGitignore = path.join(process.cwd(), '.gitignore');
+  if (fs.existsSync(rootGitignore)) {
+    const gi = fs.readFileSync(rootGitignore, 'utf8');
+    if (/\.ghostrun\.env|\.env/.test(gi)) {
+      passes.push('Root .gitignore mentions env files');
+    } else {
+      warnings.push('Add .ghostrun.env and .env to root .gitignore');
+    }
+  }
+
+  for (const filePath of collectProjectScanFiles()) {
+    const rel = path.relative(process.cwd(), filePath) || filePath;
+    const content = fs.readFileSync(filePath, 'utf8');
+    findings.push(...scanTextForSecrets(rel, content, rel));
+  }
+
+  for (const profile of listProfiles()) {
+    const vars = profile.variables || {};
+    for (const [key, value] of Object.entries(vars)) {
+      if (/password|token|secret|api_key/i.test(key) && value.length > 0 && !lineLooksLikePlaceholder(value)) {
+        warnings.push(`Profile "${profile.name}" has sensitive-looking variable "${key}" — prefer tokenSecret + env var`);
+      }
+    }
+    if (profile.auth?.passwordSecret && profile.auth?.username && !profile.auth?.usernameVar) {
+      warnings.push(`Profile "${profile.name}" has inline username — prefer usernameVar or env reference`);
+    }
+  }
+
+  if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.length > 20) {
+    passes.push('ANTHROPIC_API_KEY loaded from environment (not stored in project files)');
+  }
+
+  const config = readConfig();
+  if (config.policies?.allowAutoRepairApply) {
+    warnings.push('allowAutoRepairApply is enabled — flows may mutate without review outside CI');
+  }
+
+  console.log(chalk.bold('  Passed'));
+  if (passes.length === 0) console.log(chalk.gray('  (none)'));
+  for (const p of passes) console.log(`  ${chalk.green('✓')} ${p}`);
+
+  if (warnings.length) {
+    console.log(chalk.bold('\n  Warnings'));
+    for (const w of warnings) console.log(`  ${chalk.yellow('!')} ${w}`);
+  }
+
+  if (findings.length) {
+    console.log(chalk.bold('\n  Findings'));
+    for (const f of findings) console.log(`  ${chalk.red('✗')} ${f}`);
+  } else {
+    console.log(chalk.bold('\n  Findings'));
+    console.log(`  ${chalk.green('✓')} No secret patterns detected in scanned project files`);
+  }
+
+  console.log(chalk.gray('\n  npm package ships only: ghostrun.js, mcp-server.js, docs, templates/'));
+  console.log(chalk.gray('  See docs/security.md for the full safety model.\n'));
+
+  if (findings.length && exitOnFailure) process.exit(1);
+}
+
+async function runIntegrationsCommand(args: string[] = []) {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const config = readConfig();
+  const sub = args[0] || 'list';
+
+  if (sub === 'list') {
+    console.log(chalk.bold('\n  GhostRun Integrations\n'));
+    const gh = config.integrations?.github;
+    const ln = config.integrations?.linear;
+    console.log(`  ${chalk.cyan('GitHub Issues')}  ${gh?.enabled ? chalk.green('enabled') : chalk.gray('disabled')}`);
+    if (gh?.owner) console.log(chalk.gray(`    repo: ${gh.owner}/${gh.repo || '?'}`));
+    console.log(`  ${chalk.cyan('Linear')}         ${ln?.enabled ? chalk.green('enabled') : chalk.gray('disabled')}`);
+    if (ln?.teamId) console.log(chalk.gray(`    team: ${ln.teamId}`));
+    console.log(chalk.gray('\n  Configure in .ghostrun/config.json → integrations'));
+    console.log(chalk.gray('  Full issue creation: v2.0-alpha (failure.v1.json scaffold ready in v1.3)\n'));
+    return;
+  }
+
+  if (sub === 'test') {
+    const target = args[1];
+    if (!target) { errorMsg('Usage: ghostrun integrations test <github|linear>'); process.exit(1); }
+    if (target === 'github') {
+      const gh = config.integrations?.github;
+      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+      if (!gh?.enabled) { warn('GitHub integration disabled in config.'); process.exit(1); }
+      if (!token) { errorMsg('GITHUB_TOKEN or GH_TOKEN not set.'); process.exit(1); }
+      if (!gh.owner || !gh.repo) { errorMsg('Set integrations.github.owner and integrations.github.repo in config.'); process.exit(1); }
+      success(`GitHub config OK: ${gh.owner}/${gh.repo} (token present)`);
+      return;
+    }
+    if (target === 'linear') {
+      const ln = config.integrations?.linear;
+      const key = process.env.LINEAR_API_KEY;
+      if (!ln?.enabled) { warn('Linear integration disabled in config.'); process.exit(1); }
+      if (!key) { errorMsg('LINEAR_API_KEY not set.'); process.exit(1); }
+      if (!ln.teamId) { errorMsg('Set integrations.linear.teamId in config.'); process.exit(1); }
+      success(`Linear config OK: team ${ln.teamId} (API key present)`);
+      return;
+    }
+    errorMsg(`Unknown integration: ${target}`);
+    process.exit(1);
+  }
+
+  errorMsg('Usage: ghostrun integrations list | test <github|linear>');
+  process.exit(1);
+}
+
+async function runAuthorBenchmark(extraArgs: string[] = []) {
+  printLogo(); divider();
+  const { spawnSync } = require('child_process') as typeof import('child_process');
+  const realBin = fs.realpathSync(process.argv[1]);
+  const pkgDir = path.dirname(realBin);
+  let scriptPath = path.join(pkgDir, 'scripts', 'author-benchmark.mjs');
+  if (!fs.existsSync(scriptPath)) {
+    scriptPath = path.join(process.cwd(), 'scripts', 'author-benchmark.mjs');
+  }
+  if (!fs.existsSync(scriptPath)) {
+    errorMsg('Author benchmark script not found.');
+    process.exit(1);
+  }
+  const result = spawnSync('node', [scriptPath, ...extraArgs], { stdio: 'inherit', env: process.env });
+  process.exit(result.status ?? 1);
+}
+
+// ============================================
+// DOCTOR — health checklist
+// ============================================
+
+async function runDoctor() {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  GhostRun Health Check\n'));
+
+  const check = (label: string, ok: boolean, detail?: string) => {
+    const badge = ok ? chalk.green('  OK  ') : chalk.red(' FAIL ');
+    const desc = detail ? chalk.gray(' — ' + detail) : '';
+    console.log(`  [${badge}] ${label}${desc}`);
+  };
+
+  // 1. Node version >= 18
+  const rawVer = process.version; // e.g. "v20.11.0"
+  const major = parseInt(rawVer.replace('v', '').split('.')[0], 10);
+  check('Node.js >= 18', major >= 18, `${rawVer}`);
+
+  // 2. ANTHROPIC_API_KEY
+  const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
+  check('ANTHROPIC_API_KEY set', hasApiKey, hasApiKey ? 'present' : 'not set — AI features may be limited');
+
+  // 3. Project database
+  const paths = getProjectPaths();
+  const projectDbPath = paths.dbPath;
+  const projectDbExists = fs.existsSync(projectDbPath);
+  check('Project database', projectDbExists || fs.existsSync(PROJECT_CONFIG_PATH), projectDbExists ? projectDbPath : 'run ghostrun init in project root');
+
+  // 4. Global database (legacy fallback)
+  const globalDbPath = path.join(DATA_PATH, 'data', 'ghostrun.db');
+  const globalDbExists = fs.existsSync(globalDbPath);
+  check('Global database (legacy)', globalDbExists, globalDbExists ? globalDbPath : 'optional — project DB is primary');
+
+  // 5. Project workspace exists
+  const wsExists = fs.existsSync(PROJECT_CONFIG_PATH);
+  check('Project workspace initialised', wsExists, wsExists ? PROJECT_CONFIG_PATH : 'run: ghostrun init');
+
+  // 6. Active profile
+  const activeProfileName = readConfig().activeProfile || null;
+  const activeProfileObj = activeProfileName ? getProfile(activeProfileName) : null;
+  check('Active profile', !!activeProfileName, activeProfileName || 'none — use: ghostrun profile use <name>');
+
+  // 7. Service Bridge — only when explicitly configured on the profile
+  if (activeProfileObj?.services && (
+    isEmailBridgeEnabled(activeProfileObj.services) ||
+    activeProfileObj.services.webhook ||
+    activeProfileObj.services.postgres?.connectionSecret
+  )) {
+    const svcResults = await runServicesDoctor(activeProfileObj.services);
+    for (const r of svcResults) {
+      check(`Service: ${r.name}`, r.ok, r.detail);
+    }
+  } else if (activeProfileObj?.auth?.strategy && activeProfileObj.auth.strategy !== 'none') {
+    check('Profile auth', true, `${activeProfileObj.auth.strategy} — credentials via env or .ghostrun/auth/secrets/`);
+  }
+
+  // 8. Ollama
+  const ollamaModel = await isOllamaRunning();
+  check('Ollama running', !!ollamaModel, ollamaModel ? `model: ${ollamaModel}` : 'not reachable (optional)');
+
+  console.log();
+}
+
+// ============================================
+// JUNIT REPORTER — write JUnit XML report
+// ============================================
+
+async function writeJUnitReport(
+  flowName: string,
+  runId: string,
+  steps: Array<{ name: string; status: string; duration: number | null; errorMessage?: string | null }>,
+  totalDurationMs: number
+): Promise<string> {
+  const reportsDir = path.join(PROJECT_GHOSTRUN_PATH, 'reports');
+  if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
+
+  const outPath = path.join(reportsDir, `junit-${runId}.xml`);
+
+  const failures = steps.filter(s => s.status === 'failed').length;
+  const durationSec = (totalDurationMs / 1000).toFixed(3);
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const testcases = steps.map(s => {
+    const dur = ((s.duration || 0) / 1000).toFixed(3);
+    const nameAttr = esc(s.name || `Step ${s.status}`);
+    const failureEl = s.status === 'failed' && s.errorMessage
+      ? `\n      <failure message="${esc(s.errorMessage)}">${esc(s.errorMessage)}</failure>`
+      : '';
+    return `    <testcase name="${nameAttr}" classname="${esc(flowName)}" time="${dur}">${failureEl}\n    </testcase>`;
+  }).join('\n');
+
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites name="GhostRun" tests="${steps.length}" failures="${failures}" time="${durationSec}">`,
+    `  <testsuite name="${esc(flowName)}" tests="${steps.length}" failures="${failures}" time="${durationSec}" id="${esc(runId)}">`,
+    testcases,
+    '  </testsuite>',
+    '</testsuites>',
+  ].join('\n');
+
+  fs.writeFileSync(outPath, xml, 'utf8');
+  return outPath;
+}
+
+async function runReportPublish(extraArgs: string[] = []) {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+
+  const destDir = parseFlagValue(extraArgs, '--dir') || './test-results';
+  const runIdArg = parseFlagValue(extraArgs, '--run');
+  const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
+  const createIssues = extraArgs.includes('--create-issues');
+
+  let runId = runIdArg;
+  if (!runId) {
+    const recent = db.listRuns(undefined, 1);
+    runId = recent[0]?.id;
+  }
+  if (!runId) {
+    errorMsg('No runs found to publish.');
+    process.exit(1);
+  }
+
+  const run = db.findRunByPartialId(runId) || db.getRun(runId);
+  if (!run) {
+    errorMsg('Run not found: ' + runId);
+    process.exit(1);
+  }
+
+  const evidenceDir = getRunEvidenceDir(run.id);
+  if (!fs.existsSync(path.join(evidenceDir, 'manifest.json'))) {
+    writeEvidenceBundle(run.id, { ci: process.argv.includes('--ci') });
+  }
+
+  fs.mkdirSync(destDir, { recursive: true });
+  const htmlPath = path.join(destDir, 'ghostrun-report.html');
+  const junitPath = path.join(destDir, 'ghostrun-junit.xml');
+  const manifestPath = path.join(destDir, 'manifest.json');
+  const failurePath = path.join(destDir, 'failure.v1.json');
+  const screenshotsDir = path.join(destDir, 'screenshots');
+
+  const srcManifest = path.join(evidenceDir, 'manifest.json');
+  const srcReport = path.join(evidenceDir, 'report.html');
+  const srcFailure = path.join(evidenceDir, 'failure.v1.json');
+  const srcScreenshots = path.join(evidenceDir, 'screenshots');
+
+  if (fs.existsSync(srcReport)) fs.copyFileSync(srcReport, htmlPath);
+  else await generateRunReport(run.id, htmlPath);
+
+  const steps = db.listSteps(run.id);
+  const flow = db.getFlow(run.flowId);
+  const flowName = flow?.name || run.flowId;
+  const junitSource = await writeJUnitReport(
+    flowName,
+    run.id,
+    steps.map(s => ({ name: s.name, status: s.status, duration: s.duration, errorMessage: s.errorMessage })),
+    run.duration || 0
+  );
+  fs.copyFileSync(junitSource, junitPath);
+
+  fs.mkdirSync(screenshotsDir, { recursive: true });
+  const copiedScreenshots: string[] = [];
+  const shotSourceDir = fs.existsSync(srcScreenshots) ? srcScreenshots : db.getScreenshotsPath(run.id);
+  if (fs.existsSync(shotSourceDir)) {
+    for (const file of fs.readdirSync(shotSourceDir).filter(f => f.endsWith('.png'))) {
+      const dest = path.join(screenshotsDir, file);
+      fs.copyFileSync(path.join(shotSourceDir, file), dest);
+      copiedScreenshots.push(dest);
+    }
+  }
+
+  let manifest: Record<string, unknown> = {};
+  if (fs.existsSync(srcManifest)) {
+    manifest = JSON.parse(fs.readFileSync(srcManifest, 'utf8'));
+  }
+  manifest = {
+    ...manifest,
+    publishedAt: new Date().toISOString(),
+    publishDir: path.resolve(destDir),
+    htmlReport: path.resolve(htmlPath),
+    junitReport: path.resolve(junitPath),
+    screenshots: copiedScreenshots.map(p => path.resolve(p)),
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  if (fs.existsSync(srcFailure)) {
+    fs.copyFileSync(srcFailure, failurePath);
+  }
+
+  if (createIssues) {
+    if (run.status === 'failed' && fs.existsSync(failurePath)) {
+      const config = readConfig();
+      const issueTrigger: GitHubIssueCreateTrigger =
+        process.env.CI === 'true' || extraArgs.includes('--ci') ? 'ci-failure' : 'local-failure';
+      if (!shouldCreateGitHubIssue(config, issueTrigger)) {
+        warn(`--create-issues skipped: integrations.github.createOn excludes "${issueTrigger}".`);
+      } else {
+        try {
+          const failure = JSON.parse(fs.readFileSync(failurePath, 'utf8')) as Record<string, unknown>;
+          const result = await createGitHubIssueFromFailure(failure, manifest, config, {
+            publishFailurePath: failurePath,
+            evidenceFailurePath: fs.existsSync(srcFailure) ? srcFailure : undefined,
+          });
+          if (result.skipped === 'duplicate' && result.issueUrl) {
+            info(`GitHub issue already exists: ${result.issueUrl}`);
+          } else if (result.created && result.issueUrl) {
+            success(`GitHub issue created: ${result.issueUrl}`);
+          } else if (result.skipped === 'disabled') {
+            warn('--create-issues skipped: integrations.github.enabled is false.');
+          } else if (result.skipped === 'config') {
+            errorMsg('Set integrations.github.owner and integrations.github.repo in config.');
+            process.exit(1);
+          }
+        } catch (err) {
+          errorMsg(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      }
+    } else {
+      warn('--create-issues skipped: run passed or no failure artifact.');
+    }
+  }
+
+  if (jsonOutput) {
+    console.log(JSON.stringify(manifest));
+    return;
+  }
+
+  success('Reports published.');
+  info(`Directory: ${chalk.cyan(path.resolve(destDir))}`);
+  info(`HTML:      ${chalk.cyan(String(manifest.htmlReport))}`);
+  info(`JUnit:     ${chalk.cyan(String(manifest.junitReport))}`);
+  info(`Manifest:  ${chalk.cyan(path.resolve(manifestPath))}`);
+  if (fs.existsSync(failurePath)) info(`Failure:   ${chalk.cyan(path.resolve(failurePath))}`);
+  console.log();
+}
+
+// ============================================
+// AUTHOR — interactive flow creation menu
+// ============================================
+
+async function runAuthor() {
+  printLogo(); divider();
+  console.log(chalk.bold('\n  Author a Flow\n'));
+  console.log(chalk.white('  Choose how to create a new flow:\n'));
+  console.log(`  ${chalk.cyan('1)')} Record browser flow`);
+  console.log(`  ${chalk.cyan('2)')} Generate from description ${chalk.gray('(AI)')}`);
+  console.log(`  ${chalk.cyan('3)')} Import from curl`);
+  console.log(`  ${chalk.cyan('4)')} Import from OpenAPI spec`);
+  console.log(`  ${chalk.cyan('5)')} Explore website ${chalk.gray('(AI)')}`);
+  console.log();
+
+  const choice = await askQuestion('  Enter choice [1-5]: ');
+
+  switch (choice.trim()) {
+    case '1': {
+      const url = await askQuestion('  URL to record: ');
+      if (!url.trim()) { errorMsg('URL required'); process.exit(1); }
+      await runLearn(url.trim());
+      break;
+    }
+    case '2':
+      await runCreate();
+      break;
+    case '3':
+      await runFlowFromCurl();
+      break;
+    case '4': {
+      const specFile = await askQuestion('  Path to OpenAPI/Swagger file: ');
+      if (!specFile.trim()) { errorMsg('File path required'); process.exit(1); }
+      await runFlowFromSpec(specFile.trim());
+      break;
+    }
+    case '5': {
+      const exploreUrl = await askQuestion('  URL to explore: ');
+      if (!exploreUrl.trim()) { errorMsg('URL required'); process.exit(1); }
+      await runExplore(exploreUrl.trim());
+      break;
+    }
+    default:
+      errorMsg(`Invalid choice: ${choice}. Enter a number from 1 to 5.`);
+      process.exit(1);
+  }
+}
+
+// ============================================
+// COMMANDS — monitor (continuous loop)
+// ============================================
+
+async function runMonitor(flowId: string, extraArgs: string[] = []) {
+  // If --interval is not supplied, fall back to the one-shot data-diff monitor.
+  const intervalArg = parseFlagValue(extraArgs, '--interval');
+  if (!intervalArg && !extraArgs.includes('--interval')) {
+    return runMonitorOnce(flowId);
+  }
+
+  const intervalSec = intervalArg ? Math.max(1, parseInt(intervalArg, 10) || 60) : 60;
+
+  // Apply --profile if given (set activeProfile in config for this process).
+  const profileArg = parseFlagValue(extraArgs, '--profile');
+  if (profileArg) {
+    const config = readConfig();
+    config.activeProfile = profileArg;
+    writeConfig(config);
+  }
+
+  const flow = db.findFlowByPartialId(flowId) || db.findFlowByName(flowId);
+  if (!flow) { errorMsg('Flow not found: ' + flowId); process.exit(1); }
+
+  const activeProfileName = profileArg || readConfig().activeProfile || undefined;
+  const activeProfile = activeProfileName ? getProfile(activeProfileName) : null;
+  const notifyTargets = resolveMonitorNotificationTargets(extraArgs, activeProfile);
+
+  printLogo(); divider();
+  console.log(
+    chalk.bold('\n  Monitoring: ') + chalk.white(flow.name) +
+    chalk.gray(` every ${intervalSec}s`) +
+    chalk.gray(' | Press Ctrl+C to stop\n')
+  );
+
+  let totalRuns = 0;
+  let totalPassed = 0;
+  let consecutiveFailures = 0;
+  let running = false;
+  let lastAlertAt = 0;
+
+  // Graceful shutdown on Ctrl+C.
+  process.once('SIGINT', () => {
+    console.log('\n');
+    divider();
+    const passRate = totalRuns > 0 ? ((totalPassed / totalRuns) * 100).toFixed(1) : '0.0';
+    console.log(chalk.bold('  Monitor stopped.'));
+    console.log(`  Total runs:  ${chalk.white(String(totalRuns))}`);
+    console.log(`  Pass rate:   ${totalRuns > 0 && totalPassed === totalRuns ? chalk.green(passRate + '%') : chalk.yellow(passRate + '%')}`);
+    console.log();
+    process.exit(0);
+  });
+
+  const tick = async () => {
+    if (running) return; // skip if previous run still in progress
+    running = true;
+    const tickStart = Date.now();
+    try {
+      const result = await executeFlow(flow.id, globalVars, { quiet: true, jsonOutput: false });
+      const durationMs = Date.now() - tickStart;
+      const durationStr = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+      const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      totalRuns++;
+      if (result.passed) {
+        totalPassed++;
+        consecutiveFailures = 0;
+        console.log(`  ${chalk.green('✓')} ${chalk.gray(ts)} ${chalk.green('PASS')} ${chalk.gray(durationStr)}`);
+      } else {
+        consecutiveFailures++;
+        const errMsg = result.error ? result.error.split('\n')[0].slice(0, 120) : 'unknown error';
+        console.log(`  ${chalk.red('✗')} ${chalk.gray(ts)} ${chalk.red('FAIL')} ${chalk.gray(durationStr)}`);
+        console.log(chalk.red(`    ERROR: ${errMsg}`));
+        if (consecutiveFailures >= notifyTargets.threshold) {
+          console.log(chalk.red.bold(`\n  !! ALERT: ${consecutiveFailures} consecutive failures for "${flow.name}" !!\n`));
+          if (notifyTargets.enabled && consecutiveFailures === notifyTargets.threshold) {
+            await sendMonitorAlert({
+              flow,
+              profileName: activeProfileName,
+              consecutiveFailures,
+              error: errMsg,
+              webhookUrl: notifyTargets.webhookUrl,
+              slackWebhook: notifyTargets.slackWebhook,
+            });
+            lastAlertAt = consecutiveFailures;
+          } else if (notifyTargets.enabled && consecutiveFailures > lastAlertAt && consecutiveFailures % notifyTargets.threshold === 0) {
+            await sendMonitorAlert({
+              flow,
+              profileName: activeProfileName,
+              consecutiveFailures,
+              error: errMsg,
+              webhookUrl: notifyTargets.webhookUrl,
+              slackWebhook: notifyTargets.slackWebhook,
+            });
+            lastAlertAt = consecutiveFailures;
+          }
+        }
+      }
+    } catch (err) {
+      const durationMs = Date.now() - tickStart;
+      const durationStr = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+      const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      totalRuns++;
+      consecutiveFailures++;
+      const errMsg = err instanceof Error ? err.message.split('\n')[0].slice(0, 120) : String(err);
+      console.log(`  ${chalk.red('✗')} ${chalk.gray(ts)} ${chalk.red('FAIL')} ${chalk.gray(durationStr)}`);
+      console.log(chalk.red(`    ERROR: ${errMsg}`));
+      if (consecutiveFailures >= notifyTargets.threshold) {
+        console.log(chalk.red.bold(`\n  !! ALERT: ${consecutiveFailures} consecutive failures for "${flow.name}" !!\n`));
+        if (notifyTargets.enabled && consecutiveFailures >= notifyTargets.threshold && consecutiveFailures !== lastAlertAt) {
+          await sendMonitorAlert({
+            flow,
+            profileName: activeProfileName,
+            consecutiveFailures,
+            error: errMsg,
+            webhookUrl: notifyTargets.webhookUrl,
+            slackWebhook: notifyTargets.slackWebhook,
+          });
+          lastAlertAt = consecutiveFailures;
+        }
+      }
+    } finally {
+      running = false;
+    }
+  };
+
+  // Run once immediately, then on interval.
+  await tick();
+  setInterval(tick, intervalSec * 1000);
+
+  // Keep the process alive (setInterval alone may not prevent exit in some environments).
+  await new Promise<never>(() => {});
+}
+
+// ============================================
 // MAIN
 // ============================================
 
 const args = process.argv.slice(2);
 const cmd = args[0];
 const globalVars = parseVars(process.argv.slice(2));
-const db = new DatabaseManager();
+let db: DatabaseManager;
+
+function initializeDatabase(): DatabaseManager {
+  initProjectContext();
+  refreshProjectConstants();
+  const paths = getProjectPaths();
+  const hasProject = fs.existsSync(paths.configPath);
+  const manager = new DatabaseManager(hasProject ? {
+    dbPath: paths.dbPath,
+    screenshotsPath: paths.screenshotsPath,
+    sessionsPath: paths.sessionsPath,
+  } : {});
+
+  manager.setFlowSyncHook((event, flow) => {
+    if (!fs.existsSync(paths.configPath)) return;
+    try {
+      if (event === 'delete') deleteFlowFile(flow.id, flow.name);
+      else writeFlowFile(flow);
+    } catch {
+      /* disk sync is best-effort */
+    }
+  });
+
+  if (hasProject) {
+    const sync = syncFlowsFromDisk(
+      (data) => manager.createFlow(data),
+      (name) => manager.findFlowByName(name),
+      (id, data) => manager.updateFlow(id, data),
+    );
+    if (sync.imported + sync.updated > 0 && process.env.GHOSTRUN_QUIET !== '1') {
+      info(`Synced flows from disk: ${sync.imported} imported, ${sync.updated} updated`);
+    }
+  }
+
+  return manager;
+}
+
+async function runSyncFlows() {
+  ensureProjectWorkspace();
+  const sync = syncFlowsFromDisk(
+    (data) => db.createFlow(data),
+    (name) => db.findFlowByName(name),
+    (id, data) => db.updateFlow(id, data),
+  );
+  success(`Flow sync complete — imported ${sync.imported}, updated ${sync.updated}, skipped ${sync.skipped}`);
+  const files = listFlowFiles();
+  if (files.length) info(`${files.length} flow file(s) under .ghostrun/flows/`);
+}
+
+async function runMigrateProjectScope() {
+  printLogo(); divider();
+  ensureProjectWorkspace();
+  const paths = getProjectPaths();
+  const globalDbPath = path.join(DATA_PATH, 'data', 'ghostrun.db');
+
+  if (!fs.existsSync(globalDbPath)) {
+    warn('No global database at ~/.ghostrun/data/ghostrun.db — nothing to migrate.');
+    return;
+  }
+
+  if (fs.existsSync(paths.dbPath) && db.listFlows().length > 0) {
+    const approved = await confirmAction('  Project DB already has flows. Merge global flows anyway? (y/N) ', false);
+    if (!approved) {
+      warn('Migration cancelled.');
+      return;
+    }
+  }
+
+  const globalDb = new DatabaseManager({ dbPath: globalDbPath });
+  const globalFlows = globalDb.listFlows();
+  let imported = 0;
+  for (const flow of globalFlows) {
+    const existing = db.findFlowByName(flow.name);
+    if (existing) continue;
+    db.createFlow({
+      name: flow.name,
+      description: flow.description || undefined,
+      appUrl: flow.appUrl || undefined,
+      graph: JSON.parse(flow.graph || '{}'),
+      createdBy: flow.createdBy,
+    });
+    imported++;
+  }
+  globalDb.close();
+
+  const diskSync = syncFlowsFromDisk(
+    (data) => db.createFlow(data),
+    (name) => db.findFlowByName(name),
+    (id, data) => db.updateFlow(id, data),
+  );
+
+  success(`Project scope migration complete`);
+  info(`Global flows copied: ${imported}`);
+  info(`Disk sync: ${diskSync.imported} imported, ${diskSync.updated} updated`);
+  info(`Project DB: ${paths.dbPath}`);
+}
+
+async function runServicesCommand(subArgs: string[]) {
+  ensureProjectWorkspace();
+  const sub = subArgs[0] || 'list';
+  const profile = getSelectedProfile(subArgs) || (readConfig().activeProfile ? getProfile(readConfig().activeProfile!) : null);
+
+  switch (sub) {
+    case 'list': {
+      console.log(chalk.bold('\n  Service Bridge (optional)\n'));
+      console.log(chalk.gray('  Most SaaS apps use profile auth + shared QA credentials — no Mailpit required.'));
+      console.log(chalk.gray('  Set auth in .ghostrun/profiles/staging.json and secrets via env or auth/secrets/.'));
+      console.log();
+      console.log(chalk.gray('  Optional local dev stack: .ghostrun/services/dev.compose.yml'));
+      console.log(chalk.gray('  Mailpit (magic links):  http://localhost:8025'));
+      console.log(chalk.gray('  Hook catcher:           http://127.0.0.1:8787'));
+      console.log(chalk.gray('  Start Mailpit only:     docker compose -f .ghostrun/services/dev.compose.yml up -d mailpit'));
+      if (profile?.services) {
+        console.log(chalk.cyan('\n  Active profile services:'));
+        console.log(JSON.stringify(profile.services, null, 2));
+      } else {
+        console.log(chalk.gray('\n  No services block — profile auth only (recommended for password login).'));
+      }
+      console.log();
+      break;
+    }
+    case 'doctor': {
+      console.log(chalk.bold('\n  Service Bridge Health\n'));
+      const results = await runServicesDoctor(profile?.services);
+      for (const r of results) {
+        const badge = r.ok ? chalk.green(' OK ') : chalk.red('FAIL');
+        console.log(`  [${badge}] ${r.name} — ${r.detail}`);
+      }
+      console.log();
+      break;
+    }
+    case 'inbox': {
+      if (!isEmailBridgeEnabled(profile?.services)) {
+        errorMsg('Mailpit not enabled on this profile. Add services.email or use profile auth with QA credentials.');
+        process.exit(1);
+      }
+      const apiUrl = resolveEmailApiUrl(profile?.services)!;
+      try {
+        const messages = await fetchMailpitMessages(apiUrl);
+        console.log(chalk.bold(`\n  Mailpit inbox (${messages.length} messages)\n`));
+        console.log(sanitizeInboxSnapshot(messages, 15) || chalk.gray('  (empty)'));
+      } catch (e) {
+        errorMsg(e instanceof Error ? e.message : String(e));
+        process.exit(1);
+      }
+      console.log();
+      break;
+    }
+    case 'hooks': {
+      const captures = listWebhookCaptures(20);
+      console.log(chalk.bold(`\n  Webhook captures (${captures.length})\n`));
+      for (const c of captures.slice(0, 10)) {
+        console.log(`  ${chalk.gray(c.receivedAt)} ${chalk.cyan(c.method)} ${c.path} (${c.body.length} bytes)`);
+      }
+      if (captures.length === 0) console.log(chalk.gray('  (none — POST to http://127.0.0.1:8787/your/path)'));
+      console.log();
+      break;
+    }
+    case 'hook': {
+      if (subArgs.includes('--daemon')) {
+        const { url } = await startHookCatcher(8787);
+        success(`Hook catcher listening on ${url}`);
+        info('POST any path — captures saved to .ghostrun/services/webhooks/');
+        info('Health: GET /hooks/health');
+        await new Promise<never>(() => {});
+      } else {
+        errorMsg('Usage: ghostrun services hook --daemon');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'up': {
+      copyDevServicesTemplate();
+      const compose = path.join(getProjectPaths().servicesPath, 'dev.compose.yml');
+      info(`Dev stack template: ${compose}`);
+      info('Run: docker compose -f .ghostrun/services/dev.compose.yml up -d');
+      break;
+    }
+    case 'seed': {
+      const pg = profile?.services?.postgres;
+      if (!pg?.connectionSecret) {
+        errorMsg('Profile missing services.postgres.connectionSecret');
+        process.exit(1);
+      }
+      const paths = getProjectPaths();
+      const fixtures = (pg.fixtures || []).map(f => path.isAbsolute(f) ? f : path.join(paths.fixturesSql, f));
+      await runSqlFixtures(fixtures, pg.connectionSecret);
+      success(`Applied ${fixtures.length} SQL fixture(s)`);
+      break;
+    }
+    default:
+      errorMsg(`Unknown services subcommand: ${sub}. Use: list, doctor, inbox, hooks, hook, up, seed`);
+      process.exit(1);
+  }
+}
+
 
 async function main() {
+  db = initializeDatabase();
+
   if (!cmd) {
-    await runInteractive();
+    await runHome();
     db.close();
     return;
   }
@@ -6366,9 +11381,16 @@ async function main() {
     console.log(`  ${C('learn <url> [name]')}${G('Record a new flow (opens real browser)')}`);
     console.log(`  ${C('run <id|name> [--var k=v]')}${G('Execute a flow headlessly')}`);
     console.log(`  ${C('run <id> --visible')}${G('Run with visible browser window')}`);
+    console.log(`  ${C('run <id> --ci')}${G('CI-safe run (no implicit healing)')}`);
     console.log(`  ${C('run <id> --output json')}${G('JSON output with extracted data')}`);
     console.log(`  ${C('run <id> --report html')}${G('Run flow + save HTML report')}`);
+    console.log(`  ${C('run <id> --reporter junit')}${G('Save JUnit XML report after run')}`);
+    console.log(`  ${C('run <id> --video')}${G('Record video of the run')}`);
+    console.log(`  ${C('run <id> --trace')}${G('Record Playwright trace for inspection')}`);
+    console.log(`  ${C('run <id> --baseline')}${G('Fail on visual regression vs baselines')}`);
+    console.log(`  ${C('run <id> --baseline-threshold 5')}${G('Visual diff threshold (percent)')}`);
     console.log(`  ${C('create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
+    console.log(`  ${C('author')}${G('Interactive menu to author a flow')}`);
     console.log(`  ${C('code:scan <directory>')}${G('Scan codebase, create draft flows    🤖 AI')}`);
     console.log();
 
@@ -6384,11 +11406,39 @@ async function main() {
     console.log(`  ${C('flow:from-spec <file>')}${G('Import OpenAPI/Swagger JSON or YAML spec')}`);
     console.log();
 
-    H('Scheduling');
-    console.log(`  ${C('flow:schedule <id> "<cron>"')}${G('Schedule a flow  e.g. "0 9 * * *"')}`);
-    console.log(`  ${C('schedule:list')}${G('List all schedules')}`);
-    console.log(`  ${C('schedule:remove <id>')}${G('Remove a schedule')}`);
-    console.log(`  ${C('serve')}${G('Start the scheduler daemon')}`);
+    H('Profiles');
+    console.log(`  ${C('profile:list')}${G('List project profiles')}`);
+    console.log(`  ${C('profile:show <name>')}${G('Show a project profile')}`);
+    console.log(`  ${C('profile:create <name> [url]')}${G('Create a profile with optional base URL')}`);
+    console.log(`  ${C('profile:use <name>')}${G('Set the active project profile')}`);
+    console.log(`  ${C('profile:set <name> <key> <val>')}${G('Set baseUrl, auth.*, meta.*, or profile var')}`);
+    console.log(`  ${C('profile:delete <name>')}${G('Delete a project profile')}`);
+    console.log(`  ${C('profile accounts list <profile>')}${G('Roles: superadmin, admin, manager, guest')}`);
+    console.log(`  ${C('profile account add <profile> <id>')}${G('Add account with email + password secrets')}`);
+    console.log(chalk.gray(`  ${'  Run: --profile staging --account admin  (email + password per role)'.padEnd(52)}`));
+    console.log();
+
+    H('SaaS Service Bridge (optional)');
+    console.log(`  ${C('services list')}${G('Overview — creds-first; Mailpit optional')}`);
+    console.log(`  ${C('services doctor')}${G('Check configured services only')}`);
+    console.log(`  ${C('services inbox')}${G('Mailpit inbox (requires services.email)')}`);
+    console.log(`  ${C('services hooks')}${G('List captured webhooks')}`);
+    console.log(`  ${C('services hook --daemon')}${G('Start local webhook catcher on :8787')}`);
+    console.log(chalk.gray(`  ${'  Flow actions: db:*, webhook:*, email:* (optional Mailpit)'.padEnd(52)}`));
+    console.log();
+
+    H('Project Scope');
+    console.log(`  ${C('sync flows')}${G('Import .ghostrun/flows/*.flow.json into DB')}`);
+    console.log(`  ${C('migrate project-scope')}${G('Copy flows from ~/.ghostrun to this repo')}`);
+    console.log();
+
+    H('Monitor & Scheduling');
+    console.log(`  ${C('monitor <id> --interval 60s')}${G('Poll a flow on an interval')}`);
+    console.log(`  ${C('monitor daemon')}${G('Run cron scheduler (writes scheduler.pid)')}`);
+    console.log(`  ${C('monitor schedule list')}${G('List cron schedules')}`);
+    console.log(`  ${C('monitor schedule add <id> "<cron>"')}${G('Add schedule  e.g. "0 9 * * *"')}`);
+    console.log(`  ${C('monitor schedule remove <id>')}${G('Remove a schedule')}`);
+    console.log(chalk.gray(`  ${'  Legacy (deprecated v1.3.0): flow:schedule, schedule:list, serve'.padEnd(52)}`));
     console.log(`  ${C('serve --ui [--port 3000]')}${G('Launch the web dashboard')}`);
     console.log();
 
@@ -6397,13 +11447,14 @@ async function main() {
     console.log(`  ${C('suite:add <suite> <flow>')}${G('Add a flow to a suite')}`);
     console.log(`  ${C('suite:list')}${G('List all suites')}`);
     console.log(`  ${C('suite:show <suite>')}${G('Show flows in a suite')}`);
-    console.log(`  ${C('suite:run <suite> [--var k=v]')}${G('Run all flows in a suite')}`);
+    console.log(`  ${C('suite:run <suite> [--var k=v] [--parallel]')}${G('Run all flows in a suite')}`);
     console.log();
 
     H('Visual Baselines');
     console.log(`  ${C('baseline:set <flow-id>')}${G('Capture reference screenshots')}`);
     console.log(`  ${C('baseline:clear <flow-id>')}${G('Clear baselines for a flow')}`);
     console.log(`  ${C('baseline:show <flow-id>')}${G('List baseline screenshots')}`);
+    console.log(`  ${C('run <id> --baseline')}${G('Gate runs on visual diff vs baselines')}`);
     console.log();
 
     H('Run History & Analysis');
@@ -6411,6 +11462,13 @@ async function main() {
     console.log(`  ${C('run:show <id>')}${G('Full step details + screenshots')}`);
     console.log(`  ${C('run:diff <id1> <id2>')}${G('Pixel-diff screenshots between two runs')}`);
     console.log(`  ${C('run:analyze <id>')}${G('Plain-English failure analysis          🤖 AI')}`);
+    console.log(`  ${C('repair list')}${G('List stored repair proposals')}`);
+    console.log(`  ${C('repair show <id>')}${G('Show repair proposal details')}`);
+    console.log(`  ${C('repair apply <id>')}${G('Apply a stored repair proposal')}`);
+    console.log(`  ${C('improve')}${G('Analyze GhostRun data and suggest improvements')}`);
+    console.log(`  ${C('report publish')}${G('Bundle HTML/JUnit/screenshots for CI')}`);
+    console.log(`  ${C('report list')}${G('List recent runs')}`);
+    console.log(`  ${C('integrations list')}${G('Show GitHub/Linear integration config')}`);
     console.log();
 
     H('Template Store');
@@ -6421,6 +11479,15 @@ async function main() {
     H('Data Extraction & Monitoring');
     console.log(`  ${C('monitor <id|name>')}${G('Run flow + show extracted data changes')}`);
     console.log(`  ${C('monitor <id> --output json')}${G('Monitor with JSON output')}`);
+    console.log(`  ${C('monitor <id> --interval <s>')}${G('Loop: run every N seconds (default 60)')}`);
+    console.log(`  ${C('monitor <id> --interval 30 --profile <name>')}${G('Continuous monitor with profile')}`);
+    if (isCrawleeEnabled()) {
+      console.log(`  ${C('scrape <url> [opts]')}${G('Scrape website data with Crawlee')}`);
+      console.log(`  ${C('scrape:run <url> --flow <id>')}${G('Scrape first, then run a flow')}`);
+      console.log(`  ${C('scrape:list')}${G('List saved scrape datasets')}`);
+      console.log(`  ${C('scrape:show <id>')}${G('Show saved scrape JSON')}`);
+      console.log(chalk.gray(`  ${'  Options: --max-pages N  --selector CSS  --output json'.padEnd(52)}`));
+    }
     console.log(chalk.gray(`  ${'  Flow actions: extract, scroll:bottom, scroll:load, next:page'.padEnd(52)}`));
     console.log();
 
@@ -6446,7 +11513,12 @@ async function main() {
 
     H('Chat & Setup');
     console.log(`  ${C('chat')}${G('Ask GhostRun Bot — Q&A + run flows      🤖 AI')}`);
-    console.log(`  ${C('init')}${G('Setup wizard (Chromium + AI provider)')}`);
+    console.log(`  ${C('init [--yes]')}${G('Setup wizard (Chromium + AI provider)')}`);
+    console.log(`  ${C('audit')}${G('Scan project for secret leaks')}`);
+    console.log(`  ${C('config:mode [assist|auto]')}${G('Show or set interaction mode')}`);
+    console.log(`  ${C('ai:status')}${G('AI provider, policy, and usage summary')}`);
+    console.log(`  ${C('ai:usage')}${G('Aggregated AI token and call usage')}`);
+    console.log(`  ${C('ai:sessions [limit]')}${G('Recent sanitized AI session log')}`);
     console.log();
 
     H('Exploration & System');
@@ -6454,33 +11526,238 @@ async function main() {
     console.log(`  ${C('explore:list')}${G('List all explore sessions')}`);
     console.log(`  ${C('explore:confirm <report-id>')}${G('Save confirmed flows from explore')}`);
     console.log(`  ${C('status')}${G('Stats, creator breakdown, AI provider')}`);
+    console.log(`  ${C('doctor')}${G('Run a health checklist for GhostRun')}`);
+    console.log(`  ${C('benchmark author')}${G('Measure AI flow generation quality')}`);
     console.log(`  ${C('serve')}${G('Open web dashboard (ghostrun serve --ui)')}`);
     console.log();
     console.log(chalk.gray('  🤖 AI  = enhanced by AI (Ollama local or ANTHROPIC_API_KEY)'));
     console.log(chalk.gray('  👤     = human-recorded   🤖 = agent/AI-generated'));
-    console.log(chalk.gray('  Flags:     --visible (show browser)  --output json  --var key=value'));
+    console.log(chalk.gray('  Flags:     --visible  --ci  --profile <name>  --baseline  --output json  --var key=value'));
     console.log();
     process.exit(0);
   }
 
+  if (cmd === 'repair' && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case 'list': await runRepairList(); break;
+      case 'show':
+        if (!rest[0]) { errorMsg('Repair proposal ID required'); process.exit(1); }
+        await runRepairShow(rest[0]); break;
+      case 'apply':
+        if (!rest[0]) { errorMsg('Repair proposal ID required'); process.exit(1); }
+        await runRepairApply(rest[0]); break;
+      default:
+        errorMsg(`Unknown repair subcommand: ${sub}. Use: list, show, apply`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+
+  if (cmd === 'report' && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case 'list': await runListRuns(); break;
+      case 'show':
+        if (!rest[0]) { errorMsg('Run ID required'); process.exit(1); }
+        await runShowRun(rest[0]); break;
+      case 'diff':
+        if (!rest[0] || !rest[1]) { errorMsg('Usage: ghostrun report diff <run1> <run2>'); process.exit(1); }
+        await runDiff(rest[0], rest[1]); break;
+      case 'analyze':
+        if (!rest[0]) { errorMsg('Run ID required'); process.exit(1); }
+        await runAnalyzeRun(rest[0]); break;
+      case 'publish':
+        await runReportPublish(rest); break;
+      default:
+        errorMsg(`Unknown report subcommand: ${sub}. Use: list, show, diff, analyze, publish`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+
+  if (cmd === 'profile' && args[1] && !args[1].includes(':')) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case 'list': await runProfileList(); break;
+      case 'show':
+        if (!rest[0]) { errorMsg('Profile name required'); process.exit(1); }
+        await runProfileShow(rest[0]); break;
+      case 'create':
+        if (!rest[0]) { errorMsg('Profile name required'); process.exit(1); }
+        await runProfileCreate(rest[0], rest[1]); break;
+      case 'use':
+        if (!rest[0]) { errorMsg('Profile name required'); process.exit(1); }
+        await runProfileUse(rest[0]); break;
+      case 'set':
+        if (!rest[0] || !rest[1] || !rest[2]) { errorMsg('Usage: ghostrun profile set <name> <key> <value>'); process.exit(1); }
+        await runProfileSet(rest[0], rest[1], rest[2]); break;
+      case 'delete':
+        if (!rest[0]) { errorMsg('Profile name required'); process.exit(1); }
+        await runProfileDelete(rest[0]); break;
+      case 'accounts':
+        if (rest[0] === 'list') {
+          if (!rest[1]) { errorMsg('Usage: ghostrun profile accounts list <profile>'); process.exit(1); }
+          await runProfileAccountsList(rest[1]);
+        } else if (rest[0] === 'show') {
+          if (!rest[1] || !rest[2]) { errorMsg('Usage: ghostrun profile accounts show <profile> <account>'); process.exit(1); }
+          await runProfileAccountShow(rest[1], rest[2]);
+        } else {
+          errorMsg('Usage: ghostrun profile accounts list|show <profile> [account]');
+          process.exit(1);
+        }
+        break;
+      case 'account':
+        if (rest[0] === 'add') {
+          if (!rest[1] || !rest[2]) {
+            errorMsg('Usage: ghostrun profile account add <profile> <account-id> [--email addr] [--password-secret ENV] [--login-flow name]');
+            process.exit(1);
+          }
+          const addRest = rest.slice(3);
+          await runProfileAccountAdd(rest[1], rest[2], {
+            email: parseFlagValue(addRest, '--email'),
+            emailSecret: parseFlagValue(addRest, '--email-secret'),
+            passwordSecret: parseFlagValue(addRest, '--password-secret'),
+            loginFlow: parseFlagValue(addRest, '--login-flow'),
+            label: parseFlagValue(addRest, '--label'),
+            default: addRest.includes('--default'),
+          });
+        } else {
+          errorMsg('Usage: ghostrun profile account add <profile> <account-id> [options]');
+          process.exit(1);
+        }
+        break;
+      default:
+        errorMsg(`Unknown profile subcommand: ${sub}. Use: list, show, create, use, set, delete, accounts, account`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+
+  if (cmd === 'author' && args[1]) {
+    const sub = args[1];
+    const rest = args.slice(2);
+    switch (sub) {
+      case 'create':
+        await runCreate(rest.filter(a => !a.startsWith('--')).join(' ') || undefined, rest);
+        break;
+      case 'record':
+      case 'learn':
+        if (!rest[0]) { errorMsg('URL required'); process.exit(1); }
+        await runLearn(rest[0]); break;
+      case 'curl':
+        await runFlowFromCurl(rest[0]); break;
+      case 'spec':
+        if (!rest[0]) { errorMsg('OpenAPI spec path required'); process.exit(1); }
+        await runFlowFromSpec(rest[0]); break;
+      case 'explore':
+        if (!rest[0]) { errorMsg('URL required'); process.exit(1); }
+        await runExplore(rest[0]); break;
+      default:
+        await runAuthor();
+    }
+    db.close();
+    return;
+  }
+
+  if (cmd === 'ai' && args[1]) {
+    const sub = args[1];
+    switch (sub) {
+      case 'status': await runAiStatus(); break;
+      case 'usage': await runAiUsage(); break;
+      case 'sessions': await runAiSessions(args[2]); break;
+      default:
+        errorMsg(`Unknown ai subcommand: ${sub}. Use: status, usage, sessions`);
+        process.exit(1);
+    }
+    db.close();
+    return;
+  }
+
+  if (cmd === 'integrations') {
+    await runIntegrationsCommand(args.slice(1));
+    db.close();
+    return;
+  }
+
+  if (cmd === 'services') {
+    await runServicesCommand(args.slice(1));
+    db.close();
+    return;
+  }
+
+  if (cmd === 'sync' && args[1] === 'flows') {
+    await runSyncFlows();
+    db.close();
+    return;
+  }
+
+  if (cmd === 'migrate' && args[1] === 'project-scope') {
+    await runMigrateProjectScope();
+    db.close();
+    return;
+  }
+
+  if (LEGACY_COMMAND_MAP[cmd]) rejectLegacyCommand(cmd);
+
   switch (cmd) {
-    case 'init':            await runInit(); break;
+    case 'doctor':          await runDoctor(); break;
+    case 'benchmark':
+      if (args[1] === 'author') {
+        await runAuthorBenchmark(args.slice(2));
+      } else {
+        errorMsg('Usage: ghostrun benchmark author [--dry-run]');
+        process.exit(1);
+      }
+      break;
+    case 'audit':           await runSecurityAudit(true); break;
+    case 'author':          await runAuthor(); break;
+    case 'init':            await runInit(args.slice(1)); break;
     case 'chat':            await runChat(); break;
+    case 'config:mode':     await runConfigMode(args[1]); break;
     case 'monitor':
-      if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
-      await runMonitor(args[1]); break;
-    case 'learn':
+      await runMonitorCommand(args.slice(1)); break;
+    case 'scrape':
       if (!args[1]) { errorMsg('URL required'); process.exit(1); }
-      await runLearn(args[1]); break;
+      await runScrapeCommand(args[1], args.slice(2)); break;
+    case 'scrape:run':
+      if (!args[1]) { errorMsg('URL required'); process.exit(1); }
+      await runScrapeAndFlowCommand(args[1], args.slice(2)); break;
+    case 'scrape:list':     await runScrapeList(); break;
+    case 'scrape:show':
+      if (!args[1]) { errorMsg('Scrape ID required'); process.exit(1); }
+      await runScrapeShow(args[1]); break;
     case 'run': {
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
       const reportFlag = args.indexOf('--report');
       const reportFmt = reportFlag >= 0 ? (args[reportFlag + 1] || 'html') : null;
       const reportOut = (() => { const i = args.indexOf('--output'); return i >= 0 && args[i+1] && !args[i+1].startsWith('--') && args[i+1] !== 'json' ? args[i+1] : null; })();
+      const reporterIdx = args.indexOf('--reporter');
+      const reporterFmt = reporterIdx >= 0 ? (args[reporterIdx + 1] || '') : null;
       const savedRunId = await runFlow(args[1], globalVars);
       if (reportFmt && savedRunId) {
         const outFile = reportOut || `ghostrun-report-${savedRunId.slice(0,8)}.html`;
         await generateRunReport(savedRunId, outFile);
+      }
+      if (reporterFmt === 'junit' && savedRunId) {
+        const runSteps = db.listSteps(savedRunId);
+        const runRecord = db.getRun(savedRunId);
+        const totalMs = runRecord?.duration || 0;
+        const flowRecord = runRecord ? (db.findFlowByPartialId(runRecord.flowId) || db.findFlowByName(runRecord.flowId)) : null;
+        const flowNameForReport = flowRecord?.name || args[1];
+        const junitPath = await writeJUnitReport(
+          flowNameForReport,
+          savedRunId,
+          runSteps.map(s => ({ name: s.name, status: s.status, duration: s.duration, errorMessage: s.errorMessage })),
+          totalMs
+        );
+        info('JUnit report: ' + chalk.cyan(junitPath));
       }
       break;
     }
@@ -6508,24 +11785,8 @@ async function main() {
     case 'flow:from-spec':
       if (!args[1]) { errorMsg('File path required'); process.exit(1); }
       await runFlowFromSpec(args[1]); break;
-    case 'flow:schedule':
-      if (!args[1] || !args[2]) { errorMsg('Usage: flow:schedule <id|name> "<cron expression>"'); process.exit(1); }
-      await runScheduleAdd(args[1], args[2]); break;
-    case 'schedule:list':   await runScheduleList(); break;
-    case 'schedule:remove':
-      if (!args[1]) { errorMsg('Schedule ID required'); process.exit(1); }
-      await runScheduleRemove(args[1]); break;
     case 'serve':           await runServe(args.slice(1)); break;
-    case 'run:list':        await runListRuns(); break;
-    case 'run:show':
-      if (!args[1]) { errorMsg('Run ID required'); process.exit(1); }
-      await runShowRun(args[1]); break;
-    case 'run:diff':
-      if (!args[1] || !args[2]) { errorMsg('Usage: run:diff <run1-id> <run2-id>'); process.exit(1); }
-      await runDiff(args[1], args[2]); break;
-    case 'run:analyze':
-      if (!args[1]) { errorMsg('Run ID required'); process.exit(1); }
-      await runAnalyzeRun(args[1]); break;
+    case 'improve':         await runImprove(); break;
     case 'explore':
       if (!args[1]) { errorMsg('URL required'); process.exit(1); }
       await runExplore(args[1]); break;
@@ -6557,7 +11818,6 @@ async function main() {
     case 'baseline:show':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
       await runBaselineShow(args[1]); break;
-    case 'create':          await runCreate(args[1]); break;
     case 'code:scan':
       if (!args[1]) { errorMsg('Directory required'); process.exit(1); }
       await runCodeScan(args[1]); break;

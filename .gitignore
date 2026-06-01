@@ -2,7 +2,19 @@ node_modules/
 dist/
 .turbo/
 .vite/
+# Local env and secrets — never commit
 .env
+.ghostrun.env
+.flowmind.env
+.ghostrun/auth/secrets/
+.ghostrun/auth/storage-state/
+.ghostrun/runs/
+.ghostrun/reports/
+.ghostrun/ai/
+
+# Coverage and artifacts
+coverage/
+test-results/
 *.log
 .DS_Store
 

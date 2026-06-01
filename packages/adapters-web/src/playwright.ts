@@ -347,8 +347,17 @@ export async function pressKey(
   }
 ): Promise<void> {
   if (options?.modifiers) {
-    const keys = options.modifiers.map(m => m.toLowerCase());
-    await page.keyboard.press(key, { modifiers: keys as ('Alt' | 'Control' | 'Meta' | 'Shift')[] });
+    const keys = options.modifiers;
+    for (const modifier of keys) {
+      await page.keyboard.down(modifier);
+    }
+    try {
+      await page.keyboard.press(key);
+    } finally {
+      for (const modifier of [...keys].reverse()) {
+        await page.keyboard.up(modifier);
+      }
+    }
   } else {
     await page.keyboard.press(key);
   }

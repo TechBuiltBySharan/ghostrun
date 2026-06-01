@@ -1,0 +1,33 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": [
+    "ghostrun.ts",
+    "run-report-v2.ts",
+    "project-scope.ts",
+    "account-scope.ts",
+    "service-bridge.ts",
+    "mcp-server.ts",
+    "types/pg.d.ts",
+    "packages/database/src/manager.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests/**",
+    "apps/**",
+    "packages/core/**",
+    "packages/executor/**",
+    "packages/memory/**",
+    "packages/recorder/**",
+    "packages/reporting/**",
+    "packages/privacy/**",
+    "packages/vault/**",
+    "packages/adapters-web/**"
+  ]
+}

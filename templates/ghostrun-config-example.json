@@ -1,0 +1,83 @@
+{
+  "_comment": "This file is an annotated example of .ghostrun/config.json — the workspace-level configuration file GhostRun reads on startup. Copy it to .ghostrun/config.json in your project and remove the '_comment' keys before committing.",
+
+  "project": {
+    "_comment": "Human-readable project name shown in reports and step summaries.",
+    "name": "my-project",
+
+    "_comment_workspaceVersion": "Workspace schema version. Currently always '1'.",
+    "workspaceVersion": "1"
+  },
+
+  "_comment_interactionMode": "Controls how much GhostRun can act autonomously. 'assist' (default) asks for confirmation before applying AI-generated repairs or flow mutations. 'auto' applies approved actions without prompting — suitable for CI. 'readonly' disables all write operations.",
+  "interactionMode": "assist",
+
+  "features": {
+    "_comment": "Feature flags for optional subsystems.",
+    "crawlee": {
+      "_comment_crawlee": "Set to true to enable Crawlee-based deep crawl recording. Requires additional system dependencies.",
+      "enabled": false
+    }
+  },
+
+  "ai": {
+    "_comment": "AI provider configuration. GhostRun uses Claude (via Anthropic) for auto-repair, flow summarisation, and knowledge extraction.",
+
+    "_comment_provider": "AI backend to use. 'auto' selects the best available provider based on environment variables present. Other valid values: 'anthropic', 'none' (disables all AI features).",
+    "provider": "auto",
+
+    "_comment_trackUsage": "When true, GhostRun logs token counts to .ghostrun/reports/ so you can monitor API spend.",
+    "trackUsage": true,
+
+    "_comment_storeSanitizedTranscripts": "When true, AI interaction transcripts (with secrets redacted) are stored under .ghostrun/ai/ for debugging and auditing.",
+    "storeSanitizedTranscripts": true
+  },
+
+  "policies": {
+    "_comment": "Guardrails that control which automated actions GhostRun is permitted to take without explicit operator approval.",
+
+    "_comment_allowAutoRepairApply": "When false (recommended for human-supervised environments), GhostRun proposes auto-repairs but waits for operator confirmation before writing changes to disk. Set to true in fully automated CI pipelines where unattended repair is acceptable.",
+    "allowAutoRepairApply": false,
+
+    "_comment_allowAiInCi": "Governs AI feature usage when the --ci flag is active. 'summary-only' (default) allows AI to generate run summaries but blocks expensive repair calls. 'full' enables all AI features in CI. 'none' disables AI entirely in CI mode.",
+    "allowAiInCi": "summary-only",
+
+    "_comment_requireApprovalForFlowMutation": "When true, any operation that would modify a flow file (.ghostrun/flows/**) must be explicitly confirmed by the operator. Prevents accidental flow rewrites during interactive sessions.",
+    "requireApprovalForFlowMutation": true,
+
+    "_comment_requireApprovalForSecretUse": "When true, GhostRun prompts the operator before injecting a secret from the keychain or environment into a running flow. Useful when auditing is required.",
+    "requireApprovalForSecretUse": true,
+
+    "_comment_autoImproveEnabled": "When true, GhostRun will attempt to iteratively improve failing flows using AI after a run. Disabled by default because it can produce unexpected flow changes; enable deliberately in development environments.",
+    "autoImproveEnabled": false,
+
+    "_comment_maxAutoImproveIterations": "Maximum number of AI-driven improvement cycles per run when autoImproveEnabled is true. Prevents runaway token spend on persistently broken flows.",
+    "maxAutoImproveIterations": 3,
+
+    "_comment_maxRepairAttemptsPerRun": "Maximum number of times GhostRun will attempt to auto-repair a single failing step per run. Increasing this gives the AI more attempts but also increases execution time and token usage.",
+    "maxRepairAttemptsPerRun": 2,
+
+    "_comment_maxSameFailureRepeats": "If the same failure signature is observed this many times in a single run, GhostRun aborts early rather than retrying indefinitely. Prevents long CI runs from hanging on a systemic error.",
+    "maxSameFailureRepeats": 2
+  },
+
+  "integrations": {
+    "_comment": "Optional work-tracker bridges (issue creation ships in v2.0-alpha).",
+    "github": {
+      "enabled": false,
+      "owner": "your-org",
+      "repo": "your-app",
+      "labels": ["ghostrun", "qa-failure"],
+      "createOn": ["ci-failure"]
+    },
+    "linear": {
+      "enabled": false,
+      "teamId": "QA",
+      "label": "ghostrun",
+      "createOn": ["ci-failure"]
+    }
+  },
+
+  "_comment_activeProfile": "The environment profile loaded by default when no --profile flag is passed. Must match a filename (without .json) under .ghostrun/profiles/.",
+  "activeProfile": "staging"
+}

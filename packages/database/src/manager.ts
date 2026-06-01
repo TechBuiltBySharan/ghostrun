@@ -1,22 +1,42 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import Database from 'better-sqlite3';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '.';
 export const DATA_PATH = path.join(HOME_DIR, '.ghostrun');
-const DB_PATH = path.join(DATA_PATH, 'data', 'ghostrun.db');
+const DEFAULT_DB_PATH = path.join(DATA_PATH, 'data', 'ghostrun.db');
+
+export interface DatabaseManagerOptions {
+  dbPath?: string;
+  screenshotsPath?: string;
+  sessionsPath?: string;
+}
 
 export class DatabaseManager {
   private db: Database.Database;
+  private screenshotsBase: string;
+  private sessionsBase: string;
+  private flowSyncHook?: (event: 'create' | 'update' | 'delete', flow: { id: string; name: string; description?: string | null; appUrl?: string | null; graph: string; createdBy?: string }) => void;
 
-  constructor() {
-    fs.mkdirSync(path.join(DATA_PATH, 'data'), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, 'screenshots'), { recursive: true });
-    fs.mkdirSync(path.join(DATA_PATH, 'sessions'), { recursive: true });
-    this.db = new Database(DB_PATH);
+  setFlowSyncHook(hook: DatabaseManager['flowSyncHook']) {
+    this.flowSyncHook = hook;
+  }
+
+  constructor(options: DatabaseManagerOptions = {}) {
+    const dbPath = options.dbPath || DEFAULT_DB_PATH;
+    this.screenshotsBase = options.screenshotsPath || path.join(DATA_PATH, 'screenshots');
+    this.sessionsBase = options.sessionsPath || path.join(DATA_PATH, 'sessions');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    fs.mkdirSync(this.screenshotsBase, { recursive: true });
+    fs.mkdirSync(this.sessionsBase, { recursive: true });
+    this.db = new Database(dbPath);
     this.initialize();
     this.runMigrations();
+  }
+
+  getDbPath(): string {
+    return this.db.name;
   }
 
   private initialize() {
@@ -128,6 +148,22 @@ export class DatabaseManager {
         completed_at TEXT,
         FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS scrape_runs (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        reason TEXT,
+        max_pages INTEGER NOT NULL DEFAULT 1,
+        selector TEXT,
+        pages_count INTEGER NOT NULL DEFAULT 0,
+        result_path TEXT,
+        run_id TEXT,
+        step_number INTEGER,
+        explore_report_id TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+      );
     `);
   }
 
@@ -138,7 +174,9 @@ export class DatabaseManager {
     const createdBy = data.createdBy || 'human';
     this.db.prepare(`INSERT INTO flows (id, name, description, app_url, graph, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, data.name, data.description || null, data.appUrl || null, JSON.stringify(data.graph || {}), now, now, createdBy);
-    return this.getFlow(id)!;
+    const flow = this.getFlow(id)!;
+    this.flowSyncHook?.('create', flow);
+    return flow;
   }
   verifyFlow(id: string) { this.db.prepare('UPDATE flows SET verified = 1 WHERE id = ?').run(id); }
   getFlow(id: string) {
@@ -164,9 +202,16 @@ export class DatabaseManager {
     if (data.graph !== undefined) { updates.push('graph = ?'); values.push(JSON.stringify(data.graph)); }
     updates.push("updated_at = datetime('now')"); values.push(id);
     this.db.prepare(`UPDATE flows SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    return this.getFlow(id);
+    const flow = this.getFlow(id);
+    if (flow) this.flowSyncHook?.('update', flow);
+    return flow;
   }
-  deleteFlow(id: string) { return this.db.prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0; }
+  deleteFlow(id: string) {
+    const flow = this.getFlow(id);
+    const ok = this.db.prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0;
+    if (ok && flow) this.flowSyncHook?.('delete', flow);
+    return ok;
+  }
   private mapFlow(r: Record<string, unknown>) {
     return { id: r.id as string, name: r.name as string, description: r.description as string | null,
       appUrl: r.app_url as string | null, graph: r.graph as string,
@@ -244,7 +289,7 @@ export class DatabaseManager {
       diffPercent: r.diff_percent as number | null };
   }
   getScreenshotsPath(runId: string) {
-    const dir = path.join(DATA_PATH, 'screenshots', runId);
+    const dir = path.join(this.screenshotsBase, runId);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
@@ -315,6 +360,14 @@ export class DatabaseManager {
       avg_rps REAL, p50_ms INTEGER, p95_ms INTEGER, p99_ms INTEGER,
       min_ms INTEGER, max_ms INTEGER, per_step_stats TEXT,
       started_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT
+    )`,
+    // v8: scrape_runs table
+    `CREATE TABLE IF NOT EXISTS scrape_runs (
+      id TEXT PRIMARY KEY, url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running',
+      reason TEXT, max_pages INTEGER NOT NULL DEFAULT 1, selector TEXT,
+      pages_count INTEGER NOT NULL DEFAULT 0, result_path TEXT, run_id TEXT,
+      step_number INTEGER, explore_report_id TEXT, error_message TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT
     )`,
     // --- add new migrations below this line ---
   ];
@@ -442,6 +495,71 @@ export class DatabaseManager {
   }
   confirmExploreCandidate(id: string) {
     this.db.prepare('UPDATE explore_candidates SET confirmed = 1 WHERE id = ?').run(id);
+  }
+
+  // ---- Scrape Runs ----
+  createScrapeRun(data: {
+    url: string;
+    reason?: string;
+    maxPages?: number;
+    selector?: string;
+    runId?: string;
+    stepNumber?: number;
+    exploreReportId?: string;
+  }) {
+    const id = uuidv4();
+    this.db.prepare(`INSERT INTO scrape_runs
+      (id, url, reason, max_pages, selector, run_id, step_number, explore_report_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, data.url, data.reason || null, data.maxPages || 1, data.selector || null,
+        data.runId || null, data.stepNumber || null, data.exploreReportId || null);
+    return this.getScrapeRun(id)!;
+  }
+  updateScrapeRun(id: string, data: Partial<{ status: string; pagesCount: number; resultPath: string; errorMessage: string }>) {
+    const updates: string[] = []; const values: unknown[] = [];
+    if (data.status !== undefined) { updates.push('status = ?'); values.push(data.status); }
+    if (data.pagesCount !== undefined) { updates.push('pages_count = ?'); values.push(data.pagesCount); }
+    if (data.resultPath !== undefined) { updates.push('result_path = ?'); values.push(data.resultPath); }
+    if (data.errorMessage !== undefined) { updates.push('error_message = ?'); values.push(data.errorMessage); }
+    if (data.status === 'complete' || data.status === 'failed') updates.push("completed_at = datetime('now')");
+    values.push(id);
+    if (updates.length > 0) this.db.prepare(`UPDATE scrape_runs SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    return this.getScrapeRun(id);
+  }
+  getScrapeRun(id: string) {
+    const r = this.db.prepare('SELECT * FROM scrape_runs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? this.mapScrapeRun(r) : null;
+  }
+  findScrapeRunByPartialId(q: string) {
+    const rows = this.db.prepare('SELECT * FROM scrape_runs WHERE id LIKE ? ORDER BY created_at DESC').all(q + '%') as Record<string, unknown>[];
+    return rows.length >= 1 ? this.mapScrapeRun(rows[0]) : null;
+  }
+  listScrapeRuns(limit = 20) {
+    return (this.db.prepare('SELECT * FROM scrape_runs ORDER BY created_at DESC LIMIT ?').all(limit) as Record<string, unknown>[]).map(r => this.mapScrapeRun(r));
+  }
+  listScrapeRunsForRun(runId: string) {
+    return (this.db.prepare('SELECT * FROM scrape_runs WHERE run_id = ? ORDER BY created_at DESC').all(runId) as Record<string, unknown>[]).map(r => this.mapScrapeRun(r));
+  }
+  listScrapeRunsForExplore(reportId: string) {
+    return (this.db.prepare('SELECT * FROM scrape_runs WHERE explore_report_id = ? ORDER BY created_at DESC').all(reportId) as Record<string, unknown>[]).map(r => this.mapScrapeRun(r));
+  }
+  private mapScrapeRun(r: Record<string, unknown>) {
+    return {
+      id: r.id as string,
+      url: r.url as string,
+      status: r.status as string,
+      reason: r.reason as string | null,
+      maxPages: r.max_pages as number,
+      selector: r.selector as string | null,
+      pagesCount: r.pages_count as number,
+      resultPath: r.result_path as string | null,
+      runId: r.run_id as string | null,
+      stepNumber: r.step_number as number | null,
+      exploreReportId: r.explore_report_id as string | null,
+      errorMessage: r.error_message as string | null,
+      createdAt: new Date(r.created_at as string),
+      completedAt: r.completed_at ? new Date(r.completed_at as string) : null,
+    };
   }
 
   close() { this.db.close(); }

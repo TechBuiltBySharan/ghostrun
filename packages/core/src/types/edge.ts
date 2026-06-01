@@ -38,7 +38,7 @@ export interface EdgeCondition {
  */
 export interface EdgeMetadata {
   action?: {
-    type: 'click' | 'type' | 'navigate' | 'wait' | 'select';
+    type: 'click' | 'type' | 'fill' | 'navigate' | 'wait' | 'select';
     selector?: string;
     value?: string;
   };

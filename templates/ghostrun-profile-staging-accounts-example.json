@@ -1,0 +1,53 @@
+{
+  "_comment": "Default SaaS roles: superadmin, admin, manager, guest. Copy to .ghostrun/profiles/staging.json and set env secrets.",
+
+  "name": "staging",
+  "baseUrl": "https://staging.example.com",
+  "defaultAccount": "manager",
+
+  "auth": {
+    "strategy": "form",
+    "loginFlow": "login",
+    "usernameVar": "testEmail"
+  },
+
+  "accounts": {
+    "superadmin": {
+      "label": "Super admin",
+      "emailVar": "superadminEmail",
+      "emailSecret": "STAGING_SUPERADMIN_EMAIL",
+      "passwordSecret": "STAGING_SUPERADMIN_PASSWORD",
+      "loginFlow": "login"
+    },
+    "admin": {
+      "label": "Admin",
+      "emailVar": "adminEmail",
+      "emailSecret": "STAGING_ADMIN_EMAIL",
+      "passwordSecret": "STAGING_ADMIN_PASSWORD",
+      "loginFlow": "login"
+    },
+    "manager": {
+      "label": "Manager",
+      "emailVar": "managerEmail",
+      "emailSecret": "STAGING_MANAGER_EMAIL",
+      "passwordSecret": "STAGING_MANAGER_PASSWORD",
+      "loginFlow": "login"
+    },
+    "guest": {
+      "label": "Guest",
+      "emailVar": "guestEmail",
+      "emailSecret": "STAGING_GUEST_EMAIL",
+      "passwordSecret": "STAGING_GUEST_PASSWORD",
+      "loginFlow": "login"
+    }
+  },
+
+  "variables": {
+    "workspaceSlug": "acme-staging"
+  },
+
+  "metadata": {
+    "environment": "staging",
+    "accountTypes": "superadmin,admin,manager,guest"
+  }
+}

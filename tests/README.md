@@ -27,6 +27,11 @@ tests/
 npm test
 ```
 
+### CI Validation
+```bash
+npm run test:ci
+```
+
 ### Unit Tests Only
 ```bash
 npm run test:unit
@@ -147,7 +152,7 @@ The test suite is designed to work in CI environments:
   run: |
     npm ci
     npm run build
-    npm test
+    npm run test:ci
 ```
 
 ## Coverage

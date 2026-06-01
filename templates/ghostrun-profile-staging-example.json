@@ -1,0 +1,42 @@
+{
+  "_comment": "Copy to .ghostrun/profiles/staging.json and remove _comment keys.",
+
+  "name": "staging",
+  "baseUrl": "https://staging.example.com",
+
+  "variables": {
+    "testEmail": "qa+ghostrun@example.com",
+    "workspaceSlug": "acme-staging"
+  },
+
+  "auth": {
+    "strategy": "form",
+    "loginFlow": "login",
+    "usernameVar": "testEmail",
+    "passwordSecret": "STAGING_QA_PASSWORD"
+  },
+
+  "_services_comment": "Optional — only for magic-link email, webhooks, or DB fixtures. Password login needs no services block.",
+  "services": {
+    "email": {
+      "provider": "mailpit",
+      "apiUrl": "http://localhost:8025",
+      "timeoutMs": 45000
+    },
+    "webhook": {
+      "provider": "local",
+      "baseUrl": "http://127.0.0.1:8787"
+    },
+    "postgres": {
+      "connectionSecret": "GHOSTRUN_TEST_DATABASE_URL",
+      "readOnly": true,
+      "fixtures": ["seed.sql"]
+    }
+  },
+
+  "metadata": {
+    "environment": "staging",
+    "owner": "platform-team",
+    "notifyAfterFailures": "3"
+  }
+}

@@ -3,7 +3,7 @@
  */
 
 import type { ExecutionContext } from './engine';
-import type { EdgeCondition, Condition } from '@ghostrun/core';
+import type { EdgeCondition } from '@ghostrun/core';
 
 export interface ValidationResult {
   valid: boolean;
@@ -47,7 +47,7 @@ export async function validateTransition(
  */
 function validateUrl(
   actualUrl: string,
-  condition: Condition & { type: 'url' }
+  condition: EdgeCondition
 ): ValidationResult {
   const { operator, value, caseSensitive } = condition;
   
@@ -106,7 +106,7 @@ function validateUrl(
  */
 async function validateSelector(
   page: import('playwright').Page,
-  condition: Condition & { type: 'selector' }
+  condition: EdgeCondition
 ): Promise<ValidationResult> {
   const { operator, target } = condition;
   
@@ -153,7 +153,7 @@ async function validateSelector(
  */
 async function validateText(
   page: import('playwright').Page,
-  condition: Condition & { type: 'text' }
+  condition: EdgeCondition
 ): Promise<ValidationResult> {
   const { operator, target, value, caseSensitive } = condition;
   
@@ -180,8 +180,8 @@ async function validateText(
       actual = await locator.first().textContent() || '';
     }
     
-    let compareActual = caseSensitive ? actual : actual.toLowerCase();
-    let compareValue = caseSensitive ? String(value) : String(value).toLowerCase();
+    const compareActual = caseSensitive ? actual : actual.toLowerCase();
+    const compareValue = caseSensitive ? String(value) : String(value).toLowerCase();
     
     switch (operator) {
       case 'equals':
@@ -231,7 +231,7 @@ async function validateText(
  */
 async function validateElement(
   page: import('playwright').Page,
-  condition: Condition & { type: 'element' }
+  condition: EdgeCondition
 ): Promise<ValidationResult> {
   const { operator, target } = condition;
   
@@ -296,7 +296,7 @@ async function validateElement(
  */
 async function validateCount(
   page: import('playwright').Page,
-  condition: Condition & { type: 'count' }
+  condition: EdgeCondition
 ): Promise<ValidationResult> {
   const { operator, target, value } = condition;
   

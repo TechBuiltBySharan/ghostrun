@@ -1,170 +1,132 @@
 /**
  * Unit tests for GhostRun database functionality
+ *
+ * Uses the real DatabaseManager from packages/database/src/manager.ts.
+ * Sets HOME to a /tmp path so the manager does not write to ~/.ghostrun.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
-import path from 'path';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import fs from 'fs';
+import path from 'path';
+
+// --- temp home dir setup ---
+const TEST_HOME = `/tmp/ghostrun-test-${process.pid}`;
+
+let DatabaseManager: typeof import('../../packages/database/src/manager').DatabaseManager;
+
+beforeAll(async () => {
+  // Point HOME to a temp dir before the module is loaded so DATA_PATH resolves there.
+  process.env.HOME = TEST_HOME;
+  fs.mkdirSync(path.join(TEST_HOME, '.ghostrun', 'data'), { recursive: true });
+  fs.mkdirSync(path.join(TEST_HOME, '.ghostrun', 'screenshots'), { recursive: true });
+  fs.mkdirSync(path.join(TEST_HOME, '.ghostrun', 'sessions'), { recursive: true });
+  // Dynamic import after env is set, so the module-level DATA_PATH picks up TEST_HOME.
+  const mod = await import('../../packages/database/src/manager');
+  DatabaseManager = mod.DatabaseManager;
+});
+
+afterAll(() => {
+  fs.rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 describe('Database', () => {
-  const testDbPath = path.join(__dirname, '../.tmp/test-db.db');
-  let db: Database.Database;
+  let manager: InstanceType<typeof DatabaseManager>;
 
   beforeEach(() => {
-    // Ensure test directory exists
-    const tmpDir = path.dirname(testDbPath);
-    if (!fs.existsSync(tmpDir)) {
-      fs.mkdirSync(tmpDir, { recursive: true });
-    }
-    // Clean up any existing test database
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
+    manager = new DatabaseManager();
   });
 
   afterEach(() => {
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
+    manager.close();
+    // Remove the DB file so each test starts with an empty database.
+    const dbPath = path.join(TEST_HOME, '.ghostrun', 'data', 'ghostrun.db');
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
   });
 
   describe('Flow CRUD', () => {
     it('should create and retrieve a flow', () => {
-      db = new Database(testDbPath);
-      
-      // Create tables manually for testing
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS flows (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          description TEXT,
-          graph TEXT,
-          created_at INTEGER,
-          updated_at INTEGER
-        )
-      `);
+      const flow = manager.createFlow({ name: 'Test Flow', description: 'A test flow' });
 
-      const flowId = 'test-flow-1';
-      const flowName = 'Test Flow';
-      const flowData = {
-        id: flowId,
-        name: flowName,
-        description: 'A test flow',
-        graph: JSON.stringify({ nodes: [], edges: [] }),
-        created_at: Date.now(),
-        updated_at: Date.now(),
-      };
+      expect(flow).toBeDefined();
+      expect(flow.id).toBeTruthy();
+      expect(flow.name).toBe('Test Flow');
+      expect(flow.description).toBe('A test flow');
 
-      db.prepare(`
-        INSERT INTO flows (id, name, description, graph, created_at, updated_at)
-        VALUES (@id, @name, @description, @graph, @created_at, @updated_at)
-      `).run(flowData);
-
-      const result = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId) as any;
-
-      expect(result).toBeDefined();
-      expect(result.name).toBe(flowName);
-      expect(result.id).toBe(flowId);
-
-      db.close();
+      const retrieved = manager.getFlow(flow.id);
+      expect(retrieved).toBeDefined();
+      expect(retrieved!.name).toBe('Test Flow');
     });
 
     it('should update an existing flow', () => {
-      db = new Database(testDbPath);
-      
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS flows (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          description TEXT,
-          graph TEXT,
-          created_at INTEGER,
-          updated_at INTEGER
-        )
-      `);
+      const flow = manager.createFlow({ name: 'Original Name', description: 'Original desc' });
 
-      const flowId = 'test-flow-2';
-      db.prepare(`
-        INSERT INTO flows (id, name, description, graph, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(flowId, 'Original Name', 'Original desc', '{}', Date.now(), Date.now());
+      manager.updateFlow(flow.id, { name: 'Updated Name' });
 
-      const newName = 'Updated Name';
-      db.prepare('UPDATE flows SET name = ?, updated_at = ? WHERE id = ?')
-        .run(newName, Date.now(), flowId);
-
-      const result = db.prepare('SELECT name FROM flows WHERE id = ?').get(flowId) as any;
-      expect(result.name).toBe(newName);
-
-      db.close();
+      const updated = manager.getFlow(flow.id);
+      expect(updated!.name).toBe('Updated Name');
+      expect(updated!.description).toBe('Original desc');
     });
 
     it('should delete a flow', () => {
-      db = new Database(testDbPath);
-      
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS flows (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          description TEXT,
-          graph TEXT,
-          created_at INTEGER,
-          updated_at INTEGER
-        )
-      `);
+      const flow = manager.createFlow({ name: 'To Delete' });
+      const deleted = manager.deleteFlow(flow.id);
 
-      const flowId = 'test-flow-3';
-      db.prepare(`
-        INSERT INTO flows (id, name, description, graph, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(flowId, 'To Delete', 'Will be deleted', '{}', Date.now(), Date.now());
+      expect(deleted).toBe(true);
+      expect(manager.getFlow(flow.id)).toBeNull();
+    });
 
-      db.prepare('DELETE FROM flows WHERE id = ?').run(flowId);
-      const result = db.prepare('SELECT * FROM flows WHERE id = ?').get(flowId);
+    it('should list all flows', () => {
+      manager.createFlow({ name: 'Flow A' });
+      manager.createFlow({ name: 'Flow B' });
 
-      expect(result).toBeUndefined();
-
-      db.close();
+      const flows = manager.listFlows();
+      expect(flows.length).toBe(2);
     });
   });
 
   describe('Run Tracking', () => {
-    it('should track run history', () => {
-      db = new Database(testDbPath);
-      
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS flows (id TEXT PRIMARY KEY, name TEXT, created_at INTEGER);
-        CREATE TABLE IF NOT EXISTS runs (
-          id TEXT PRIMARY KEY,
-          flow_id TEXT,
-          status TEXT,
-          started_at INTEGER,
-          ended_at INTEGER,
-          error TEXT,
-          passed INTEGER,
-          FOREIGN KEY (flow_id) REFERENCES flows(id)
-        )
-      `);
+    it('should create a run for a flow and track status', () => {
+      const flow = manager.createFlow({ name: 'Run Test Flow' });
+      const run = manager.createRun(flow.id);
 
-      const flowId = 'test-flow-runs';
-      const runId = 'test-run-1';
-      
-      db.prepare('INSERT INTO flows (id, name, created_at) VALUES (?, ?, ?)')
-        .run(flowId, 'Run Test Flow', Date.now());
+      expect(run).toBeDefined();
+      expect(run.flowId).toBe(flow.id);
+      expect(run.status).toBe('running');
 
-      db.prepare(`
-        INSERT INTO runs (id, flow_id, status, started_at, ended_at, error, passed)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(runId, flowId, 'passed', Date.now() - 5000, Date.now(), null, 1);
+      manager.updateRun(run.id, {
+        status: 'passed',
+        completedAt: new Date(),
+        duration: 1234,
+      });
 
-      const result = db.prepare('SELECT * FROM runs WHERE flow_id = ?').get(flowId) as any;
+      const updated = manager.getRun(run.id);
+      expect(updated!.status).toBe('passed');
+      expect(updated!.duration).toBe(1234);
+    });
 
-      expect(result).toBeDefined();
-      expect(result.status).toBe('passed');
-      expect(result.passed).toBe(1);
+    it('should list runs for a flow', () => {
+      const flow = manager.createFlow({ name: 'Multi-run Flow' });
+      manager.createRun(flow.id);
+      manager.createRun(flow.id);
 
-      db.close();
+      const runs = manager.listRuns(flow.id);
+      expect(runs.length).toBe(2);
+      runs.forEach(r => expect(r.flowId).toBe(flow.id));
+    });
+
+    it('should track flow stats (pass rate)', () => {
+      const flow = manager.createFlow({ name: 'Stats Flow' });
+
+      const run1 = manager.createRun(flow.id);
+      manager.updateRun(run1.id, { status: 'passed' });
+
+      const run2 = manager.createRun(flow.id);
+      manager.updateRun(run2.id, { status: 'failed' });
+
+      const stats = manager.getFlowStats(flow.id);
+      expect(stats.totalRuns).toBe(2);
+      expect(stats.passRate).toBe(0.5);
+      expect(stats.lastRunStatus).toBeTruthy();
     });
   });
 });
