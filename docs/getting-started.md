@@ -10,7 +10,7 @@ This guide walks you through everything from installation to running flows in a 
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js 20 or later
 - npm 9 or later
 - A terminal (macOS, Linux, or WSL on Windows)
 

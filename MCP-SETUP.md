@@ -12,7 +12,7 @@ The server reads from the same SQLite database and `.ghostrun/` directory as the
 
 ## Prerequisites
 
-- **Node.js 18 or later** — the server targets Node 18 and uses ES2022 features. Check with `node --version`.
+- **Node.js 20 or later** — Vitest 4 and the dev toolchain require Node 20+. Check with `node --version`.
 - **ghostrun-cli installed** — either globally (`npm install -g ghostrun-cli`) or locally in a project. The MCP server delegates all flow execution to the `ghostrun.js` binary that ships alongside it.
 - **Playwright browsers** (for browser automation flows only) — run `npx playwright install chromium` once after install.
 
