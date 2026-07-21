@@ -158,7 +158,6 @@ const LEGACY_COMMAND_MAP: Record<string, string> = {
   'flow:schedule': 'ghostrun monitor schedule add <id> "<cron>"',
   'schedule:list': 'ghostrun monitor schedule list',
   'schedule:remove': 'ghostrun monitor schedule remove <id>',
-  'learn': 'ghostrun author record <url>',
   'create': 'ghostrun author create "<description>"',
   'flow:fix': 'ghostrun repair (interactive: flow:fix still works)',
   'baseline:set': 'ghostrun baseline:set <flow>',
@@ -2548,23 +2547,60 @@ function readScrapeResult(resultPath: string | null): ScrapeResult | null {
 // COMMANDS — learn
 // ============================================
 
-async function runLearn(url: string, nameOverride?: string) {
+/**
+ * Acquires a browser + context + page for an interactive (recording/fixing) session.
+ * With `cdpEndpoint`, attaches to an already-running browser over the Chrome DevTools
+ * Protocol instead of launching a new one — e.g. a browser an AI agent already has open —
+ * and reuses its most recently active tab rather than opening a fresh one. Without it,
+ * launches a normal headed GhostRun-owned browser, same as before.
+ */
+async function acquireInteractiveBrowser(cdpEndpoint?: string): Promise<{
+  browser: import('playwright').Browser;
+  context: import('playwright').BrowserContext;
+  page: import('playwright').Page;
+  isAttached: boolean;
+}> {
+  if (cdpEndpoint) {
+    let browser: import('playwright').Browser;
+    try {
+      browser = await chromium.connectOverCDP(cdpEndpoint);
+    } catch {
+      errorMsg(`Could not attach to a browser at ${cdpEndpoint} — is it running with --remote-debugging-port?`);
+      process.exit(1);
+    }
+    const existingContexts = browser.contexts();
+    const context = existingContexts[0] ?? await browser.newContext();
+    const existingPages = context.pages();
+    const page = existingPages[existingPages.length - 1] ?? await context.newPage();
+    return { browser, context, page, isAttached: true };
+  }
+
+  const browser = await chromium.launch({ headless: false });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  return { browser, context, page, isAttached: false };
+}
+
+async function runLearn(url: string | undefined, nameOverride?: string, opts?: { cdpEndpoint?: string }) {
   printLogo(); divider();
   let flowName = nameOverride || args[2];
   if (!flowName) { console.log(chalk.cyan('\n  Enter flow name: ')); flowName = await askQuestion('  > '); }
   if (!flowName) { errorMsg('Flow name required'); process.exit(1); }
 
+  const { browser, context, page, isAttached } = await acquireInteractiveBrowser(opts?.cdpEndpoint);
+
+  // In --cdp mode without an explicit URL, record from wherever the attached tab already is.
+  const explicitUrl = !!url;
+  if (!url) url = page.url();
+
   info('Target URL: ' + chalk.cyan(url));
   info('Flow name:  ' + chalk.cyan(flowName));
+  if (isAttached) info('Browser:    ' + chalk.magenta('attached via CDP — recording in your existing tab'));
   console.log();
 
   const flow = db.createFlow({ name: flowName, appUrl: url, createdBy: 'human' });
   const capturedActions: RecordedAction[] = [];
   let browserClosed = false;
-
-  const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext();
-  const page = await context.newPage();
 
   await page.exposeFunction('__ghostrunRecord', (action: RecordedAction) => {
     const last = capturedActions[capturedActions.length - 1];
@@ -2582,6 +2618,10 @@ async function runLearn(url: string, nameOverride?: string) {
   });
 
   await page.addInitScript(RECORDER_SCRIPT);
+  // addInitScript only fires on future navigations — when attached to an already-loaded
+  // page (the common case for --cdp without an explicit URL) it needs a direct injection
+  // too, or recording would silently capture nothing until the next navigation.
+  await page.evaluate(RECORDER_SCRIPT).catch(() => {});
 
   let lastNavTime = 0;
   page.on('framenavigated', (frame) => {
@@ -2624,7 +2664,9 @@ async function runLearn(url: string, nameOverride?: string) {
   console.log(chalk.gray('  Every click, fill, and navigation is captured automatically.'));
   console.log(chalk.gray('  Assertions: type  ') + chalk.cyan('a text:<expected>') + chalk.gray('  |  ') + chalk.cyan('a url:<path>') + chalk.gray('  |  ') + chalk.cyan('a title:<text>'));
   console.log(chalk.gray('  Done?       press ') + chalk.cyan('Enter') + chalk.gray(' or type ') + chalk.cyan('done') + chalk.gray('\n'));
-  await page.goto(url);
+  // Attached without an explicit URL — start recording from wherever the tab already is
+  // instead of reloading it out from under whoever (or whatever agent) has it open.
+  if (explicitUrl || !isAttached) await page.goto(url);
 
   // Custom readline that supports assertion commands
   if (!browserClosed) {
@@ -2651,7 +2693,11 @@ async function runLearn(url: string, nameOverride?: string) {
       rl.on('close', () => resolve());
     }).catch(() => {});
   }
-  if (!browserClosed) await browser.close();
+  // Never close a browser we attached to via CDP — that's the user's (or agent's) real
+  // browser, and Browser.close() over CDP terminates the whole process, not just our session.
+  // Just stop here and let the CDP connection drop on its own.
+  if (!browserClosed && !isAttached) await browser.close();
+  else if (isAttached) info('Detached — your browser session was left running.');
 
   if (capturedActions.length === 0) {
     warn('No actions captured. Flow not saved.');
@@ -2694,6 +2740,9 @@ async function runLearn(url: string, nameOverride?: string) {
   info(`Run:     ${chalk.green('ghostrun run ' + flow.id.slice(0, 8))}`);
   info(`Fix:     ${chalk.cyan('ghostrun flow:fix ' + flow.id.slice(0, 8))}`);
   console.log();
+  // A CDP connection is an open socket that keeps the event loop alive — since we
+  // deliberately never close() it, exit explicitly instead of hanging forever.
+  if (isAttached) process.exit(0);
 }
 
 // ============================================
@@ -11379,6 +11428,7 @@ async function main() {
 
     H('Record & Run');
     console.log(`  ${C('learn <url> [name]')}${G('Record a new flow (opens real browser)')}`);
+    console.log(`  ${C('learn --cdp <endpoint>')}${G('Attach to a running browser instead (e.g. an AI agent\'s)')}`);
     console.log(`  ${C('run <id|name> [--var k=v]')}${G('Execute a flow headlessly')}`);
     console.log(`  ${C('run <id> --visible')}${G('Run with visible browser window')}`);
     console.log(`  ${C('run <id> --ci')}${G('CI-safe run (no implicit healing)')}`);
@@ -11733,6 +11783,29 @@ async function main() {
     case 'scrape:show':
       if (!args[1]) { errorMsg('Scrape ID required'); process.exit(1); }
       await runScrapeShow(args[1]); break;
+    case 'learn': {
+      const learnArgs = args.slice(1);
+      const cdpEndpoint = parseFlagValue(process.argv, '--cdp');
+      const cdpIdx = learnArgs.indexOf('--cdp');
+      const positionals = learnArgs.filter((a, i) => !a.startsWith('--') && i !== cdpIdx + 1);
+      // With --cdp, the URL is optional (inferred from the attached tab) — a lone
+      // positional that isn't shaped like a URL is the flow name, not the URL.
+      const firstLooksLikeUrl = positionals[0] && /^https?:\/\//i.test(positionals[0]);
+      let url: string | undefined;
+      let name: string | undefined;
+      if (cdpEndpoint && !firstLooksLikeUrl) {
+        name = positionals[0];
+      } else {
+        url = positionals[0];
+        name = positionals[1];
+      }
+      if (!url && !cdpEndpoint) {
+        errorMsg('URL required (or pass --cdp <endpoint> to attach to an existing browser and use its current page)');
+        process.exit(1);
+      }
+      await runLearn(url, name, { cdpEndpoint });
+      break;
+    }
     case 'run': {
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
       const reportFlag = args.indexOf('--report');

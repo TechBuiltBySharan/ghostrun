@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`ghostrun learn --cdp <endpoint>`** — attach to an already-running browser over the Chrome DevTools Protocol instead of always launching a new one. Lets an AI agent (or anything else already driving a browser) hand that same session to GhostRun for recording, using the current tab and current URL if none is given. Never closes the attached browser when the recording session ends.
+
+### Fixed
+
+- **`ghostrun learn <url>`** — the command README/REFERENCE.md/in-app help have always documented as the primary way to record a flow was actually being rejected as a "removed legacy command," pointing users at `ghostrun author record <url>` instead. Restored as a real top-level command.
+
 ---
 
 ## [2.0.0-alpha.6] — 2026-06-01

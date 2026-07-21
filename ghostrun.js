@@ -2135,7 +2135,6 @@ var LEGACY_COMMAND_MAP = {
   "flow:schedule": 'ghostrun monitor schedule add <id> "<cron>"',
   "schedule:list": "ghostrun monitor schedule list",
   "schedule:remove": "ghostrun monitor schedule remove <id>",
-  "learn": "ghostrun author record <url>",
   "create": 'ghostrun author create "<description>"',
   "flow:fix": "ghostrun repair (interactive: flow:fix still works)",
   "baseline:set": "ghostrun baseline:set <flow>",
@@ -4058,7 +4057,27 @@ function readScrapeResult(resultPath) {
     return null;
   }
 }
-async function runLearn(url, nameOverride) {
+async function acquireInteractiveBrowser(cdpEndpoint) {
+  if (cdpEndpoint) {
+    let browser2;
+    try {
+      browser2 = await import_playwright.chromium.connectOverCDP(cdpEndpoint);
+    } catch {
+      errorMsg(`Could not attach to a browser at ${cdpEndpoint} \u2014 is it running with --remote-debugging-port?`);
+      process.exit(1);
+    }
+    const existingContexts = browser2.contexts();
+    const context2 = existingContexts[0] ?? await browser2.newContext();
+    const existingPages = context2.pages();
+    const page2 = existingPages[existingPages.length - 1] ?? await context2.newPage();
+    return { browser: browser2, context: context2, page: page2, isAttached: true };
+  }
+  const browser = await import_playwright.chromium.launch({ headless: false });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  return { browser, context, page, isAttached: false };
+}
+async function runLearn(url, nameOverride, opts) {
   printLogo();
   divider();
   let flowName = nameOverride || args[2];
@@ -4070,15 +4089,16 @@ async function runLearn(url, nameOverride) {
     errorMsg("Flow name required");
     process.exit(1);
   }
+  const { browser, context, page, isAttached } = await acquireInteractiveBrowser(opts?.cdpEndpoint);
+  const explicitUrl = !!url;
+  if (!url) url = page.url();
   info("Target URL: " + import_chalk.default.cyan(url));
   info("Flow name:  " + import_chalk.default.cyan(flowName));
+  if (isAttached) info("Browser:    " + import_chalk.default.magenta("attached via CDP \u2014 recording in your existing tab"));
   console.log();
   const flow = db.createFlow({ name: flowName, appUrl: url, createdBy: "human" });
   const capturedActions = [];
   let browserClosed = false;
-  const browser = await import_playwright.chromium.launch({ headless: false });
-  const context = await browser.newContext();
-  const page = await context.newPage();
   await page.exposeFunction("__ghostrunRecord", (action) => {
     const last = capturedActions[capturedActions.length - 1];
     if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
@@ -4095,6 +4115,8 @@ async function runLearn(url, nameOverride) {
 `);
   });
   await page.addInitScript(RECORDER_SCRIPT);
+  await page.evaluate(RECORDER_SCRIPT).catch(() => {
+  });
   let lastNavTime = 0;
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;
@@ -4137,7 +4159,7 @@ async function runLearn(url, nameOverride) {
   console.log(import_chalk.default.gray("  Every click, fill, and navigation is captured automatically."));
   console.log(import_chalk.default.gray("  Assertions: type  ") + import_chalk.default.cyan("a text:<expected>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a url:<path>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a title:<text>"));
   console.log(import_chalk.default.gray("  Done?       press ") + import_chalk.default.cyan("Enter") + import_chalk.default.gray(" or type ") + import_chalk.default.cyan("done") + import_chalk.default.gray("\n"));
-  await page.goto(url);
+  if (explicitUrl || !isAttached) await page.goto(url);
   if (!browserClosed) {
     await new Promise((resolve3) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -4165,7 +4187,8 @@ async function runLearn(url, nameOverride) {
     }).catch(() => {
     });
   }
-  if (!browserClosed) await browser.close();
+  if (!browserClosed && !isAttached) await browser.close();
+  else if (isAttached) info("Detached \u2014 your browser session was left running.");
   if (capturedActions.length === 0) {
     warn("No actions captured. Flow not saved.");
     db.deleteFlow(flow.id);
@@ -4208,6 +4231,7 @@ async function runLearn(url, nameOverride) {
   info(`Run:     ${import_chalk.default.green("ghostrun run " + flow.id.slice(0, 8))}`);
   info(`Fix:     ${import_chalk.default.cyan("ghostrun flow:fix " + flow.id.slice(0, 8))}`);
   console.log();
+  if (isAttached) process.exit(0);
 }
 async function executeFlow(flowId, vars, opts) {
   const log = (s) => {
@@ -12263,6 +12287,7 @@ async function main() {
     };
     H("Record & Run");
     console.log(`  ${C("learn <url> [name]")}${G("Record a new flow (opens real browser)")}`);
+    console.log(`  ${C("learn --cdp <endpoint>")}${G("Attach to a running browser instead (e.g. an AI agent's)")}`);
     console.log(`  ${C("run <id|name> [--var k=v]")}${G("Execute a flow headlessly")}`);
     console.log(`  ${C("run <id> --visible")}${G("Run with visible browser window")}`);
     console.log(`  ${C("run <id> --ci")}${G("CI-safe run (no implicit healing)")}`);
@@ -12691,6 +12716,27 @@ async function main() {
       }
       await runScrapeShow(args[1]);
       break;
+    case "learn": {
+      const learnArgs = args.slice(1);
+      const cdpEndpoint = parseFlagValue(process.argv, "--cdp");
+      const cdpIdx = learnArgs.indexOf("--cdp");
+      const positionals = learnArgs.filter((a, i) => !a.startsWith("--") && i !== cdpIdx + 1);
+      const firstLooksLikeUrl = positionals[0] && /^https?:\/\//i.test(positionals[0]);
+      let url;
+      let name;
+      if (cdpEndpoint && !firstLooksLikeUrl) {
+        name = positionals[0];
+      } else {
+        url = positionals[0];
+        name = positionals[1];
+      }
+      if (!url && !cdpEndpoint) {
+        errorMsg("URL required (or pass --cdp <endpoint> to attach to an existing browser and use its current page)");
+        process.exit(1);
+      }
+      await runLearn(url, name, { cdpEndpoint });
+      break;
+    }
     case "run": {
       if (!args[1]) {
         errorMsg("Flow ID or name required");

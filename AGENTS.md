@@ -232,6 +232,7 @@ Flow actions: `email:wait`, `email:extract-link`, `email:click-link`, `email:ext
 | Command | Purpose |
 |---------|---------|
 | `ghostrun learn <url> [name]` | Record browser flow |
+| `ghostrun learn [name] --cdp <endpoint>` | Attach to a browser you already have open (over CDP) instead of launching a new one — records from the current tab, infers the URL if not given, never closes your browser when done |
 | `ghostrun author` | Interactive author menu |
 | `ghostrun create "<description>"` | AI-generate flow |
 | `ghostrun run <id\|name> [flags]` | Execute flow |

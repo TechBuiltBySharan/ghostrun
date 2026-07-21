@@ -11,6 +11,7 @@ Complete reference for the `ghostrun` command-line tool.
 | Command | Syntax | Description | Example |
 |---------|--------|-------------|---------|
 | `learn` | `ghostrun learn <url> [name]` | Record a new flow by opening a real browser and capturing interactions | `ghostrun learn https://app.example.com "Login Flow"` |
+| `learn --cdp` | `ghostrun learn [name] --cdp <endpoint>` | Attach to an already-running browser over the Chrome DevTools Protocol instead of launching a new one — e.g. a browser an AI agent already has open — and record from its current tab. URL is inferred from the current page if omitted. Never closes the attached browser when done. | `ghostrun learn my-flow --cdp http://localhost:9222` |
 | `run` | `ghostrun run <id\|name> [flags]` | Execute a recorded flow headlessly | `ghostrun run login-flow` |
 | `create` | `ghostrun create [description]` | Generate a flow from a natural-language description (AI) | `ghostrun create "log in with email and password"` |
 | `author` | `ghostrun author` | Interactive menu: record, generate, import from curl, import from spec, or explore | `ghostrun author` |
