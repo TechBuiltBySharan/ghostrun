@@ -4708,7 +4708,7 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
       await p.click(node.selector, { timeout: 1e4 });
       break;
     case "fill":
-      await p.fill(node.selector, sanitizePII(node.value || ""), { timeout: 1e4 });
+      await p.fill(node.selector, node.value || "", { timeout: 1e4 });
       break;
     case "select":
       await p.selectOption(node.selector, node.value || "", { timeout: 1e4 });
@@ -4802,7 +4802,7 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
       break;
     case "type": {
       const delay = parseInt(node.delay || "50", 10);
-      await p.type(node.selector, sanitizePII(node.value || ""), { delay });
+      await p.type(node.selector, node.value || "", { delay });
       break;
     }
     case "clear":

@@ -3219,7 +3219,7 @@ async function executeAction(page: import('playwright').Page | null, action: str
   switch (action) {
     case 'navigate': await p.goto((node.url || node.value) as string, { waitUntil: 'domcontentloaded', timeout: 15000 }); break;
     case 'click':    await p.click(node.selector as string, { timeout: 10000 }); break;
-    case 'fill':     await p.fill(node.selector as string, sanitizePII((node.value as string) || ''), { timeout: 10000 }); break;
+    case 'fill':     await p.fill(node.selector as string, (node.value as string) || '', { timeout: 10000 }); break;
     case 'select':   await p.selectOption(node.selector as string, (node.value as string) || '', { timeout: 10000 }); break;
     case 'check':
       if (node.value === 'true') await p.check(node.selector as string, { timeout: 10000 });
@@ -3316,7 +3316,7 @@ async function executeAction(page: import('playwright').Page | null, action: str
     case 'type': {
       // Slow character-by-character typing (for autocomplete, debounced inputs)
       const delay = parseInt((node.delay as string) || '50', 10);
-      await p.type(node.selector as string, sanitizePII((node.value as string) || ''), { delay });
+      await p.type(node.selector as string, (node.value as string) || '', { delay });
       break;
     }
 
