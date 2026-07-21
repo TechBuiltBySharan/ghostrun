@@ -16,7 +16,7 @@ GhostRun is a **local-first QA agent**: record browser/API flows, run them again
 | Run smoke tests | `ghostrun run <flow> --profile staging --ci` |
 | Run a suite | `ghostrun suite:run smoke --profile staging --ci` |
 | CI gate + artifacts | `--ci --reporter junit` then `ghostrun report publish --dir ./test-results/` |
-| Investigate failure | `ghostrun run:show <id>` or read `.ghostrun/runs/<id>/report.html` |
+| Investigate failure | `ghostrun report show <id>` or read `.ghostrun/runs/<id>/report.html` |
 | Fix broken selector | `ghostrun repair list` → review → `ghostrun repair apply <id>` (never auto-apply in CI) |
 | AI assistant integration | MCP server (`ghostrun-mcp`) — see [MCP-SETUP.md](MCP-SETUP.md) |
 | Password / form login SaaS | Profile `auth.strategy: form` + env secrets — **no Mailpit required** |
@@ -234,7 +234,7 @@ Flow actions: `email:wait`, `email:extract-link`, `email:click-link`, `email:ext
 | `ghostrun learn <url> [name]` | Record browser flow |
 | `ghostrun learn [name] --cdp <endpoint>` | Attach to a browser you already have open (over CDP) instead of launching a new one — records from the current tab, infers the URL if not given, never closes your browser when done |
 | `ghostrun author` | Interactive author menu |
-| `ghostrun create "<description>"` | AI-generate flow |
+| `ghostrun author create "<description>"` | AI-generate flow |
 | `ghostrun run <id\|name> [flags]` | Execute flow |
 | `ghostrun explore <url>` | BFS crawl + AI flow discovery |
 
@@ -249,7 +249,7 @@ Flow actions: `email:wait`, `email:extract-link`, `email:click-link`, `email:ext
 | `ghostrun flow:import <file>` | Import flow |
 | `ghostrun sync flows` | Import disk flow files into DB |
 
-### Profiles (prefer `profile` subcommand; `profile:*` aliases still work)
+### Profiles (`profile:*` colon aliases are removed — use the space form)
 
 | Command | Purpose |
 |---------|---------|
@@ -273,8 +273,8 @@ Flow actions: `email:wait`, `email:extract-link`, `email:click-link`, `email:ext
 
 | Command | Purpose |
 |---------|---------|
-| `ghostrun run:list` / `run:show <id>` | Run history |
-| `ghostrun run:analyze <id>` | AI failure explanation |
+| `ghostrun report list` / `report show <id>` | Run history |
+| `ghostrun report analyze <id>` | AI failure explanation |
 | `ghostrun repair list\|show\|apply` | Reviewable selector repairs |
 | `ghostrun improve` | Suite health suggestions |
 

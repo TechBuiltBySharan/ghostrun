@@ -154,16 +154,10 @@ const LEGACY_COMMAND_MAP: Record<string, string> = {
   'run:diff': 'ghostrun report diff <run1> <run2>',
   'run:analyze': 'ghostrun report analyze <run-id>',
   'run:list': 'ghostrun report list',
-  'flow:list': 'ghostrun flow:list',
   'flow:schedule': 'ghostrun monitor schedule add <id> "<cron>"',
   'schedule:list': 'ghostrun monitor schedule list',
   'schedule:remove': 'ghostrun monitor schedule remove <id>',
   'create': 'ghostrun author create "<description>"',
-  'flow:fix': 'ghostrun repair (interactive: flow:fix still works)',
-  'baseline:set': 'ghostrun baseline:set <flow>',
-  'baseline:show': 'ghostrun baseline:show <flow>',
-  'baseline:clear': 'ghostrun baseline:clear <flow>',
-  'suite:run': 'ghostrun run --suite <name>',
   'ai:usage': 'ghostrun ai usage',
   'ai:status': 'ghostrun ai status',
   'ai:sessions': 'ghostrun ai sessions',
@@ -2792,6 +2786,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   if (activeEnv) {
     Object.assign(runVars, activeEnv.variables);
     if (activeEnv.baseUrl && !runVars['__baseUrl']) runVars['__baseUrl'] = activeEnv.baseUrl;
+    if (activeEnv.baseUrl && !runVars['baseUrl']) runVars['baseUrl'] = activeEnv.baseUrl;
   }
   if (selectedProfile?.variables) Object.assign(runVars, selectedProfile.variables);
   const accountKey = selectedProfile ? resolveSelectedAccountKey(selectedProfile, process.argv) : null;
@@ -2815,6 +2810,7 @@ async function executeFlow(flowId: string, vars?: Record<string, string>, opts?:
   if (selectedProfile?.baseUrl) {
     if (!runVars['BASE_URL']) runVars['BASE_URL'] = selectedProfile.baseUrl;
     if (!runVars['__baseUrl']) runVars['__baseUrl'] = selectedProfile.baseUrl;
+    if (!runVars['baseUrl']) runVars['baseUrl'] = selectedProfile.baseUrl;
   }
 
   // Show run header with env + provenance
@@ -3580,7 +3576,10 @@ async function executeAction(page: import('playwright').Page | null, action: str
       if (ctx) {
         ctx.environmentName = env.name;
         for (const [k, v] of Object.entries(env.variables)) ctx.variables[k] = v;
-        if (env.baseUrl) ctx.variables['__baseUrl'] = env.baseUrl;
+        if (env.baseUrl) {
+          ctx.variables['__baseUrl'] = env.baseUrl;
+          ctx.variables['baseUrl'] = env.baseUrl;
+        }
       }
       break;
     }
@@ -5411,15 +5410,14 @@ async function runServeDashboard(port: number) {
   const allowedDashboardCommands = new Set([
     'status',
     'flow:list',
-    'run:list',
     'env:list',
     'suite:list',
-    'schedule:list',
     'perf:list',
     'scrape:list',
-    'store:list',
     'store',
     'run',
+    'report',
+    'monitor',
   ]);
 
   function broadcast(event: string, data: unknown) {
@@ -6173,6 +6171,14 @@ setInterval(loadFlows, 10000); // refresh every 10s
       normalizedCommand = 'store';
       normalizedArgs = ['list', ...normalizedArgs];
     }
+    if (normalizedCommand === 'run:list') {
+      normalizedCommand = 'report';
+      normalizedArgs = ['list', ...normalizedArgs];
+    }
+    if (normalizedCommand === 'schedule:list') {
+      normalizedCommand = 'monitor';
+      normalizedArgs = ['schedule', 'list', ...normalizedArgs];
+    }
     if (!allowedDashboardCommands.has(normalizedCommand)) {
       throw new Error(`Command is not allowed from the dashboard: ${command}`);
     }
@@ -6620,7 +6626,7 @@ async function runProfileList() {
   const profiles = listProfiles();
   console.log(chalk.bold(`\n  Profiles (${profiles.length})\n`));
   if (profiles.length === 0) {
-    warn('No profiles found. Create one: ghostrun profile:create staging https://staging.example.com');
+    warn('No profiles found. Create one: ghostrun profile create staging https://staging.example.com');
     console.log();
     return;
   }
@@ -6974,7 +6980,7 @@ async function runImprove() {
     for (const item of highFailureFlows.slice(0, 5)) {
       findings.push(`High failure rate (${item.rate.toFixed(0)}% over ${item.runs} runs): ${item.name}`);
     }
-    actions.push('Inspect high-failure flows with ghostrun run:show and ghostrun repair list');
+    actions.push('Inspect high-failure flows with ghostrun report show and ghostrun repair list');
   }
   if (alwaysPassFlows.length) {
     findings.push(`${alwaysPassFlows.length} flow(s) always pass — possible coverage gaps: ${alwaysPassFlows.slice(0, 5).join(', ')}`);
@@ -8485,6 +8491,21 @@ async function runBaselineShow(id: string) {
 // COMMANDS — natural language create
 // ============================================
 
+function findInvalidStepUrl(rawUrl: string, baseUrl: string): string | null {
+  // Simulates the {{baseUrl}}/{{__baseUrl}}/{{BASE_URL}} substitution runVars actually
+  // performs at run time, purely to validate — the saved node keeps the raw templated
+  // string so the flow still resolves correctly against whichever profile runs it later.
+  const resolved = rawUrl.replace(/\{\{(baseUrl|__baseUrl|BASE_URL)\}\}/g, baseUrl);
+  if (/\{\{\w+\}\}/.test(resolved)) return `unresolved template variable in "${rawUrl}"`;
+  if (/^https?:\/\//i.test(resolved)) {
+    try { new URL(resolved); return null; } catch { return `not a valid URL: "${rawUrl}"`; }
+  }
+  if (resolved.startsWith('/')) {
+    try { new URL(resolved, baseUrl); return null; } catch { return `not a valid path: "${rawUrl}"`; }
+  }
+  return `not a full URL, {{baseUrl}} path, or "/" path: "${rawUrl}"`;
+}
+
 async function runCreate(description?: string, extraArgs: string[] = []) {
   const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
   const preview = extraArgs.includes('--preview');
@@ -8576,6 +8597,22 @@ Rules:
     }
     errorMsg('AI returned invalid JSON. Try again with a clearer description.');
     console.log(chalk.gray('  AI response: ' + result.text.slice(0, 200)));
+    process.exit(1);
+    return;
+  }
+
+  const urlProblems = steps
+    .map((step, i) => step.url ? { step, i, problem: findInvalidStepUrl(step.url, baseUrl!) } : null)
+    .filter((x): x is { step: typeof steps[number]; i: number; problem: string } => !!x?.problem);
+  if (urlProblems.length > 0) {
+    const details = urlProblems.map(({ step, i, problem }) => `Step ${i + 1} ("${step.name}"): ${problem}`);
+    if (jsonOutput) {
+      console.log(JSON.stringify({ error: 'AI generated a flow with invalid step URLs.', details }));
+      process.exit(1);
+    }
+    errorMsg('AI generated a flow with invalid step URLs — not saving a broken flow.');
+    details.forEach(d => console.log(chalk.gray('  ' + d)));
+    console.log(chalk.gray('  Try a clearer description, or use --preview to inspect the raw AI output.'));
     process.exit(1);
     return;
   }
@@ -9264,11 +9301,11 @@ GhostRun lets developers record browser flows and replay them headlessly for tes
 - ghostrun run <name> --visible — Run with visible browser (for debugging)
 - ghostrun run <name> --output json — JSON output with extracted data
 - ghostrun flow:list            — List flows with pass rates
-- ghostrun run:list             — Recent runs
-- ghostrun run:show <id>        — Per-step details + screenshots
-- ghostrun run:analyze <id>     — AI failure analysis
+- ghostrun report list          — Recent runs
+- ghostrun report show <id>     — Per-step details + screenshots
+- ghostrun report analyze <id>  — AI failure analysis
 - ghostrun flow:fix <id>        — Fix broken selectors interactively
-- ghostrun flow:create <desc>   — Generate flow from description
+- ghostrun author create <desc> — Generate flow from description
 - ghostrun chat                 — This chat interface
 - ghostrun init                 — Setup wizard
 - ghostrun status               — Stats + AI provider info
@@ -11420,8 +11457,14 @@ async function main() {
     process.exit(0);
   }
 
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  const subHelpRequested = cmd !== 'help' && cmd !== '--help' && cmd !== '-h' &&
+    args.slice(1).some(a => a === '--help' || a === '-h');
+
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h' || subHelpRequested) {
     printLogo(); divider(); console.log();
+    if (subHelpRequested) {
+      console.log(chalk.gray(`  Per-command usage isn't available yet — showing the full reference. See REFERENCE.md for "${cmd}" specifically.\n`));
+    }
     const C = (s: string) => chalk.cyan(s.padEnd(34));
     const G = (s: string) => chalk.gray(s);
     const H = (s: string) => { console.log(chalk.bold.white('  ' + s)); console.log(chalk.gray('  ' + '─'.repeat(55))); };
@@ -11439,7 +11482,7 @@ async function main() {
     console.log(`  ${C('run <id> --trace')}${G('Record Playwright trace for inspection')}`);
     console.log(`  ${C('run <id> --baseline')}${G('Fail on visual regression vs baselines')}`);
     console.log(`  ${C('run <id> --baseline-threshold 5')}${G('Visual diff threshold (percent)')}`);
-    console.log(`  ${C('create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
+    console.log(`  ${C('author create [description]')}${G('Generate flow from natural language  🤖 AI')}`);
     console.log(`  ${C('author')}${G('Interactive menu to author a flow')}`);
     console.log(`  ${C('code:scan <directory>')}${G('Scan codebase, create draft flows    🤖 AI')}`);
     console.log();
@@ -11457,12 +11500,12 @@ async function main() {
     console.log();
 
     H('Profiles');
-    console.log(`  ${C('profile:list')}${G('List project profiles')}`);
-    console.log(`  ${C('profile:show <name>')}${G('Show a project profile')}`);
-    console.log(`  ${C('profile:create <name> [url]')}${G('Create a profile with optional base URL')}`);
-    console.log(`  ${C('profile:use <name>')}${G('Set the active project profile')}`);
-    console.log(`  ${C('profile:set <name> <key> <val>')}${G('Set baseUrl, auth.*, meta.*, or profile var')}`);
-    console.log(`  ${C('profile:delete <name>')}${G('Delete a project profile')}`);
+    console.log(`  ${C('profile list')}${G('List project profiles')}`);
+    console.log(`  ${C('profile show <name>')}${G('Show a project profile')}`);
+    console.log(`  ${C('profile create <name> [url]')}${G('Create a profile with optional base URL')}`);
+    console.log(`  ${C('profile use <name>')}${G('Set the active project profile')}`);
+    console.log(`  ${C('profile set <name> <key> <val>')}${G('Set baseUrl, auth.*, meta.*, or profile var')}`);
+    console.log(`  ${C('profile delete <name>')}${G('Delete a project profile')}`);
     console.log(`  ${C('profile accounts list <profile>')}${G('Roles: superadmin, admin, manager, guest')}`);
     console.log(`  ${C('profile account add <profile> <id>')}${G('Add account with email + password secrets')}`);
     console.log(chalk.gray(`  ${'  Run: --profile staging --account admin  (email + password per role)'.padEnd(52)}`));
@@ -11508,10 +11551,10 @@ async function main() {
     console.log();
 
     H('Run History & Analysis');
-    console.log(`  ${C('run:list')}${G('List recent runs with status + timing')}`);
-    console.log(`  ${C('run:show <id>')}${G('Full step details + screenshots')}`);
-    console.log(`  ${C('run:diff <id1> <id2>')}${G('Pixel-diff screenshots between two runs')}`);
-    console.log(`  ${C('run:analyze <id>')}${G('Plain-English failure analysis          🤖 AI')}`);
+    console.log(`  ${C('report list')}${G('List recent runs with status + timing')}`);
+    console.log(`  ${C('report show <id>')}${G('Full step details + screenshots')}`);
+    console.log(`  ${C('report diff <id1> <id2>')}${G('Pixel-diff screenshots between two runs')}`);
+    console.log(`  ${C('report analyze <id>')}${G('Plain-English failure analysis          🤖 AI')}`);
     console.log(`  ${C('repair list')}${G('List stored repair proposals')}`);
     console.log(`  ${C('repair show <id>')}${G('Show repair proposal details')}`);
     console.log(`  ${C('repair apply <id>')}${G('Apply a stored repair proposal')}`);
@@ -11566,9 +11609,9 @@ async function main() {
     console.log(`  ${C('init [--yes]')}${G('Setup wizard (Chromium + AI provider)')}`);
     console.log(`  ${C('audit')}${G('Scan project for secret leaks')}`);
     console.log(`  ${C('config:mode [assist|auto]')}${G('Show or set interaction mode')}`);
-    console.log(`  ${C('ai:status')}${G('AI provider, policy, and usage summary')}`);
-    console.log(`  ${C('ai:usage')}${G('Aggregated AI token and call usage')}`);
-    console.log(`  ${C('ai:sessions [limit]')}${G('Recent sanitized AI session log')}`);
+    console.log(`  ${C('ai status')}${G('AI provider, policy, and usage summary')}`);
+    console.log(`  ${C('ai usage')}${G('Aggregated AI token and call usage')}`);
+    console.log(`  ${C('ai sessions [limit]')}${G('Recent sanitized AI session log')}`);
     console.log();
 
     H('Exploration & System');

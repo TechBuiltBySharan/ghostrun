@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0-alpha.12] — 2026-07-21
+
 ### Added
 
 - **`ghostrun learn --cdp <endpoint>`** — attach to an already-running browser over the Chrome DevTools Protocol instead of always launching a new one. Lets an AI agent (or anything else already driving a browser) hand that same session to GhostRun for recording, using the current tab and current URL if none is given. Never closes the attached browser when the recording session ends.
@@ -15,6 +17,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **`ghostrun learn <url>`** — the command README/REFERENCE.md/in-app help have always documented as the primary way to record a flow was actually being rejected as a "removed legacy command," pointing users at `ghostrun author record <url>` instead. Restored as a real top-level command.
+- **`ghostrun author create` generating flows with unresolvable `{{baseUrl}}` navigations** — the AI prompt instructs the model to use `{{baseUrl}}` in generated step URLs, but the runtime only ever populated `__baseUrl` and `BASE_URL` in the variable table, never a bare `baseUrl`. Any model that faithfully followed the prompt produced a flow that failed at `run` time with `page.goto: Cannot navigate to invalid URL` — deterministically, not as an artifact of model size. Added `baseUrl` as a resolved alias everywhere `__baseUrl` is set, and added URL validation at flow-creation time so a malformed or unresolved step URL now fails fast with a clear message instead of saving a broken flow.
+- **`flow:list`, `flow:fix`, `suite:run`, `baseline:set`, `baseline:show`, `baseline:clear`** — all five had real, working handlers in the command switch, but were *also* listed in the legacy-command rejection map, which runs first and made the working handlers unreachable. `flow:list` was mapped to itself, so the rejection told the user to run the exact command that had just been rejected. Removed all five from the rejection map.
+- **Stale colon-syntax documentation** — `profile:*`, `run:*` (→ `report *`), `ai:*`, `flow:schedule`, `schedule:*`, and bare `create` are genuinely-deprecated commands with real space-syntax replacements, but REFERENCE.md, AGENTS.md, the in-app `--help` screen, several runtime warning/suggestion messages, and the `chat` AI assistant's system prompt (which even referenced a `flow:create` command that never existed) all still showed the old rejected syntax. Updated every occurrence to the working syntax.
+- **`--help`/`-h` on any subcommand** (e.g. `ghostrun code:scan --help`) was parsed as a positional argument instead of showing usage, producing confusing errors like `Directory not found: --help`. `--help`/`-h` anywhere in the arguments now shows the command reference.
+- **Dashboard `report list` / `monitor schedule list` buttons** — the web dashboard's allowed-command list still advertised the old `run:list`/`schedule:list` trigger names without translating them to their current replacements, so clicking those buttons would fail with the same legacy-rejection error server-side. Added the missing translation, mirroring the existing `store:list` → `store list` handling.
+- **`tests/e2e/api.test.ts` httpbin.org `/get` hang** — individual test-body fetches had no timeout bound, so a mid-run hang (distinct from the outright block/503 the upfront availability check already handled) ran out Vitest's 30s test timeout instead of being treated as the same class of third-party flake as everything else in that suite. All httpbin fetches now go through a 10s-bounded helper.
 
 ---
 

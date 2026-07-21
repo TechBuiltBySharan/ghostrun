@@ -107,6 +107,17 @@ describe('API Testing - HTTPBin', () => {
     }
   });
 
+  // Individual test-body fetches had no bound at all, so a mid-run hang (distinct from the
+  // outright block/503 the upfront check catches) ran out the clock on Vitest's own 30s test
+  // timeout instead of being treated as the same class of httpbin flake as everything else here.
+  async function safeFetch(url: string, opts: RequestInit = {}): Promise<Response | null> {
+    try {
+      return await fetch(url, { ...opts, signal: AbortSignal.timeout(10000) });
+    } catch {
+      return null;
+    }
+  }
+
   // httpbin.org can also flake mid-run on individual endpoints (e.g. a Cloudflare
   // interstitial HTML page) even after the upfront check passes — parse defensively
   // and skip that one assertion rather than failing the whole suite over a third party.
@@ -126,7 +137,8 @@ describe('API Testing - HTTPBin', () => {
 
   it('GET /get - should return request details', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/get`);
+    const response = await safeFetch(`${baseUrl}/get`);
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -140,11 +152,12 @@ describe('API Testing - HTTPBin', () => {
   it('POST /post - should echo POST body', async () => {
     if (!httpbinAvailable) return;
     const testData = { message: 'Hello, GhostRun!', number: 42 };
-    const response = await fetch(`${baseUrl}/post`, {
+    const response = await safeFetch(`${baseUrl}/post`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(testData),
     });
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -155,28 +168,29 @@ describe('API Testing - HTTPBin', () => {
 
   it('GET /status/200 - should return 200 status', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/status/200`);
-    if (isGatewayError(response.status)) return;
+    const response = await safeFetch(`${baseUrl}/status/200`);
+    if (!response || isGatewayError(response.status)) return;
     expect(response.status).toBe(200);
   });
 
   it('GET /status/404 - should return 404 status', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/status/404`);
-    if (isGatewayError(response.status)) return;
+    const response = await safeFetch(`${baseUrl}/status/404`);
+    if (!response || isGatewayError(response.status)) return;
     expect(response.status).toBe(404);
   });
 
   it('GET /status/500 - should return 500 status', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/status/500`);
-    if (isGatewayError(response.status)) return;
+    const response = await safeFetch(`${baseUrl}/status/500`);
+    if (!response || isGatewayError(response.status)) return;
     expect(response.status).toBe(500);
   });
 
   it('GET /headers - should return sent headers', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/headers`);
+    const response = await safeFetch(`${baseUrl}/headers`);
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -188,7 +202,8 @@ describe('API Testing - HTTPBin', () => {
 
   it('GET /uuid - should return valid UUID', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/uuid`);
+    const response = await safeFetch(`${baseUrl}/uuid`);
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -199,7 +214,8 @@ describe('API Testing - HTTPBin', () => {
 
   it('GET /ip - should return origin IP', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/ip`);
+    const response = await safeFetch(`${baseUrl}/ip`);
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -210,11 +226,12 @@ describe('API Testing - HTTPBin', () => {
 
   it('PUT /put - should handle PUT requests', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/put`, {
+    const response = await safeFetch(`${baseUrl}/put`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ test: 'data' }),
     });
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
     const data = parsed.data;
@@ -225,7 +242,8 @@ describe('API Testing - HTTPBin', () => {
 
   it('DELETE /delete - should handle DELETE requests', async () => {
     if (!httpbinAvailable) return;
-    const response = await fetch(`${baseUrl}/delete`, { method: 'DELETE' });
+    const response = await safeFetch(`${baseUrl}/delete`, { method: 'DELETE' });
+    if (!response) return;
     const parsed = await safeJson(response);
     if (!parsed.ok) return;
 

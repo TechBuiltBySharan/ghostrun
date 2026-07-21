@@ -13,7 +13,7 @@ Complete reference for the `ghostrun` command-line tool.
 | `learn` | `ghostrun learn <url> [name]` | Record a new flow by opening a real browser and capturing interactions | `ghostrun learn https://app.example.com "Login Flow"` |
 | `learn --cdp` | `ghostrun learn [name] --cdp <endpoint>` | Attach to an already-running browser over the Chrome DevTools Protocol instead of launching a new one — e.g. a browser an AI agent already has open — and record from its current tab. URL is inferred from the current page if omitted. Never closes the attached browser when done. | `ghostrun learn my-flow --cdp http://localhost:9222` |
 | `run` | `ghostrun run <id\|name> [flags]` | Execute a recorded flow headlessly | `ghostrun run login-flow` |
-| `create` | `ghostrun create [description]` | Generate a flow from a natural-language description (AI) | `ghostrun create "log in with email and password"` |
+| `author create` | `ghostrun author create [description]` | Generate a flow from a natural-language description (AI) | `ghostrun author create "log in with email and password"` |
 | `author` | `ghostrun author` | Interactive menu: record, generate, import from curl, import from spec, or explore | `ghostrun author` |
 | `code:scan` | `ghostrun code:scan <directory>` | Scan a codebase and create draft flows from detected routes/forms (AI) | `ghostrun code:scan ./src` |
 
@@ -30,25 +30,25 @@ Complete reference for the `ghostrun` command-line tool.
 | `flow:clone` | `ghostrun flow:clone <id\|name>` | Duplicate a flow (appends " (copy)" to name) | `ghostrun flow:clone login-flow` |
 | `flow:from-curl` | `ghostrun flow:from-curl [cmd]` | Parse a curl command and create an API flow | `ghostrun flow:from-curl 'curl -X POST https://api.example.com/login'` |
 | `flow:from-spec` | `ghostrun flow:from-spec <file>` | Import flows from an OpenAPI/Swagger JSON or YAML spec | `ghostrun flow:from-spec openapi.yaml` |
-| `flow:schedule` | `ghostrun flow:schedule <id\|name> "<cron>"` | Schedule a flow with a cron expression | `ghostrun flow:schedule login-flow "0 9 * * *"` |
+| `monitor schedule add` | `ghostrun monitor schedule add <id\|name> "<cron>"` | Schedule a flow with a cron expression | `ghostrun monitor schedule add login-flow "0 9 * * *"` |
 
 ### Profiles
 
 | Command | Syntax | Description | Example |
 |---------|--------|-------------|---------|
-| `profile:list` | `ghostrun profile:list` | List all project profiles | `ghostrun profile:list` |
-| `profile:show` | `ghostrun profile:show <name>` | Show the contents of a profile | `ghostrun profile:show staging` |
-| `profile:create` | `ghostrun profile:create <name> [url]` | Create a profile with an optional base URL | `ghostrun profile:create staging https://staging.example.com` |
-| `profile:use` | `ghostrun profile:use <name>` | Set the active project profile | `ghostrun profile:use staging` |
-| `profile:set` | `ghostrun profile:set <name> <key> <value>` | Set a profile field (baseUrl, auth.*, meta.*, or a variable) | `ghostrun profile:set staging baseUrl https://staging.example.com` |
-| `profile:delete` | `ghostrun profile:delete <name>` | Delete a profile | `ghostrun profile:delete old-profile` |
+| `profile list` | `ghostrun profile list` | List all project profiles | `ghostrun profile list` |
+| `profile show` | `ghostrun profile show <name>` | Show the contents of a profile | `ghostrun profile show staging` |
+| `profile create` | `ghostrun profile create <name> [url]` | Create a profile with an optional base URL | `ghostrun profile create staging https://staging.example.com` |
+| `profile use` | `ghostrun profile use <name>` | Set the active project profile | `ghostrun profile use staging` |
+| `profile set` | `ghostrun profile set <name> <key> <value>` | Set a profile field (baseUrl, auth.*, meta.*, or a variable) | `ghostrun profile set staging baseUrl https://staging.example.com` |
+| `profile delete` | `ghostrun profile delete <name>` | Delete a profile | `ghostrun profile delete old-profile` |
 
 ### Scheduling
 
 | Command | Syntax | Description | Example |
 |---------|--------|-------------|---------|
-| `schedule:list` | `ghostrun schedule:list` | List all scheduled flows | `ghostrun schedule:list` |
-| `schedule:remove` | `ghostrun schedule:remove <id>` | Remove a schedule by ID | `ghostrun schedule:remove sched-abc123` |
+| `monitor schedule list` | `ghostrun monitor schedule list` | List all scheduled flows | `ghostrun monitor schedule list` |
+| `monitor schedule remove` | `ghostrun monitor schedule remove <id>` | Remove a schedule by ID | `ghostrun monitor schedule remove sched-abc123` |
 | `serve` | `ghostrun serve` | Start the scheduler daemon | `ghostrun serve` |
 | `serve --ui` | `ghostrun serve --ui [--port 3000]` | Launch the web dashboard (default port 3000) | `ghostrun serve --ui --port 4000` |
 
@@ -74,13 +74,13 @@ Complete reference for the `ghostrun` command-line tool.
 
 | Command | Syntax | Description | Example |
 |---------|--------|-------------|---------|
-| `run:list` | `ghostrun run:list` | List recent runs with status and timing | `ghostrun run:list` |
-| `run:show` | `ghostrun run:show <id>` | Show full step details and screenshots for a run | `ghostrun run:show run-abc12345` |
-| `run:diff` | `ghostrun run:diff <id1> <id2>` | Pixel-diff screenshots between two runs | `ghostrun run:diff run-abc1 run-abc2` |
-| `run:analyze` | `ghostrun run:analyze <id>` | Plain-English AI failure analysis for a run | `ghostrun run:analyze run-abc12345` |
-| `repair:list` | `ghostrun repair:list` | List stored repair proposals | `ghostrun repair:list` |
-| `repair:show` | `ghostrun repair:show <id>` | Show details of a repair proposal | `ghostrun repair:show rep-abc123` |
-| `repair:apply` | `ghostrun repair:apply <id>` | Apply a stored repair proposal to the flow | `ghostrun repair:apply rep-abc123` |
+| `report list` | `ghostrun report list` | List recent runs with status and timing | `ghostrun report list` |
+| `report show` | `ghostrun report show <id>` | Show full step details and screenshots for a run | `ghostrun report show run-abc12345` |
+| `report diff` | `ghostrun report diff <id1> <id2>` | Pixel-diff screenshots between two runs | `ghostrun report diff run-abc1 run-abc2` |
+| `report analyze` | `ghostrun report analyze <id>` | Plain-English AI failure analysis for a run | `ghostrun report analyze run-abc12345` |
+| `repair list` | `ghostrun repair list` | List stored repair proposals | `ghostrun repair list` |
+| `repair show` | `ghostrun repair show <id>` | Show details of a repair proposal | `ghostrun repair show rep-abc123` |
+| `repair apply` | `ghostrun repair apply <id>` | Apply a stored repair proposal to the flow | `ghostrun repair apply rep-abc123` |
 | `improve` | `ghostrun improve` | Analyze GhostRun data and suggest improvements (AI) | `ghostrun improve` |
 
 ### Template Store
@@ -133,9 +133,9 @@ Complete reference for the `ghostrun` command-line tool.
 | `chat` | `ghostrun chat` | Ask GhostRun Bot — Q&A and run flows interactively (AI) | `ghostrun chat` |
 | `init` | `ghostrun init` | Setup wizard: install Chromium and configure AI provider | `ghostrun init` |
 | `config:mode` | `ghostrun config:mode [assist\|auto]` | Show or set the interaction mode | `ghostrun config:mode auto` |
-| `ai:status` | `ghostrun ai:status` | Show AI provider, policy, and usage summary | `ghostrun ai:status` |
-| `ai:usage` | `ghostrun ai:usage` | Show aggregated AI token and call usage | `ghostrun ai:usage` |
-| `ai:sessions` | `ghostrun ai:sessions [limit]` | Show recent sanitized AI session log | `ghostrun ai:sessions 20` |
+| `ai status` | `ghostrun ai status` | Show AI provider, policy, and usage summary | `ghostrun ai status` |
+| `ai usage` | `ghostrun ai usage` | Show aggregated AI token and call usage | `ghostrun ai usage` |
+| `ai sessions` | `ghostrun ai sessions [limit]` | Show recent sanitized AI session log | `ghostrun ai sessions 20` |
 | `explore` | `ghostrun explore <url>` | Auto-discover flows via BFS crawl (AI) | `ghostrun explore https://app.example.com` |
 | `explore:list` | `ghostrun explore:list` | List all explore sessions | `ghostrun explore:list` |
 | `explore:confirm` | `ghostrun explore:confirm <report-id>` | Save confirmed flows from an explore session | `ghostrun explore:confirm exp-abc123` |
