@@ -98,7 +98,9 @@ describe('API Testing - HTTPBin', () => {
 
   beforeAll(async () => {
     try {
-      const res = await fetch(`${baseUrl}/get`);
+      // Some CI networks blackhole httpbin.org (connection hangs) rather than refusing it
+      // outright — bound the check well under the hook timeout so it fails fast either way.
+      const res = await fetch(`${baseUrl}/get`, { signal: AbortSignal.timeout(8000) });
       httpbinAvailable = res.status === 200;
     } catch {
       httpbinAvailable = false;
