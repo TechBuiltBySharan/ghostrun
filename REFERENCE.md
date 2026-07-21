@@ -392,14 +392,14 @@ The example below shows all supported action types:
           "label": "Assert status 201", "assert": "status", "expected": 201 },
 
         { "id": "n50", "type": "action", "action": "assert:body",
-          "label": "Assert body contains id", "path": "$.id", "expected": "not-null" },
+          "label": "Assert body contains id", "assert": "json:exists", "path": "$.id" },
 
         { "id": "n51", "type": "action", "action": "assert:header",
           "label": "Assert content-type",
-          "header": "content-type", "expected": "application/json" },
+          "assert": "header", "header": "content-type", "expected": "application/json" },
 
         { "id": "n52", "type": "action", "action": "assert:time",
-          "label": "Assert response under 1s", "expected": 1000 },
+          "label": "Assert response under 1s", "assert": "time", "expected": 1000 },
 
         { "id": "n53", "type": "action", "action": "extract:json",
           "label": "Extract user id", "path": "$.id", "variable": "USER_ID" },
@@ -468,11 +468,11 @@ The example below shows all supported action types:
 | `iframe:enter` | `selector` | — | Switches action context into an iframe |
 | `iframe:exit` | — | — | Returns to main frame context |
 | `http:request` | `method`, `url` | `headers`, `body`, `auth` | Makes an HTTP request outside the browser |
-| `assert:response` | `assert`, `expected` | — | Asserts on last HTTP response; `assert` = `"status"` |
-| `assert:status` | `expected` (int) | — | Shorthand for status assertion |
-| `assert:body` | `path`, `expected` | — | JSONPath assertion on response body |
-| `assert:header` | `header`, `expected` | — | Asserts response header value |
-| `assert:time` | `expected` (ms) | — | Asserts response time is below threshold |
+| `assert:response` | `assert`, `expected` | — | Asserts on last HTTP response; `assert` = `"status"` \| `"status:range"` \| `"body:contains"` \| `"body:equals"` \| `"json:path"` \| `"json:exists"` \| `"header"` \| `"time"` |
+| `assert:status` | `expected` (int) | — | Shorthand for status assertion; `assert` defaults to `"status"` when omitted |
+| `assert:body` | `assert` (`"json:path"` or `"json:exists"`), `path` | `expected` (required for `json:path`, unused for `json:exists`) | JSONPath assertion on response body — dispatch is driven by `assert`, not the action name, so it must be set explicitly |
+| `assert:header` | `assert: "header"`, `header` | `expected` | Asserts response header value — requires `assert: "header"` explicitly |
+| `assert:time` | `assert: "time"`, `expected` (ms) | — | Asserts response time is below threshold — requires `assert: "time"` explicitly |
 | `extract:json` | `path`, `variable` | — | Extracts a JSONPath value from the last HTTP response |
 | `set:variable` | `variable`, `value` | — | Sets a flow variable at runtime |
 | `env:switch` | `environment` | — | Switches to a named environment mid-flow |
