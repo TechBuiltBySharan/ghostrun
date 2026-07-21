@@ -1,13 +1,17 @@
 #!/usr/bin/env node
-"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __esm = (fn, res) => function __init() {
-  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;
+  }
 };
 var __export = (target, all) => {
   for (var name in all)
@@ -7613,13 +7617,12 @@ setInterval(loadFlows, 10000); // refresh every 10s
       return;
     }
     if (req.method === "GET" && path5 === "/api/run") {
-      let sendEvent2 = function(event, data) {
+      let sendEvent = function(event, data) {
         res.write(`event: ${event}
 data: ${JSON.stringify(data)}
 
 `);
       };
-      var sendEvent = sendEvent2;
       const flowId = url.searchParams.get("id");
       if (!flowId) {
         res.writeHead(400);
@@ -7633,7 +7636,7 @@ data: ${JSON.stringify(data)}
       });
       const flow = db.getFlow(flowId);
       if (!flow) {
-        sendEvent2("done", { passed: false, error: "Flow not found", duration: 0 });
+        sendEvent("done", { passed: false, error: "Flow not found", duration: 0 });
         res.end();
         return;
       }
@@ -7641,18 +7644,18 @@ data: ${JSON.stringify(data)}
       try {
         const parsedGraph = JSON.parse(flow.graph || "{}");
         const nodes = parsedGraph.nodes || [];
-        sendEvent2("log", { type: "info", message: `Flow: ${flow.name} (${nodes.length} steps)` });
+        sendEvent("log", { type: "info", message: `Flow: ${flow.name} (${nodes.length} steps)` });
         const result = await executeFlow(flowId, void 0, {
           onStep: (stepIdx, action, selector) => {
-            sendEvent2("log", { type: "step", message: `  [${stepIdx + 1}] ${action}${selector ? " \u2192 " + selector : ""}` });
+            sendEvent("log", { type: "step", message: `  [${stepIdx + 1}] ${action}${selector ? " \u2192 " + selector : ""}` });
           },
           onError: (msg) => {
-            sendEvent2("log", { type: "fail", message: "  \u2717 " + msg });
+            sendEvent("log", { type: "fail", message: "  \u2717 " + msg });
           }
         });
-        sendEvent2("done", { passed: result.passed, duration: result.duration, error: result.error });
+        sendEvent("done", { passed: result.passed, duration: result.duration, error: result.error });
       } catch (err) {
-        sendEvent2("done", { passed: false, error: err.message, duration: Date.now() - startTime });
+        sendEvent("done", { passed: false, error: err.message, duration: Date.now() - startTime });
       }
       res.end();
       return;

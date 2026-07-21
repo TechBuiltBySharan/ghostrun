@@ -26,7 +26,6 @@ test-results/
 # Build outputs
 *.tsbuildinfo
 .rustfmt.toml
-*.mjs
 
 # IDE
 .idea/
