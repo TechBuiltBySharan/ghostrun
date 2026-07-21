@@ -6607,7 +6607,7 @@ async function runScheduleList() {
   const schedules = db.listSchedules();
   console.log(import_chalk.default.bold("\n  Schedules\n"));
   if (schedules.length === 0) {
-    warn("No schedules. Add one: " + import_chalk.default.cyan('ghostrun flow:schedule <id> "<cron>"'));
+    warn("No schedules. Add one: " + import_chalk.default.cyan('ghostrun monitor schedule add <id> "<cron>"'));
     console.log();
     return;
   }
@@ -11770,6 +11770,15 @@ async function runDoctor() {
   const rawVer = process.version;
   const major = parseInt(rawVer.replace("v", "").split(".")[0], 10);
   check("Node.js >= 18", major >= 18, `${rawVer}`);
+  let chromiumInstalled = false;
+  let chromiumDetail = "could not resolve Chromium executable path \u2014 run: npx playwright install chromium";
+  try {
+    const execPath = import_playwright.chromium.executablePath();
+    chromiumInstalled = fs4.existsSync(execPath);
+    chromiumDetail = chromiumInstalled ? execPath : `binary not found at ${execPath} \u2014 run: npx playwright install chromium`;
+  } catch {
+  }
+  check("Playwright Chromium browser", chromiumInstalled, chromiumDetail);
   const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
   check("ANTHROPIC_API_KEY set", hasApiKey, hasApiKey ? "present" : "not set \u2014 AI features may be limited");
   const paths = getProjectPaths();

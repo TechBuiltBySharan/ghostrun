@@ -5294,7 +5294,7 @@ async function runMonitorCommand(monitorArgs: string[]) {
 async function runScheduleList() {
   const schedules = db.listSchedules();
   console.log(chalk.bold('\n  Schedules\n'));
-  if (schedules.length === 0) { warn('No schedules. Add one: ' + chalk.cyan('ghostrun flow:schedule <id> "<cron>"')); console.log(); return; }
+  if (schedules.length === 0) { warn('No schedules. Add one: ' + chalk.cyan('ghostrun monitor schedule add <id> "<cron>"')); console.log(); return; }
   console.log(chalk.gray('  ID        Flow                    Cron            Last Run      Status'));
   console.log(chalk.gray('  ' + '─'.repeat(78)));
   for (const s of schedules) {
@@ -10835,6 +10835,19 @@ async function runDoctor() {
   const rawVer = process.version; // e.g. "v20.11.0"
   const major = parseInt(rawVer.replace('v', '').split('.')[0], 10);
   check('Node.js >= 18', major >= 18, `${rawVer}`);
+
+  // 1b. Playwright Chromium browser binary — checking that the `playwright` npm
+  // package resolves is not enough; the actual browser binary is a separate
+  // download (`npx playwright install chromium`) that this must also verify,
+  // or `run` fails on the first flow instead of here.
+  let chromiumInstalled = false;
+  let chromiumDetail = 'could not resolve Chromium executable path — run: npx playwright install chromium';
+  try {
+    const execPath = chromium.executablePath();
+    chromiumInstalled = fs.existsSync(execPath);
+    chromiumDetail = chromiumInstalled ? execPath : `binary not found at ${execPath} — run: npx playwright install chromium`;
+  } catch { /* keep default detail */ }
+  check('Playwright Chromium browser', chromiumInstalled, chromiumDetail);
 
   // 2. ANTHROPIC_API_KEY
   const hasApiKey = !!process.env.ANTHROPIC_API_KEY;

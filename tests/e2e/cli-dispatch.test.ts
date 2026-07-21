@@ -96,3 +96,15 @@ describe('CLI dispatch — subcommand --help misparsing bug', () => {
     expect(result.stdout).toContain('Record & Run');
   });
 });
+
+describe('CLI dispatch — doctor checks the actual Chromium binary, not just the npm package', () => {
+  it('doctor reports a distinct Playwright Chromium browser check', () => {
+    const result = ghostrun('doctor');
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('Playwright Chromium browser');
+    // The CI/dev environment installs Chromium up front, so this must be OK here —
+    // a regression that silently skips the binary check (only checking the npm
+    // package resolves) would print nothing distinguishable from this line missing.
+    expect(output).toMatch(/\[\s*OK\s*\] Playwright Chromium browser/);
+  });
+});
