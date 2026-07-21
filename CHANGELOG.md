@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0-alpha.13] — 2026-07-21
+
 ### Fixed
 
 - **`sanitizePII()` was applied to the value typed into the real page, not just the copy that gets logged/stored/sent to AI** — any `fill`/`type` step whose value looked like an email, phone number, card number, API key, JWT, password, or SSN (per the PII regexes) had the literal placeholder token (`[EMAIL]`, `[PHONE]`, etc.) typed into the browser instead of the real value. This broke every login flow that fills an email field, including profile-injected `form`/`otp-bypass` auth (`resolveProfileAuth` runs the login flow through the same `fill`/`type` executor via `{{PROFILE_AUTH_USERNAME}}`, so it hit the identical bug through a second entry point). Removed the sanitize wrapping from the two call sites that feed `page.fill()`/`page.type()` directly; every other `sanitizePII()` call site (saved run data, response logging, AI-analysis prompts, the human-readable terminal log, and the CDP recorder's captured-action log) was already correct and is unchanged.
