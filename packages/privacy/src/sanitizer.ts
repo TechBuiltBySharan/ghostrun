@@ -3,7 +3,28 @@
  */
 
 import { PII_PATTERNS, type PlaceholderType, type PIIPattern } from './patterns';
-import type { ConsoleLog, NetworkLog } from '@ghostrun/core';
+
+export interface ConsoleLog {
+  timestamp: number;
+  type: 'log' | 'info' | 'warn' | 'error' | 'debug';
+  message: string;
+  location?: string;
+  args?: unknown[];
+  stack?: string;
+}
+
+export interface NetworkLog {
+  id: string;
+  timestamp: number;
+  method: string;
+  url: string;
+  status?: number;
+  statusText?: string;
+  requestHeaders: Record<string, string>;
+  requestBody?: string;
+  responseHeaders?: Record<string, string>;
+  responseBody?: string;
+}
 
 export interface SanitizeOptions {
   /** Replace with placeholders (default: true) */

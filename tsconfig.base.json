@@ -9,18 +9,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
-    "paths": {
-      "@ghostrun/core": ["packages/core/src/index.ts"],
-      "@ghostrun/database": ["packages/database/src/index.ts"],
-      "@ghostrun/memory": ["packages/memory/src/index.ts"],
-      "@ghostrun/executor": ["packages/executor/src/index.ts"],
-      "@ghostrun/reporting": ["packages/reporting/src/index.ts"],
-      "@ghostrun/privacy": ["packages/privacy/src/index.ts"],
-      "@ghostrun/vault": ["packages/vault/src/index.ts"],
-      "@ghostrun/adapters-web": ["packages/adapters-web/src/index.ts"],
-      "@ghostrun/recorder": ["packages/recorder/src/index.ts"]
-    },
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,

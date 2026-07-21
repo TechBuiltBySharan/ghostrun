@@ -56,7 +56,6 @@ export default defineConfig({
         'packages/**/node_modules/**',
         'packages/**/*.d.ts',
         'packages/**/__tests__/**',
-        'packages/**/src/index.ts',  // barrel files carry no logic
       ],
 
       // Achievable thresholds given current test suite
@@ -73,7 +72,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
-      '@ghostrun/core': path.resolve(__dirname, 'packages/core/src/index.ts'),
     },
   },
 });

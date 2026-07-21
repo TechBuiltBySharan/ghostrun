@@ -2,8 +2,24 @@
  * Transition Validation - Validate transitions between nodes
  */
 
-import type { ExecutionContext } from './engine';
-import type { EdgeCondition } from '@ghostrun/core';
+import type { Page, Browser, BrowserContext } from 'playwright';
+
+export interface ExecutionContext {
+  page: Page;
+  browser: Browser;
+  context: BrowserContext;
+}
+
+/**
+ * Condition for edge traversal
+ */
+export interface EdgeCondition {
+  type: 'url' | 'selector' | 'text' | 'element' | 'count';
+  operator: 'equals' | 'notEquals' | 'contains' | 'matches' | 'exists' | 'notExists' | 'greaterThan' | 'lessThan';
+  target: string;
+  value?: string | number;
+  caseSensitive?: boolean;
+}
 
 export interface ValidationResult {
   valid: boolean;
