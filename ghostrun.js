@@ -406,9 +406,9 @@ var readline = __toESM(require("readline"));
 var import_crypto4 = require("crypto");
 
 // packages/database/src/manager.ts
-var fs = __toESM(require("fs"), 1);
-var path = __toESM(require("path"), 1);
-var import_better_sqlite3 = __toESM(require("better-sqlite3"), 1);
+var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
+var import_better_sqlite3 = __toESM(require("better-sqlite3"));
 var import_crypto = require("crypto");
 var HOME_DIR = process.env.HOME || process.env.USERPROFILE || ".";
 var DATA_PATH = path.join(HOME_DIR, ".ghostrun");
