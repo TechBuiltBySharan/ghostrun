@@ -83,6 +83,7 @@ export function ensureProjectDirs(paths: ProjectPaths = getProjectPaths()): void
     path.join(paths.ghostrunPath, 'reports'),
     path.join(paths.ghostrunPath, 'auth', 'storage-state'),
     path.join(paths.ghostrunPath, 'auth', 'secrets'),
+    path.join(paths.ghostrunPath, 'ai', 'sessions'),
   ];
   for (const d of dirs) fs.mkdirSync(d, { recursive: true });
 }

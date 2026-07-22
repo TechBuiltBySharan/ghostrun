@@ -1464,7 +1464,8 @@ function ensureProjectDirs(paths = getProjectPaths()) {
     path2.join(paths.ghostrunPath, "runs"),
     path2.join(paths.ghostrunPath, "reports"),
     path2.join(paths.ghostrunPath, "auth", "storage-state"),
-    path2.join(paths.ghostrunPath, "auth", "secrets")
+    path2.join(paths.ghostrunPath, "auth", "secrets"),
+    path2.join(paths.ghostrunPath, "ai", "sessions")
   ];
   for (const d of dirs) fs2.mkdirSync(d, { recursive: true });
 }
@@ -3464,6 +3465,19 @@ function toK6Var(val) {
   if (val.match(/^\{\{(\w+)\}\}$/)) return val.replace(/^\{\{(\w+)\}\}$/, "$1");
   return JSON.stringify(val);
 }
+function getOllamaTimeoutMs(defaultMs) {
+  const raw = process.env.GHOSTRUN_OLLAMA_TIMEOUT_MS;
+  if (!raw) return defaultMs;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultMs;
+}
+var lastAiError = null;
+function setAiError(reason, detail) {
+  lastAiError = { reason, detail };
+}
+function getLastAiError() {
+  return lastAiError;
+}
 async function isOllamaRunning() {
   const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || "http://localhost:11434";
   try {
@@ -3482,24 +3496,41 @@ async function isOllamaRunning() {
 async function callOllama(prompt) {
   const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || "http://localhost:11434";
   const model = process.env.GHOSTRUN_OLLAMA_MODEL || await isOllamaRunning();
-  if (!model) return null;
+  if (!model) {
+    setAiError("no-provider", "No Ollama model available (is Ollama running?)");
+    return null;
+  }
+  const timeoutMs = getOllamaTimeoutMs(3e4);
   try {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], stream: false }),
-      signal: AbortSignal.timeout(3e4)
+      signal: AbortSignal.timeout(timeoutMs)
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      setAiError("http-error", `Ollama returned HTTP ${res.status} ${res.statusText}`.trim());
+      return null;
+    }
     const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch {
+    const text = data.choices?.[0]?.message?.content?.trim() || null;
+    if (!text) setAiError("empty-response", "Ollama returned an empty response");
+    return text;
+  } catch (err) {
+    const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    setAiError(
+      isTimeout ? "timeout" : "connection-refused",
+      isTimeout ? `Ollama request timed out after ${timeoutMs}ms \u2014 CPU-only inference can be slower than this; set GHOSTRUN_OLLAMA_TIMEOUT_MS to raise the limit` : `Could not reach Ollama at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return null;
   }
 }
 async function callAnthropic(prompt) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) {
+    setAiError("no-api-key", "ANTHROPIC_API_KEY is not set");
+    return null;
+  }
   try {
     const Anthropic = (await import("@anthropic-ai/sdk")).default;
     const client = new Anthropic({ apiKey });
@@ -3522,7 +3553,8 @@ async function callAnthropic(prompt) {
         totalTokens: inputTokens + outputTokens
       }
     };
-  } catch {
+  } catch (err) {
+    setAiError("anthropic-error", err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -3532,6 +3564,7 @@ async function callAI(prompt, options) {
   const provider = process.env.GHOSTRUN_AI_PROVIDER;
   const interactionMode = getInteractionMode();
   const promptSanitized = sanitizePII(prompt).slice(0, 4e3);
+  lastAiError = null;
   if (provider !== "anthropic") {
     const result2 = await callOllama(prompt);
     if (result2) {
@@ -3559,6 +3592,7 @@ async function callAI(prompt, options) {
     }
     if (provider === "ollama") return null;
   }
+  const ollamaFailure = getLastAiError();
   const result = await callAnthropic(prompt);
   if (result?.text) {
     if (config.ai?.trackUsage !== false) {
@@ -3576,6 +3610,11 @@ async function callAI(prompt, options) {
       });
     }
     return { text: result.text, provider: "anthropic", model: result.model, usage: result.usage };
+  }
+  if (ollamaFailure && ollamaFailure.reason !== "no-provider") {
+    const anthropicFailure = getLastAiError();
+    const anthropicNote = anthropicFailure?.reason === "no-api-key" ? "" : ` (Anthropic fallback also failed: ${anthropicFailure?.detail})`;
+    setAiError(ollamaFailure.reason, `${ollamaFailure.detail}${anthropicNote}`);
   }
   return null;
 }
@@ -3706,14 +3745,37 @@ function getEnvLabel(url) {
   if (url.includes("staging") || url.includes("stage") || url.includes("preprod")) return { label: "staging", color: import_chalk.default.yellow };
   return { label: "production", color: import_chalk.default.red };
 }
-function askQuestion(question) {
-  return new Promise((resolve3) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (a) => {
-      rl.close();
-      resolve3(a.trim());
+var sharedRl = null;
+var pendingLines = [];
+var lineWaiters = [];
+function getSharedReadline() {
+  if (!sharedRl) {
+    sharedRl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    sharedRl.on("line", (line) => {
+      const waiter = lineWaiters.shift();
+      if (waiter) waiter(line);
+      else pendingLines.push(line);
     });
-  });
+    sharedRl.on("close", () => {
+      sharedRl = null;
+    });
+  }
+  return sharedRl;
+}
+function closeSharedReadline() {
+  if (sharedRl) {
+    sharedRl.close();
+    sharedRl = null;
+  }
+  pendingLines = [];
+  lineWaiters = [];
+}
+function askQuestion(question) {
+  getSharedReadline();
+  process.stdout.write(question);
+  const queued = pendingLines.shift();
+  const linePromise = queued !== void 0 ? Promise.resolve(queued) : new Promise((resolve3) => lineWaiters.push(resolve3));
+  return linePromise.then((line) => line.trim());
 }
 async function confirmAction(question, defaultAnswer = false) {
   const mode = getInteractionMode();
@@ -4093,139 +4155,145 @@ async function runLearn(url, nameOverride, opts) {
   const flow = db.createFlow({ name: flowName, appUrl: url, createdBy: "human" });
   const capturedActions = [];
   let browserClosed = false;
-  await page.exposeFunction("__ghostrunRecord", (action) => {
-    const last = capturedActions[capturedActions.length - 1];
-    if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
-    const sanitized = { ...action, value: action.value ? sanitizePII(action.value) : action.value };
-    capturedActions.push(sanitized);
-    const icons = { click: "\u{1F5B1} ", fill: "\u2328\uFE0F ", select: "\u{1F4CB}", navigate: "\u{1F310}", check: "\u2611\uFE0F " };
-    let label = "";
-    if (action.type === "click") label = `click ${action.label ? import_chalk.default.white(`"${action.label}"`) : ""} ${import_chalk.default.gray(action.selector)}`;
-    else if (action.type === "fill") label = `fill ${import_chalk.default.gray(action.selector)} = ${import_chalk.default.yellow(`"${sanitized.value?.slice(0, 30)}"`)}`;
-    else if (action.type === "select") label = `select ${import_chalk.default.gray(action.selector)} \u2192 ${import_chalk.default.yellow(action.value)}`;
-    else if (action.type === "navigate") label = `navigate \u2192 ${import_chalk.default.cyan(action.url)}`;
-    else if (action.type === "check") label = `check ${import_chalk.default.gray(action.selector)} (${action.value})`;
-    process.stdout.write(`  ${import_chalk.default.green(icons[action.type] || "\u25CF")} ${label}
-`);
-  });
-  await page.addInitScript(RECORDER_SCRIPT);
-  await page.evaluate(RECORDER_SCRIPT).catch(() => {
-  });
-  let lastNavTime = 0;
-  page.on("framenavigated", (frame) => {
-    if (frame !== page.mainFrame()) return;
-    const navUrl = frame.url();
-    if (navUrl === "about:blank" || navUrl === url) return;
-    const now = Date.now();
-    const last = capturedActions[capturedActions.length - 1];
-    if (last && last.type === "click" && now - last.timestamp < 1500) return;
-    if (now - lastNavTime < 300) return;
-    lastNavTime = now;
-    capturedActions.push({ type: "navigate", url: navUrl, timestamp: now });
-    process.stdout.write(`  ${import_chalk.default.green("\u{1F310}")} navigate \u2192 ${import_chalk.default.cyan(navUrl)}
-`);
-  });
-  browser.on("disconnected", () => {
-    browserClosed = true;
-  });
-  context.on("page", async (newPage) => {
-    capturedActions.push({ type: "navigate", url: newPage.url(), timestamp: Date.now(), label: "[new tab]" });
-    await newPage.exposeFunction("__ghostrunRecord", (action) => {
+  try {
+    await page.exposeFunction("__ghostrunRecord", (action) => {
       const last = capturedActions[capturedActions.length - 1];
       if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
-      const tabAction = { ...action, label: action.label ? `[popup] ${action.label}` : action.label };
-      const sanitized = { ...tabAction, value: tabAction.value ? sanitizePII(tabAction.value) : tabAction.value };
+      const sanitized = { ...action, value: action.value ? sanitizePII(action.value) : action.value };
       capturedActions.push(sanitized);
-      process.stdout.write(`  ${import_chalk.default.cyan("[popup]")} ${sanitized.type} ${sanitized.label ? import_chalk.default.white(`"${sanitized.label}"`) : ""} ${import_chalk.default.gray(sanitized.selector || "")}
+      const icons = { click: "\u{1F5B1} ", fill: "\u2328\uFE0F ", select: "\u{1F4CB}", navigate: "\u{1F310}", check: "\u2611\uFE0F " };
+      let label = "";
+      if (action.type === "click") label = `click ${action.label ? import_chalk.default.white(`"${action.label}"`) : ""} ${import_chalk.default.gray(action.selector)}`;
+      else if (action.type === "fill") label = `fill ${import_chalk.default.gray(action.selector)} = ${import_chalk.default.yellow(`"${sanitized.value?.slice(0, 30)}"`)}`;
+      else if (action.type === "select") label = `select ${import_chalk.default.gray(action.selector)} \u2192 ${import_chalk.default.yellow(action.value)}`;
+      else if (action.type === "navigate") label = `navigate \u2192 ${import_chalk.default.cyan(action.url)}`;
+      else if (action.type === "check") label = `check ${import_chalk.default.gray(action.selector)} (${action.value})`;
+      process.stdout.write(`  ${import_chalk.default.green(icons[action.type] || "\u25CF")} ${label}
 `);
     });
-    await newPage.addInitScript(RECORDER_SCRIPT);
-    newPage.on("framenavigated", (frame) => {
-      if (frame !== newPage.mainFrame()) return;
+    await page.addInitScript(RECORDER_SCRIPT);
+    await page.evaluate(RECORDER_SCRIPT).catch(() => {
+    });
+    let lastNavTime = 0;
+    page.on("framenavigated", (frame) => {
+      if (frame !== page.mainFrame()) return;
       const navUrl = frame.url();
-      if (navUrl === "about:blank") return;
-      capturedActions.push({ type: "navigate", url: navUrl, timestamp: Date.now(), label: "[popup nav]" });
-      process.stdout.write(`  ${import_chalk.default.cyan("[popup]")} navigate \u2192 ${import_chalk.default.cyan(navUrl)}
+      if (navUrl === "about:blank" || navUrl === url) return;
+      const now = Date.now();
+      const last = capturedActions[capturedActions.length - 1];
+      if (last && last.type === "click" && now - last.timestamp < 1500) return;
+      if (now - lastNavTime < 300) return;
+      lastNavTime = now;
+      capturedActions.push({ type: "navigate", url: navUrl, timestamp: now });
+      process.stdout.write(`  ${import_chalk.default.green("\u{1F310}")} navigate \u2192 ${import_chalk.default.cyan(navUrl)}
 `);
     });
-  });
-  console.log(import_chalk.default.bgCyan.black.bold("  RECORDING  ") + import_chalk.default.bold(" \u{1F464} human flow \u2014 browser is live\n"));
-  console.log(import_chalk.default.gray("  Every click, fill, and navigation is captured automatically."));
-  console.log(import_chalk.default.gray("  Assertions: type  ") + import_chalk.default.cyan("a text:<expected>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a url:<path>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a title:<text>"));
-  console.log(import_chalk.default.gray("  Done?       press ") + import_chalk.default.cyan("Enter") + import_chalk.default.gray(" or type ") + import_chalk.default.cyan("done") + import_chalk.default.gray("\n"));
-  if (explicitUrl || !isAttached) await page.goto(url);
-  if (!browserClosed) {
-    await new Promise((resolve3) => {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      rl.on("line", (line) => {
-        const trimmed = line.trim();
-        if (!trimmed || ["done", "stop", "finish"].includes(trimmed.toLowerCase())) {
-          rl.close();
-          resolve3();
-          return;
-        }
-        const assertMatch = trimmed.match(/^a (text|url|el|title):\s*(.+)$/i);
-        if (assertMatch) {
-          const assertType = assertMatch[1].toLowerCase();
-          const assertValue = assertMatch[2].trim();
-          const typeMap = { text: "assert:text", url: "assert:url", el: "assert:element", title: "assert:title" };
-          const actionType = typeMap[assertType] || `assert:${assertType}`;
-          const isEl = assertType === "el";
-          const action = { type: actionType, timestamp: Date.now(), assertType, ...isEl ? { selector: assertValue } : { value: assertValue } };
-          capturedActions.push(action);
-          process.stdout.write(`  ${import_chalk.default.magenta("\u2713")} assertion added: ${import_chalk.default.yellow(actionType)} ${import_chalk.default.white(assertValue)}
+    browser.on("disconnected", () => {
+      browserClosed = true;
+    });
+    context.on("page", async (newPage) => {
+      capturedActions.push({ type: "navigate", url: newPage.url(), timestamp: Date.now(), label: "[new tab]" });
+      await newPage.exposeFunction("__ghostrunRecord", (action) => {
+        const last = capturedActions[capturedActions.length - 1];
+        if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
+        const tabAction = { ...action, label: action.label ? `[popup] ${action.label}` : action.label };
+        const sanitized = { ...tabAction, value: tabAction.value ? sanitizePII(tabAction.value) : tabAction.value };
+        capturedActions.push(sanitized);
+        process.stdout.write(`  ${import_chalk.default.cyan("[popup]")} ${sanitized.type} ${sanitized.label ? import_chalk.default.white(`"${sanitized.label}"`) : ""} ${import_chalk.default.gray(sanitized.selector || "")}
 `);
-        }
       });
-      rl.on("close", () => resolve3());
-    }).catch(() => {
+      await newPage.addInitScript(RECORDER_SCRIPT);
+      newPage.on("framenavigated", (frame) => {
+        if (frame !== newPage.mainFrame()) return;
+        const navUrl = frame.url();
+        if (navUrl === "about:blank") return;
+        capturedActions.push({ type: "navigate", url: navUrl, timestamp: Date.now(), label: "[popup nav]" });
+        process.stdout.write(`  ${import_chalk.default.cyan("[popup]")} navigate \u2192 ${import_chalk.default.cyan(navUrl)}
+`);
+      });
     });
-  }
-  if (!browserClosed && !isAttached) await browser.close();
-  else if (isAttached) info("Detached \u2014 your browser session was left running.");
-  if (capturedActions.length === 0) {
-    warn("No actions captured. Flow not saved.");
-    db.deleteFlow(flow.id);
-    process.exit(0);
-  }
-  const nodes = [{ id: "start", type: "start", label: "Start", url }];
-  const edges = [];
-  let prevId = "start";
-  capturedActions.forEach((action, i) => {
-    const nodeId = `step-${i + 1}`;
-    let node;
-    if (action.type === "navigate") node = { id: nodeId, type: "action", label: `Navigate to ${action.url}`, action: "navigate", url: action.url };
-    else if (action.type === "click") node = { id: nodeId, type: "action", label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: "click", selector: action.selector, intent: action.label ? `Click "${action.label}"` : `Click ${action.selector}` };
-    else if (action.type === "fill") node = { id: nodeId, type: "action", label: `Fill ${action.selector}`, action: "fill", selector: action.selector, value: action.value };
-    else if (action.type === "select") node = { id: nodeId, type: "action", label: `Select "${action.value}" in ${action.selector}`, action: "select", selector: action.selector, value: action.value };
-    else if (action.type === "check") node = { id: nodeId, type: "action", label: `${action.value === "true" ? "Check" : "Uncheck"} ${action.selector}`, action: "check", selector: action.selector, value: action.value };
-    else if (action.type.startsWith("assert:")) {
-      const isEl = action.type === "assert:element";
-      node = { id: nodeId, type: "action", label: `Assert ${action.type.replace("assert:", "")} "${isEl ? action.selector : action.value}"`, action: action.type, ...isEl ? { selector: action.selector } : { value: action.value } };
-    } else return;
-    nodes.push(node);
-    edges.push({ id: `e${i}`, source: prevId, target: nodeId });
-    prevId = nodeId;
-  });
-  nodes.push({ id: "end", type: "end", label: "End" });
-  edges.push({ id: `e${capturedActions.length}`, source: prevId, target: "end" });
-  db.updateFlow(flow.id, { graph: { nodes, edges, appUrl: url } });
-  divider();
-  console.log(import_chalk.default.bgGreen.black.bold("  SAVED  ") + import_chalk.default.bold(` ${capturedActions.length} actions recorded \u2014 \u{1F464} human flow
+    console.log(import_chalk.default.bgCyan.black.bold("  RECORDING  ") + import_chalk.default.bold(" \u{1F464} human flow \u2014 browser is live\n"));
+    console.log(import_chalk.default.gray("  Every click, fill, and navigation is captured automatically."));
+    console.log(import_chalk.default.gray("  Assertions: type  ") + import_chalk.default.cyan("a text:<expected>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a url:<path>") + import_chalk.default.gray("  |  ") + import_chalk.default.cyan("a title:<text>"));
+    console.log(import_chalk.default.gray("  Done?       press ") + import_chalk.default.cyan("Enter") + import_chalk.default.gray(" or type ") + import_chalk.default.cyan("done") + import_chalk.default.gray("\n"));
+    if (explicitUrl || !isAttached) await page.goto(url);
+    if (!browserClosed) {
+      closeSharedReadline();
+      await new Promise((resolve3) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.on("line", (line) => {
+          const trimmed = line.trim();
+          if (!trimmed || ["done", "stop", "finish"].includes(trimmed.toLowerCase())) {
+            rl.close();
+            resolve3();
+            return;
+          }
+          const assertMatch = trimmed.match(/^a (text|url|el|title):\s*(.+)$/i);
+          if (assertMatch) {
+            const assertType = assertMatch[1].toLowerCase();
+            const assertValue = assertMatch[2].trim();
+            const typeMap = { text: "assert:text", url: "assert:url", el: "assert:element", title: "assert:title" };
+            const actionType = typeMap[assertType] || `assert:${assertType}`;
+            const isEl = assertType === "el";
+            const action = { type: actionType, timestamp: Date.now(), assertType, ...isEl ? { selector: assertValue } : { value: assertValue } };
+            capturedActions.push(action);
+            process.stdout.write(`  ${import_chalk.default.magenta("\u2713")} assertion added: ${import_chalk.default.yellow(actionType)} ${import_chalk.default.white(assertValue)}
+`);
+          }
+        });
+        rl.on("close", () => resolve3());
+      }).catch(() => {
+      });
+    }
+    if (!browserClosed && !isAttached) await browser.close();
+    else if (isAttached) info("Detached \u2014 your browser session was left running.");
+    if (capturedActions.length === 0) {
+      warn("No actions captured. Flow not saved.");
+      db.deleteFlow(flow.id);
+      process.exit(0);
+    }
+    const nodes = [{ id: "start", type: "start", label: "Start", url }];
+    const edges = [];
+    let prevId = "start";
+    capturedActions.forEach((action, i) => {
+      const nodeId = `step-${i + 1}`;
+      let node;
+      if (action.type === "navigate") node = { id: nodeId, type: "action", label: `Navigate to ${action.url}`, action: "navigate", url: action.url };
+      else if (action.type === "click") node = { id: nodeId, type: "action", label: action.label ? `Click "${action.label}"` : `Click ${action.selector}`, action: "click", selector: action.selector, intent: action.label ? `Click "${action.label}"` : `Click ${action.selector}` };
+      else if (action.type === "fill") node = { id: nodeId, type: "action", label: `Fill ${action.selector}`, action: "fill", selector: action.selector, value: action.value };
+      else if (action.type === "select") node = { id: nodeId, type: "action", label: `Select "${action.value}" in ${action.selector}`, action: "select", selector: action.selector, value: action.value };
+      else if (action.type === "check") node = { id: nodeId, type: "action", label: `${action.value === "true" ? "Check" : "Uncheck"} ${action.selector}`, action: "check", selector: action.selector, value: action.value };
+      else if (action.type.startsWith("assert:")) {
+        const isEl = action.type === "assert:element";
+        node = { id: nodeId, type: "action", label: `Assert ${action.type.replace("assert:", "")} "${isEl ? action.selector : action.value}"`, action: action.type, ...isEl ? { selector: action.selector } : { value: action.value } };
+      } else return;
+      nodes.push(node);
+      edges.push({ id: `e${i}`, source: prevId, target: nodeId });
+      prevId = nodeId;
+    });
+    nodes.push({ id: "end", type: "end", label: "End" });
+    edges.push({ id: `e${capturedActions.length}`, source: prevId, target: "end" });
+    db.updateFlow(flow.id, { graph: { nodes, edges, appUrl: url } });
+    divider();
+    console.log(import_chalk.default.bgGreen.black.bold("  SAVED  ") + import_chalk.default.bold(` ${capturedActions.length} actions recorded \u2014 \u{1F464} human flow
 `));
-  const counts = capturedActions.reduce((a, c) => {
-    a[c.type] = (a[c.type] || 0) + 1;
-    return a;
-  }, {});
-  const actionIcons = { navigate: "\u{1F310}", click: "\u{1F5B1} ", fill: "\u2328\uFE0F ", select: "\u{1F4CB}", check: "\u2611\uFE0F ", assert: "\u2705" };
-  const countStrs = Object.entries(counts).map(([t, n]) => `${actionIcons[t] || "\u25CF"} ${n} ${t}`);
-  console.log("  " + countStrs.join(import_chalk.default.gray("  \xB7  ")));
-  console.log();
-  info(`Flow ID: ${import_chalk.default.gray(flow.id.slice(0, 8))}`);
-  info(`Run:     ${import_chalk.default.green("ghostrun run " + flow.id.slice(0, 8))}`);
-  info(`Fix:     ${import_chalk.default.cyan("ghostrun flow:fix " + flow.id.slice(0, 8))}`);
-  console.log();
-  if (isAttached) process.exit(0);
+    const counts = capturedActions.reduce((a, c) => {
+      a[c.type] = (a[c.type] || 0) + 1;
+      return a;
+    }, {});
+    const actionIcons = { navigate: "\u{1F310}", click: "\u{1F5B1} ", fill: "\u2328\uFE0F ", select: "\u{1F4CB}", check: "\u2611\uFE0F ", assert: "\u2705" };
+    const countStrs = Object.entries(counts).map(([t, n]) => `${actionIcons[t] || "\u25CF"} ${n} ${t}`);
+    console.log("  " + countStrs.join(import_chalk.default.gray("  \xB7  ")));
+    console.log();
+    info(`Flow ID: ${import_chalk.default.gray(flow.id.slice(0, 8))}`);
+    info(`Run:     ${import_chalk.default.green("ghostrun run " + flow.id.slice(0, 8))}`);
+    info(`Fix:     ${import_chalk.default.cyan("ghostrun flow:fix " + flow.id.slice(0, 8))}`);
+    console.log();
+    if (isAttached) process.exit(0);
+  } catch (err) {
+    db.deleteFlow(flow.id);
+    throw err;
+  }
 }
 async function executeFlow(flowId, vars, opts) {
   const log = (s) => {
@@ -7743,7 +7811,7 @@ Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>"
                   { role: "user", content: message }
                 ]
               }),
-              signal: AbortSignal.timeout(15e3)
+              signal: AbortSignal.timeout(getOllamaTimeoutMs(15e3))
             });
             const d = await ollamaRes.json();
             reply = d.message?.content || "(no response)";
@@ -9649,11 +9717,13 @@ Rules:
 - selector and url fields must be CSS selectors or full URLs`;
   const result = await callAI(prompt, { mode: "author", metadata: { source: "create", profile: profileName || "" } });
   if (!result) {
+    const aiError = getLastAiError();
+    const message = aiError ? `AI failed to generate flow: ${aiError.detail}` : "AI failed to generate flow.";
     if (jsonOutput) {
-      console.log(JSON.stringify({ error: "AI failed to generate flow." }));
+      console.log(JSON.stringify({ error: message, reason: aiError?.reason || null }));
       process.exit(1);
     }
-    errorMsg("AI failed to generate flow.");
+    errorMsg(message);
     process.exit(1);
   }
   let steps;
@@ -10359,7 +10429,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
             ],
             stream: true
           }),
-          signal: AbortSignal.timeout(9e4)
+          signal: AbortSignal.timeout(getOllamaTimeoutMs(9e4))
         });
         if (!res.ok || !res.body) {
           yield "(Ollama unavailable \u2014 is it running?)";
@@ -12774,7 +12844,7 @@ async function main() {
       const learnArgs = args.slice(1);
       const cdpEndpoint = parseFlagValue(process.argv, "--cdp");
       const cdpIdx = learnArgs.indexOf("--cdp");
-      const positionals = learnArgs.filter((a, i) => !a.startsWith("--") && i !== cdpIdx + 1);
+      const positionals = learnArgs.filter((a, i) => !a.startsWith("--") && (cdpIdx === -1 || i !== cdpIdx + 1));
       const firstLooksLikeUrl = positionals[0] && /^https?:\/\//i.test(positionals[0]);
       let url;
       let name;
@@ -13087,6 +13157,7 @@ async function main() {
       process.exit(1);
   }
   if (cmd !== "serve") db.close();
+  closeSharedReadline();
 }
 main().catch((err) => {
   errorMsg(String(err));

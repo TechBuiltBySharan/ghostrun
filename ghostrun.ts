@@ -1855,6 +1855,28 @@ function toK6Var(val: string): string {
 // AI — Ollama-first, Anthropic fallback
 // ============================================
 
+// Timeout for Ollama *generation* calls (chat completions, streaming chat). Configurable because
+// CPU-only inference can take well over a minute for even small models, and the old hardcoded 30s
+// made `author create` / self-heal fail silently on those machines (see issue #23).
+function getOllamaTimeoutMs(defaultMs: number): number {
+  const raw = process.env.GHOSTRUN_OLLAMA_TIMEOUT_MS;
+  if (!raw) return defaultMs;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultMs;
+}
+
+type AiFailureReason = 'no-provider' | 'timeout' | 'connection-refused' | 'http-error' | 'empty-response' | 'no-api-key' | 'anthropic-error';
+
+let lastAiError: { reason: AiFailureReason; detail: string } | null = null;
+
+function setAiError(reason: AiFailureReason, detail: string) {
+  lastAiError = { reason, detail };
+}
+
+function getLastAiError(): { reason: AiFailureReason; detail: string } | null {
+  return lastAiError;
+}
+
 async function isOllamaRunning(): Promise<string | null> {
   const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || 'http://localhost:11434';
   try {
@@ -1875,25 +1897,44 @@ async function isOllamaRunning(): Promise<string | null> {
 async function callOllama(prompt: string): Promise<string | null> {
   const baseUrl = process.env.GHOSTRUN_OLLAMA_URL || 'http://localhost:11434';
   const model = process.env.GHOSTRUN_OLLAMA_MODEL || await isOllamaRunning();
-  if (!model) return null;
+  if (!model) {
+    setAiError('no-provider', 'No Ollama model available (is Ollama running?)');
+    return null;
+  }
+  const timeoutMs = getOllamaTimeoutMs(30000);
   try {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false }),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      setAiError('http-error', `Ollama returned HTTP ${res.status} ${res.statusText}`.trim());
+      return null;
+    }
     const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch {
+    const text = data.choices?.[0]?.message?.content?.trim() || null;
+    if (!text) setAiError('empty-response', 'Ollama returned an empty response');
+    return text;
+  } catch (err) {
+    const isTimeout = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    setAiError(
+      isTimeout ? 'timeout' : 'connection-refused',
+      isTimeout
+        ? `Ollama request timed out after ${timeoutMs}ms — CPU-only inference can be slower than this; set GHOSTRUN_OLLAMA_TIMEOUT_MS to raise the limit`
+        : `Could not reach Ollama at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return null;
   }
 }
 
 async function callAnthropic(prompt: string): Promise<{ text: string | null; usage: AiUsage; model: string } | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) {
+    setAiError('no-api-key', 'ANTHROPIC_API_KEY is not set');
+    return null;
+  }
   try {
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
     const client = new Anthropic({ apiKey });
@@ -1915,7 +1956,8 @@ async function callAnthropic(prompt: string): Promise<{ text: string | null; usa
         totalTokens: inputTokens + outputTokens,
       },
     };
-  } catch {
+  } catch (err) {
+    setAiError('anthropic-error', err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -1926,6 +1968,7 @@ async function callAI(prompt: string, options?: { mode?: string; metadata?: Reco
   const provider = process.env.GHOSTRUN_AI_PROVIDER; // 'ollama' | 'anthropic' | undefined = auto
   const interactionMode = getInteractionMode();
   const promptSanitized = sanitizePII(prompt).slice(0, 4000);
+  lastAiError = null;
 
   if (provider !== 'anthropic') {
     const result = await callOllama(prompt);
@@ -1955,6 +1998,10 @@ async function callAI(prompt: string, options?: { mode?: string; metadata?: Reco
     if (provider === 'ollama') return null;
   }
 
+  // Keep the Ollama failure reason around — if Anthropic also fails (e.g. no API key configured,
+  // the common case for local-only setups) that's a more useful diagnostic than "no API key".
+  const ollamaFailure = getLastAiError();
+
   const result = await callAnthropic(prompt);
   if (result?.text) {
     if (config.ai?.trackUsage !== false) {
@@ -1972,6 +2019,14 @@ async function callAI(prompt: string, options?: { mode?: string; metadata?: Reco
       });
     }
     return { text: result.text, provider: 'anthropic', model: result.model, usage: result.usage };
+  }
+
+  if (ollamaFailure && ollamaFailure.reason !== 'no-provider') {
+    const anthropicFailure = getLastAiError();
+    const anthropicNote = anthropicFailure?.reason === 'no-api-key'
+      ? ''
+      : ` (Anthropic fallback also failed: ${anthropicFailure?.detail})`;
+    setAiError(ollamaFailure.reason, `${ollamaFailure.detail}${anthropicNote}`);
   }
 
   return null;
@@ -2121,11 +2176,44 @@ function formatBytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+// A single readline.Interface is shared across askQuestion() calls within a command, with answers
+// pulled from a queue fed by a persistent 'line' listener rather than rl.question() per call.
+// Both pieces matter for piped/redirected stdin (`cmd < answers.txt`): with a non-TTY input,
+// readline drains and parses the whole pipe into 'line' events as soon as it starts flowing —
+// much faster than our `await`-separated questions can keep up — so anything using rl.question()
+// (which only ever captures one 'line' at a time) silently loses every line after the first, and
+// the next prompt hangs forever. Queuing every 'line' event as it arrives means no answer is ever
+// dropped, regardless of how the input is paced (issue #23, reported against `api:learn`'s
+// multi-question builder).
+let sharedRl: readline.Interface | null = null;
+let pendingLines: string[] = [];
+let lineWaiters: Array<(line: string) => void> = [];
+
+function getSharedReadline(): readline.Interface {
+  if (!sharedRl) {
+    sharedRl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    sharedRl.on('line', (line) => {
+      const waiter = lineWaiters.shift();
+      if (waiter) waiter(line);
+      else pendingLines.push(line);
+    });
+    sharedRl.on('close', () => { sharedRl = null; });
+  }
+  return sharedRl;
+}
+
+function closeSharedReadline(): void {
+  if (sharedRl) { sharedRl.close(); sharedRl = null; }
+  pendingLines = [];
+  lineWaiters = [];
+}
+
 function askQuestion(question: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(question, (a) => { rl.close(); resolve(a.trim()); });
-  });
+  getSharedReadline();
+  process.stdout.write(question);
+  const queued = pendingLines.shift();
+  const linePromise = queued !== undefined ? Promise.resolve(queued) : new Promise<string>((resolve) => lineWaiters.push(resolve));
+  return linePromise.then(line => line.trim());
 }
 
 async function askWithMode(question: string, autoAnswer = ''): Promise<string> {
@@ -2596,6 +2684,7 @@ async function runLearn(url: string | undefined, nameOverride?: string, opts?: {
   const capturedActions: RecordedAction[] = [];
   let browserClosed = false;
 
+  try {
   await page.exposeFunction('__ghostrunRecord', (action: RecordedAction) => {
     const last = capturedActions[capturedActions.length - 1];
     if (last && last.type === action.type && last.selector === action.selector && Date.now() - last.timestamp < 500) return;
@@ -2664,6 +2753,9 @@ async function runLearn(url: string | undefined, nameOverride?: string, opts?: {
 
   // Custom readline that supports assertion commands
   if (!browserClosed) {
+    // The flow-name prompt above may have opened the shared askQuestion() readline — release it
+    // first so it isn't left competing with this one over the same stdin.
+    closeSharedReadline();
     await new Promise<void>((resolve) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       rl.on('line', (line) => {
@@ -2737,6 +2829,13 @@ async function runLearn(url: string | undefined, nameOverride?: string, opts?: {
   // A CDP connection is an open socket that keeps the event loop alive — since we
   // deliberately never close() it, exit explicitly instead of hanging forever.
   if (isAttached) process.exit(0);
+  } catch (err) {
+    // A crash between creating the flow row and saving real steps (e.g. page.goto() failing
+    // on a malformed URL) previously left an empty, permanent flow behind — visible in
+    // `flow:list` / `status` with 0 real steps. Clean it up before the error propagates.
+    db.deleteFlow(flow.id);
+    throw err;
+  }
 }
 
 // ============================================
@@ -6436,7 +6535,7 @@ Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>"
                   { role: 'user', content: message },
                 ],
               }),
-              signal: AbortSignal.timeout(15000),
+              signal: AbortSignal.timeout(getOllamaTimeoutMs(15000)),
             });
             const d = await ollamaRes.json() as any;
             reply = d.message?.content || '(no response)';
@@ -8577,11 +8676,13 @@ Rules:
 
   const result = await callAI(prompt, { mode: 'author', metadata: { source: 'create', profile: profileName || '' } });
   if (!result) {
+    const aiError = getLastAiError();
+    const message = aiError ? `AI failed to generate flow: ${aiError.detail}` : 'AI failed to generate flow.';
     if (jsonOutput) {
-      console.log(JSON.stringify({ error: 'AI failed to generate flow.' }));
+      console.log(JSON.stringify({ error: message, reason: aiError?.reason || null }));
       process.exit(1);
     }
-    errorMsg('AI failed to generate flow.');
+    errorMsg(message);
     process.exit(1);
   }
 
@@ -9355,7 +9456,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
             ],
             stream: true,
           }),
-          signal: AbortSignal.timeout(90000),
+          signal: AbortSignal.timeout(getOllamaTimeoutMs(90000)),
         });
         if (!res.ok || !res.body) { yield '(Ollama unavailable — is it running?)'; return; }
 
@@ -11843,7 +11944,9 @@ async function main() {
       const learnArgs = args.slice(1);
       const cdpEndpoint = parseFlagValue(process.argv, '--cdp');
       const cdpIdx = learnArgs.indexOf('--cdp');
-      const positionals = learnArgs.filter((a, i) => !a.startsWith('--') && i !== cdpIdx + 1);
+      // cdpIdx is -1 when --cdp isn't passed; skipping that check entirely in that case avoids
+      // treating "cdpIdx + 1 === 0" as excluding the first positional (the URL) by mistake.
+      const positionals = learnArgs.filter((a, i) => !a.startsWith('--') && (cdpIdx === -1 || i !== cdpIdx + 1));
       // With --cdp, the URL is optional (inferred from the attached tab) — a lone
       // positional that isn't shaped like a URL is the flow name, not the URL.
       const firstLooksLikeUrl = positionals[0] && /^https?:\/\//i.test(positionals[0]);
@@ -12014,6 +12117,7 @@ async function main() {
   }
 
   if (cmd !== 'serve') db.close();
+  closeSharedReadline();
 }
 
 main().catch(err => { errorMsg(String(err)); process.exit(1); });
