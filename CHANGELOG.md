@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0-alpha.16] — 2026-07-22
+
+### Added
+
+- **`ghostrun flow:dedupe [--apply] [--json]`** — cleans up flows duplicated by the `findFlowByName` sync bug fixed in 2.0.0-alpha.15. Groups flows by exact name + normalized graph content (not name alone, since two flows can legitimately share a name with different content), keeps the copy with the most run history (ties broken by oldest), and reports what would be removed. Dry-run by default; `--apply` deletes the extras, which also removes their `.flow.json` files via the existing delete sync hook.
+
 ## [2.0.0-alpha.15] — 2026-07-22
 
 ### Fixed

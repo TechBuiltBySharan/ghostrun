@@ -1,6 +1,6 @@
 {
   "name": "ghostrun-cli",
-  "version": "2.0.0-alpha.15",
+  "version": "2.0.0-alpha.16",
   "description": "Local-first CLI for browser automation, API testing, and load testing",
   "repository": {
     "type": "git",
