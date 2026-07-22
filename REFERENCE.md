@@ -28,6 +28,7 @@ Complete reference for the `ghostrun` command-line tool.
 | `flow:import` | `ghostrun flow:import <file>` | Import a flow from a `.flow.json` file | `ghostrun flow:import login-flow.flow.json` |
 | `flow:rename` | `ghostrun flow:rename <id\|name> <new-name>` | Rename a flow | `ghostrun flow:rename abc12345 "New Login"` |
 | `flow:clone` | `ghostrun flow:clone <id\|name>` | Duplicate a flow (appends " (copy)" to name) | `ghostrun flow:clone login-flow` |
+| `flow:dedupe` | `ghostrun flow:dedupe [--apply] [--json]` | Find flows duplicated by identical name+graph content; dry-run by default, keeps the copy with the most run history (ties broken by oldest) | `ghostrun flow:dedupe --apply` |
 | `flow:from-curl` | `ghostrun flow:from-curl [cmd]` | Parse a curl command and create an API flow | `ghostrun flow:from-curl 'curl -X POST https://api.example.com/login'` |
 | `flow:from-spec` | `ghostrun flow:from-spec <file>` | Import flows from an OpenAPI/Swagger JSON or YAML spec | `ghostrun flow:from-spec openapi.yaml` |
 | `monitor schedule add` | `ghostrun monitor schedule add <id\|name> "<cron>"` | Schedule a flow with a cron expression | `ghostrun monitor schedule add login-flow "0 9 * * *"` |

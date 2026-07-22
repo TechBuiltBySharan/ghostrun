@@ -5660,6 +5660,91 @@ async function runCloneFlow(id) {
   info("New ID: " + import_chalk.default.gray(created.id.slice(0, 8)));
   console.log();
 }
+function sortJsonKeys(value) {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      out[key] = sortJsonKeys(value[key]);
+    }
+    return out;
+  }
+  return value;
+}
+function normalizeGraphForDedupe(graph) {
+  try {
+    return JSON.stringify(sortJsonKeys(JSON.parse(graph)));
+  } catch {
+    return graph;
+  }
+}
+async function runFlowDedupe(extraArgs) {
+  const jsonOutput = parseFlagValue(extraArgs, "--output") === "json" || extraArgs.includes("--json");
+  const apply = extraArgs.includes("--apply");
+  const flows = db.listFlows();
+  const groups = /* @__PURE__ */ new Map();
+  for (const flow of flows) {
+    const key = `${flow.name.trim().toLowerCase()}::${normalizeGraphForDedupe(flow.graph)}`;
+    const list = groups.get(key);
+    if (list) list.push(flow);
+    else groups.set(key, [flow]);
+  }
+  const duplicateGroups = [...groups.values()].filter((g) => g.length > 1);
+  if (!duplicateGroups.length) {
+    if (jsonOutput) {
+      console.log(JSON.stringify({ groups: 0, removed: 0, wouldRemove: 0, dryRun: !apply, plans: [] }));
+      return;
+    }
+    printLogo();
+    divider();
+    success("No duplicate flows found \u2014 nothing to clean up.");
+    console.log();
+    return;
+  }
+  const plans = duplicateGroups.map((group) => {
+    const withRuns = group.map((flow) => ({ flow, runs: db.listRuns(flow.id, 1e3).length }));
+    withRuns.sort((a, b) => b.runs - a.runs || a.flow.createdAt.getTime() - b.flow.createdAt.getTime());
+    const [keep, ...remove] = withRuns;
+    return { name: keep.flow.name, keep, remove };
+  });
+  const totalRemove = plans.reduce((sum, p) => sum + p.remove.length, 0);
+  if (apply) {
+    for (const plan of plans) for (const entry of plan.remove) db.deleteFlow(entry.flow.id);
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      groups: plans.length,
+      dryRun: !apply,
+      removed: apply ? totalRemove : 0,
+      wouldRemove: apply ? 0 : totalRemove,
+      plans: plans.map((p) => ({
+        name: p.name,
+        keep: { id: p.keep.flow.id, runs: p.keep.runs },
+        remove: p.remove.map((r) => ({ id: r.flow.id, runs: r.runs }))
+      }))
+    }, null, 2));
+    return;
+  }
+  printLogo();
+  divider();
+  console.log(import_chalk.default.bold(`
+  ${plans.length} duplicate group(s) \u2014 ${totalRemove} flow(s) ${apply ? "removed" : "to remove"}
+`));
+  for (const plan of plans) {
+    console.log(`  ${import_chalk.default.white(plan.name)}`);
+    console.log(`    ${import_chalk.default.green("keep")}    ${import_chalk.default.gray(plan.keep.flow.id.slice(0, 8))}  ${plan.keep.runs} run(s)`);
+    for (const entry of plan.remove) {
+      console.log(`    ${import_chalk.default.red(apply ? "removed" : "remove")}  ${import_chalk.default.gray(entry.flow.id.slice(0, 8))}  ${entry.runs} run(s)`);
+    }
+    console.log();
+  }
+  if (apply) {
+    success(`Removed ${totalRemove} duplicate flow(s) across ${plans.length} group(s).`);
+  } else {
+    warn(`Dry run \u2014 nothing deleted. Re-run with ${import_chalk.default.cyan("ghostrun flow:dedupe --apply")} to remove the ${totalRemove} duplicate(s) above.`);
+  }
+  console.log();
+}
 function parseCurlTokens(input) {
   const tokens = [];
   let cur = "";
@@ -12438,6 +12523,7 @@ async function main() {
     console.log(`  ${C("flow:import <file>")}${G("Import flow from .flow.json")}`);
     console.log(`  ${C("flow:rename <id|name> <new>")}${G("Rename a flow")}`);
     console.log(`  ${C("flow:clone <id|name>")}${G("Duplicate a flow")}`);
+    console.log(`  ${C("flow:dedupe [--apply]")}${G("Find/remove flows duplicated by name+content")}`);
     console.log(`  ${C("flow:from-curl [cmd]")}${G("Parse curl command \u2192 create flow")}`);
     console.log(`  ${C("flow:from-spec <file>")}${G("Import OpenAPI/Swagger JSON or YAML spec")}`);
     console.log();
@@ -12943,6 +13029,10 @@ async function main() {
         process.exit(1);
       }
       await runCloneFlow(args[1]);
+      break;
+    case "flow:dedupe":
+    case "flow:dedup":
+      await runFlowDedupe(args.slice(1));
       break;
     case "flow:from-curl":
       await runFlowFromCurl(args[1]);

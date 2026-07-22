@@ -4274,6 +4274,101 @@ async function runCloneFlow(id: string) {
 }
 
 // ============================================
+// COMMANDS — flow:dedupe
+// ============================================
+
+// Recursively sorts object keys so two graphs that are structurally identical but were
+// JSON.stringify'd with different key orders still produce the same normalized string.
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      out[key] = sortJsonKeys((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+function normalizeGraphForDedupe(graph: string): string {
+  try { return JSON.stringify(sortJsonKeys(JSON.parse(graph))); } catch { return graph; }
+}
+
+async function runFlowDedupe(extraArgs: string[]) {
+  const jsonOutput = parseFlagValue(extraArgs, '--output') === 'json' || extraArgs.includes('--json');
+  const apply = extraArgs.includes('--apply');
+
+  const flows = db.listFlows();
+
+  // Group by (name, graph content) rather than name alone — two flows can legitimately share a
+  // name (e.g. recorded against different environments), but the findFlowByName duplication bug
+  // (see CHANGELOG 2.0.0-alpha.15) only ever produces exact re-imports of the same source graph.
+  const groups = new Map<string, typeof flows>();
+  for (const flow of flows) {
+    const key = `${flow.name.trim().toLowerCase()}::${normalizeGraphForDedupe(flow.graph)}`;
+    const list = groups.get(key);
+    if (list) list.push(flow); else groups.set(key, [flow]);
+  }
+  const duplicateGroups = [...groups.values()].filter(g => g.length > 1);
+
+  if (!duplicateGroups.length) {
+    if (jsonOutput) { console.log(JSON.stringify({ groups: 0, removed: 0, wouldRemove: 0, dryRun: !apply, plans: [] })); return; }
+    printLogo(); divider();
+    success('No duplicate flows found — nothing to clean up.');
+    console.log();
+    return;
+  }
+
+  // Within each duplicate group, keep the flow with the most run history (most likely the one
+  // actually in use); tie-break on oldest createdAt (most likely the original, pre-bug flow).
+  const plans = duplicateGroups.map(group => {
+    const withRuns = group.map(flow => ({ flow, runs: db.listRuns(flow.id, 1000).length }));
+    withRuns.sort((a, b) => (b.runs - a.runs) || (a.flow.createdAt.getTime() - b.flow.createdAt.getTime()));
+    const [keep, ...remove] = withRuns;
+    return { name: keep.flow.name, keep, remove };
+  });
+  const totalRemove = plans.reduce((sum, p) => sum + p.remove.length, 0);
+
+  if (apply) {
+    for (const plan of plans) for (const entry of plan.remove) db.deleteFlow(entry.flow.id);
+  }
+
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      groups: plans.length,
+      dryRun: !apply,
+      removed: apply ? totalRemove : 0,
+      wouldRemove: apply ? 0 : totalRemove,
+      plans: plans.map(p => ({
+        name: p.name,
+        keep: { id: p.keep.flow.id, runs: p.keep.runs },
+        remove: p.remove.map(r => ({ id: r.flow.id, runs: r.runs })),
+      })),
+    }, null, 2));
+    return;
+  }
+
+  printLogo(); divider();
+  console.log(chalk.bold(`\n  ${plans.length} duplicate group(s) — ${totalRemove} flow(s) ${apply ? 'removed' : 'to remove'}\n`));
+  for (const plan of plans) {
+    console.log(`  ${chalk.white(plan.name)}`);
+    console.log(`    ${chalk.green('keep')}    ${chalk.gray(plan.keep.flow.id.slice(0, 8))}  ${plan.keep.runs} run(s)`);
+    for (const entry of plan.remove) {
+      console.log(`    ${chalk.red(apply ? 'removed' : 'remove')}  ${chalk.gray(entry.flow.id.slice(0, 8))}  ${entry.runs} run(s)`);
+    }
+    console.log();
+  }
+
+  if (apply) {
+    success(`Removed ${totalRemove} duplicate flow(s) across ${plans.length} group(s).`);
+  } else {
+    warn(`Dry run — nothing deleted. Re-run with ${chalk.cyan('ghostrun flow:dedupe --apply')} to remove the ${totalRemove} duplicate(s) above.`);
+  }
+  console.log();
+}
+
+// ============================================
 // COMMANDS — flow:from-curl / flow:from-spec
 // ============================================
 
@@ -11609,6 +11704,7 @@ async function main() {
     console.log(`  ${C('flow:import <file>')}${G('Import flow from .flow.json')}`);
     console.log(`  ${C('flow:rename <id|name> <new>')}${G('Rename a flow')}`);
     console.log(`  ${C('flow:clone <id|name>')}${G('Duplicate a flow')}`);
+    console.log(`  ${C('flow:dedupe [--apply]')}${G('Find/remove flows duplicated by name+content')}`);
     console.log(`  ${C('flow:from-curl [cmd]')}${G('Parse curl command → create flow')}`);
     console.log(`  ${C('flow:from-spec <file>')}${G('Import OpenAPI/Swagger JSON or YAML spec')}`);
     console.log();
@@ -12012,6 +12108,9 @@ async function main() {
     case 'flow:clone':
       if (!args[1]) { errorMsg('Flow ID or name required'); process.exit(1); }
       await runCloneFlow(args[1]); break;
+    case 'flow:dedupe':
+    case 'flow:dedup':
+      await runFlowDedupe(args.slice(1)); break;
     case 'flow:from-curl':
       await runFlowFromCurl(args[1]); break;
     case 'flow:from-spec':
