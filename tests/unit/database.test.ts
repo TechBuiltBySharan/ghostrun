@@ -82,6 +82,27 @@ describe('Database', () => {
       const flows = manager.listFlows();
       expect(flows.length).toBe(2);
     });
+
+    it('findFlowByName prefers an exact match over substring ambiguity', () => {
+      // "Auth Guard" is a substring of "User Plan Auth Guard". Once both exist, a naive
+      // substring LIKE lookup matches two rows and used to return null (ambiguous) for either
+      // exact name — which callers like syncFlowsFromDisk treat as "not found" and re-import
+      // as a duplicate, doubling the flow count on every command invocation.
+      const short = manager.createFlow({ name: 'Auth Guard' });
+      const long = manager.createFlow({ name: 'User Plan Auth Guard' });
+
+      expect(manager.findFlowByName('Auth Guard')!.id).toBe(short.id);
+      expect(manager.findFlowByName('User Plan Auth Guard')!.id).toBe(long.id);
+      // Case-insensitive exact match still resolves correctly among the ambiguous set.
+      expect(manager.findFlowByName('AUTH GUARD')!.id).toBe(short.id);
+    });
+
+    it('findFlowByName returns null for genuinely ambiguous substring queries', () => {
+      manager.createFlow({ name: 'Checkout Flow A' });
+      manager.createFlow({ name: 'Checkout Flow B' });
+
+      expect(manager.findFlowByName('Checkout Flow')).toBeNull();
+    });
   });
 
   describe('Run Tracking', () => {

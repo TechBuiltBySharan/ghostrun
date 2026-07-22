@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0-alpha.15] — 2026-07-22
+
+### Fixed
+
+- **`DatabaseManager.findFlowByName` silently duplicated flows on every single command invocation once two flow names overlapped as substrings** — it matched names with `LIKE '%name%'` and returned `null` ("not found") whenever more than one row matched. `syncFlowsFromDisk` (run at startup by every command, including read-only ones like `flow:list`) treats a `null` lookup as "this flow doesn't exist yet" and imports a new copy — so once e.g. "Auth Guard" and "User Plan Auth Guard" both existed, every command run re-imported both as fresh duplicates, doubling the flow count each time (1 → 2 → 4 → 8 → ...) with zero user action. `findFlowByName` now prefers an exact case-insensitive match among the substring hits before giving up as ambiguous, which both stops new duplicates and makes existing installs self-heal (further syncs converge on the one exact-match row instead of minting more). Note: rows already duplicated by this bug on an affected install are not retroactively removed — they'll need manual `flow:delete`.
+
 ## [2.0.0-alpha.14] — 2026-07-22
 
 ### Fixed

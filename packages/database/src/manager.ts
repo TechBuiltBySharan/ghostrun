@@ -188,7 +188,16 @@ export class DatabaseManager {
     return rows.length === 1 ? this.mapFlow(rows[0]) : null;
   }
   findFlowByName(name: string) {
-    const rows = this.db.prepare('SELECT * FROM flows WHERE LOWER(name) LIKE ?').all(`%${name.toLowerCase()}%`) as Record<string, unknown>[];
+    const lower = name.toLowerCase();
+    const rows = this.db.prepare('SELECT * FROM flows WHERE LOWER(name) LIKE ?').all(`%${lower}%`) as Record<string, unknown>[];
+    if (rows.length === 0) return null;
+    // Prefer an exact (case-insensitive) match over substring ambiguity. Without this, once two
+    // flows' names overlap as substrings of each other (e.g. "Auth Guard" and "User Plan Auth
+    // Guard"), every lookup for either exact name becomes "ambiguous" and returns null — which
+    // callers like syncFlowsFromDisk treat as "not found" and re-import as a new flow, doubling
+    // the flow count on every single command invocation forever.
+    const exact = rows.find(r => (r.name as string).toLowerCase() === lower);
+    if (exact) return this.mapFlow(exact);
     return rows.length === 1 ? this.mapFlow(rows[0]) : null;
   }
   listFlows() {

@@ -584,7 +584,11 @@ var DatabaseManager = class _DatabaseManager {
     return rows.length === 1 ? this.mapFlow(rows[0]) : null;
   }
   findFlowByName(name) {
-    const rows = this.db.prepare("SELECT * FROM flows WHERE LOWER(name) LIKE ?").all(`%${name.toLowerCase()}%`);
+    const lower = name.toLowerCase();
+    const rows = this.db.prepare("SELECT * FROM flows WHERE LOWER(name) LIKE ?").all(`%${lower}%`);
+    if (rows.length === 0) return null;
+    const exact = rows.find((r) => r.name.toLowerCase() === lower);
+    if (exact) return this.mapFlow(exact);
     return rows.length === 1 ? this.mapFlow(rows[0]) : null;
   }
   listFlows() {
