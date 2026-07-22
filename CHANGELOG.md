@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0-alpha.14] — 2026-07-22
+
+### Fixed
+
+- **Ollama generation calls hardcoded a 30s/15s/90s timeout with no override** — CPU-only inference (no dedicated GPU) reliably exceeded these on every model tested, so `author create`, self-heal repair, and `code:scan` failed silently even on the smallest reasonable models. All three now honor `GHOSTRUN_OLLAMA_TIMEOUT_MS`, and failures surface the actual cause (timeout, connection refused, HTTP error, empty response, missing `ANTHROPIC_API_KEY`) instead of a generic `"AI failed to generate flow."`.
+- **`.ghostrun/ai/sessions` was never created by `ensureProjectDirs`** — the first successful AI call in a fresh project threw `ENOENT` trying to record it. Previously masked because the hardcoded Ollama timeout above almost always fired first, so this path was rarely reached. Added the missing directory to project scaffolding.
+- **`api:learn`'s interactive builder hung forever on piped/redirected stdin** (`ghostrun api:learn < answers.txt`) — `askQuestion()` used `rl.question()` per prompt, which only ever captures one line at a time; a non-TTY pipe drains into `'line'` events immediately, so every answer after the first was silently dropped and the next prompt hung. `askQuestion()` now shares one readline interface with a queued line reader, so no answer is lost regardless of how fast the input arrives.
+- **`ghostrun learn <url> <name>` dropped the URL and used `<name>` for both fields** — the positional-argument filter excluded index 0 whenever `--cdp` wasn't passed, because the "skip the value after `--cdp`" check computed `cdpIdx + 1 === 0` when `--cdp` was absent (`cdpIdx === -1`). Fixed to only apply that exclusion when `--cdp` is actually present.
+- **`ghostrun learn` left an empty, permanent flow behind if recording crashed partway through** (e.g. `page.goto` failing on a malformed URL) — the flow row is created before the browser session starts, but nothing cleaned it up on a thrown error, only on the graceful "no actions captured" exit. Wrapped the recording session in `try/catch` so a crash deletes the just-created flow before the error propagates.
+
 ## [2.0.0-alpha.13] — 2026-07-21
 
 ### Fixed
