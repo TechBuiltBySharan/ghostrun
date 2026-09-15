@@ -51,7 +51,7 @@ Complete reference for the `ghostrun` command-line tool.
 | `monitor schedule list` | `ghostrun monitor schedule list` | List all scheduled flows | `ghostrun monitor schedule list` |
 | `monitor schedule remove` | `ghostrun monitor schedule remove <id>` | Remove a schedule by ID | `ghostrun monitor schedule remove sched-abc123` |
 | `serve` | `ghostrun serve` | Start the scheduler daemon | `ghostrun serve` |
-| `serve --ui` | `ghostrun serve --ui [--port 3000]` | Launch the web dashboard (default port 3000) | `ghostrun serve --ui --port 4000` |
+| `serve --ui` | `ghostrun serve --ui [--port 3000]` | Launch the loopback-only web dashboard (default port 3000) | `ghostrun serve --ui --port 4000` |
 
 ### Test Suites
 
@@ -375,6 +375,8 @@ The example below shows all supported action types:
         { "id": "n44", "type": "action", "action": "storage:set",
           "label": "Set localStorage", "value": "theme=dark" },
 
+        // Disabled by default. Trusted projects must explicitly set
+        // policies.allowPageScripts=true in .ghostrun/config.json.
         { "id": "n45", "type": "action", "action": "eval",
           "label": "Run custom JS", "value": "window.sessionStorage.clear()" },
 

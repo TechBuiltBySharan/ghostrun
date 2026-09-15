@@ -405,6 +405,68 @@ var path4 = __toESM(require("path"));
 var readline = __toESM(require("readline"));
 var import_crypto4 = require("crypto");
 
+// dashboard-security.ts
+var import_node_crypto = require("node:crypto");
+function evaluateDashboardRequest(input) {
+  const hosts = /* @__PURE__ */ new Set([
+    `127.0.0.1:${input.port}`,
+    `localhost:${input.port}`,
+    `[::1]:${input.port}`
+  ]);
+  const host = (input.host || "").toLowerCase();
+  if (!hosts.has(host)) return { ok: false, error: "Untrusted dashboard host" };
+  if (input.origin) {
+    let origin;
+    try {
+      origin = new URL(input.origin);
+    } catch {
+      return { ok: false, error: "Invalid dashboard origin" };
+    }
+    if (origin.protocol !== "http:" || !hosts.has(origin.host.toLowerCase()))
+      return { ok: false, error: "Cross-origin dashboard request blocked" };
+  }
+  if (input.stateChanging) {
+    const expected = Buffer.from(input.expectedToken);
+    const provided = Buffer.from(input.providedToken || "");
+    if (provided.length !== expected.length || !(0, import_node_crypto.timingSafeEqual)(provided, expected))
+      return { ok: false, error: "Missing dashboard request token" };
+  }
+  return { ok: true };
+}
+function dashboardSecurityHeaders() {
+  return {
+    "Content-Security-Policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Cache-Control": "no-store"
+  };
+}
+
+// packages/security/src/page-script-policy.ts
+function assertPageScriptAllowed(enabled, script) {
+  if (!enabled) {
+    throw new Error(
+      "eval action is disabled. Set policies.allowPageScripts=true in .ghostrun/config.json only for trusted flows."
+    );
+  }
+  if (typeof script !== "string" || !script.trim())
+    throw new Error("eval: value must be a JavaScript expression");
+}
+
+// home-state.ts
+function suggestHomeActions(state) {
+  const actions = [];
+  if (!state.globalReady) actions.push("setup-global");
+  if (!state.projectReady) actions.push("setup-project");
+  if (!state.hasFlows) actions.push("record-first-flow");
+  if (state.hasFlows && !state.hasProfiles) actions.push("create-profile");
+  if (state.lastFailedRun) actions.push("review-failure");
+  if (state.openRepairs > 0) actions.push("review-repairs");
+  if (state.hasFlows && state.hasProfiles) actions.push("run-flow");
+  return actions;
+}
+
 // packages/database/src/manager.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
@@ -2179,6 +2241,7 @@ function defaultConfig() {
     },
     policies: {
       allowAutoRepairApply: false,
+      allowPageScripts: false,
       allowAiInCi: "summary-only",
       requireApprovalForFlowMutation: true,
       requireApprovalForSecretUse: true,
@@ -4944,8 +5007,8 @@ async function executeAction(page, action, node, ctx, runId, stepNumber) {
     }
     case "eval": {
       const script = node.value;
-      if (!script) throw new Error("eval: value must be a JavaScript expression");
-      await p.evaluate(new Function(script));
+      assertPageScriptAllowed(readConfig().policies?.allowPageScripts === true, script);
+      await p.evaluate(script);
       break;
     }
     case "iframe:enter": {
@@ -6872,6 +6935,7 @@ async function runServeDashboard(port) {
   const { spawn } = await import("child_process");
   const logBus = new EventEmitter();
   logBus.setMaxListeners(100);
+  const dashboardToken = (0, import_crypto4.randomBytes)(32).toString("hex");
   const sseClients = /* @__PURE__ */ new Set();
   const commandHistory = [];
   const allowedDashboardCommands = /* @__PURE__ */ new Set([
@@ -7348,6 +7412,11 @@ data: ${JSON.stringify(data)}
 </div>
 
 <script>
+const DASHBOARD_TOKEN = '${dashboardToken}';
+function html(value) {
+  const chars = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return String(value ?? '').replace(/[&<>"']/g, character => chars[character]);
+}
 // \u2500\u2500\u2500 Tab switching \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
@@ -7392,18 +7461,26 @@ function renderFlows(flows) {
   }
   tbody.innerHTML = flows.map(f => \`
     <tr>
-      <td><span class="flow-name">\${f.name}</span></td>
-      <td><span class="flow-steps">\${f.steps} steps</span></td>
-      <td><span style="color:var(--dim);font-size:12px">\${f.lastRun ? timeAgo(f.lastRun) : '\u2014'}</span></td>
-      <td id="status-\${f.id}">\${f.lastStatus ? badgeHtml(f.lastStatus) : '<span style="color:var(--dim)">\u2014</span>'}</td>
+      <td><span class="flow-name">\${html(f.name)}</span></td>
+      <td><span class="flow-steps">\${Number(f.steps) || 0} steps</span></td>
+      <td><span style="color:var(--dim);font-size:12px">\${f.lastRun ? html(timeAgo(f.lastRun)) : '\u2014'}</span></td>
+      <td id="status-\${html(f.id)}">\${f.lastStatus ? badgeHtml(f.lastStatus) : '<span style="color:var(--dim)">\u2014</span>'}</td>
       <td>
         <div class="flow-actions">
-          <button class="btn btn-run" id="run-btn-\${f.id}" onclick="runFlow('\${f.id}','\${f.name}')">\u25B6 Run</button>
-          <button class="btn btn-delete" onclick="deleteFlow('\${f.id}','\${f.name}')">\u2715</button>
+          <button class="btn btn-run" id="run-btn-\${html(f.id)}" data-run-flow="\${html(f.id)}">\u25B6 Run</button>
+          <button class="btn btn-delete" data-delete-flow="\${html(f.id)}">\u2715</button>
         </div>
       </td>
     </tr>
   \`).join('');
+  tbody.querySelectorAll('[data-run-flow]').forEach(button => button.addEventListener('click', () => {
+    const flow = flows.find(item => item.id === button.dataset.runFlow);
+    if (flow) runFlow(flow.id, flow.name);
+  }));
+  tbody.querySelectorAll('[data-delete-flow]').forEach(button => button.addEventListener('click', () => {
+    const flow = flows.find(item => item.id === button.dataset.deleteFlow);
+    if (flow) deleteFlow(flow.id, flow.name);
+  }));
 }
 
 // \u2500\u2500\u2500 Commands tab \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -7424,13 +7501,14 @@ function renderCommandHistory(history) {
   }
   tbody.innerHTML = history.map(item => \`
     <tr>
-      <td>\${item.command} \${(item.args || []).join(' ')}</td>
+      <td>\${html(item.command)} \${html((item.args || []).join(' '))}</td>
       <td>\${badgeHtml(item.status)}</td>
-      <td>\${item.duration ? item.duration + 'ms' : '\u2014'}</td>
-      <td>\${item.startedAt ? timeAgo(item.startedAt) : '\u2014'}</td>
-      <td><button class="btn btn-run" onclick="showCommandOutput('\${item.id}')">Output</button></td>
+      <td>\${item.duration ? Number(item.duration) + 'ms' : '\u2014'}</td>
+      <td>\${item.startedAt ? html(timeAgo(item.startedAt)) : '\u2014'}</td>
+      <td><button class="btn btn-run" data-command-output="\${html(item.id)}">Output</button></td>
     </tr>
   \`).join('');
+  tbody.querySelectorAll('[data-command-output]').forEach(button => button.addEventListener('click', () => showCommandOutput(button.dataset.commandOutput)));
 }
 
 async function runCommand() {
@@ -7442,7 +7520,7 @@ async function runCommand() {
   try {
     const r = await fetch('/api/commands/run', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
       body: JSON.stringify({ command, args: argsText ? argsText.split(/\\s+/) : [] })
     });
     const data = await r.json();
@@ -7463,7 +7541,7 @@ function badgeHtml(status) {
   if (status === 'passed') return '<span class="badge badge-pass">\u2713 passed</span>';
   if (status === 'failed') return '<span class="badge badge-fail">\u2717 failed</span>';
   if (status === 'running') return '<span class="badge badge-running">\u27F3 running</span>';
-  return \`<span style="color:var(--dim)">\${status}</span>\`;
+  return \`<span style="color:var(--dim)">\${html(status)}</span>\`;
 }
 
 function timeAgo(iso) {
@@ -7488,7 +7566,7 @@ async function runFlow(id, name) {
   document.getElementById('log-dot').classList.add('active');
   document.getElementById('log-status').textContent = 'Running: ' + name;
 
-  const es = new EventSource('/api/run?id=' + id);
+  const es = new EventSource('/api/run?id=' + encodeURIComponent(id) + '&token=' + encodeURIComponent(DASHBOARD_TOKEN));
   activeRun = es;
   es.addEventListener('log', e => {
     const d = JSON.parse(e.data);
@@ -7519,7 +7597,10 @@ async function runFlow(id, name) {
 // \u2500\u2500\u2500 Delete flow \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 async function deleteFlow(id, name) {
   if (!confirm('Delete flow "' + name + '"?')) return;
-  await fetch('/api/flows/' + id, { method: 'DELETE' });
+  await fetch('/api/flows/' + encodeURIComponent(id), {
+    method: 'DELETE',
+    headers: { 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
+  });
   loadFlows();
 }
 
@@ -7534,11 +7615,11 @@ async function loadRuns() {
   }
   tbody.innerHTML = runs.map(r => \`
     <tr>
-      <td>\${r.flowName || r.flowId}</td>
+      <td>\${html(r.flowName || r.flowId)}</td>
       <td>\${badgeHtml(r.status)}</td>
-      <td>\${r.duration ? r.duration + 'ms' : '\u2014'}</td>
-      <td>\${r.stepsTotal || '\u2014'}</td>
-      <td>\${r.createdAt ? timeAgo(r.createdAt) : '\u2014'}</td>
+      <td>\${r.duration ? Number(r.duration) + 'ms' : '\u2014'}</td>
+      <td>\${Number(r.stepsTotal) || '\u2014'}</td>
+      <td>\${r.createdAt ? html(timeAgo(r.createdAt)) : '\u2014'}</td>
     </tr>
   \`).join('');
 }
@@ -7577,7 +7658,7 @@ async function sendChat() {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
       body: JSON.stringify({ message: text })
     });
     const data = await r.json();
@@ -7717,7 +7798,27 @@ setInterval(loadFlows, 10000); // refresh every 10s
   const server = http2.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
     const path5 = url.pathname;
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    const stateChanging = !["GET", "HEAD", "OPTIONS"].includes(req.method || "") || path5 === "/api/run";
+    const headerToken = Array.isArray(req.headers["x-ghostrun-dashboard"]) ? req.headers["x-ghostrun-dashboard"][0] : req.headers["x-ghostrun-dashboard"];
+    const policy = evaluateDashboardRequest({
+      host: req.headers.host,
+      origin: Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin,
+      port,
+      stateChanging,
+      expectedToken: dashboardToken,
+      providedToken: headerToken || url.searchParams.get("token") || void 0
+    });
+    for (const [name, value] of Object.entries(dashboardSecurityHeaders())) res.setHeader(name, value);
+    if (!policy.ok) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: policy.error }));
+      return;
+    }
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, { "Allow": "GET, HEAD, POST, DELETE, OPTIONS" });
+      res.end();
+      return;
+    }
     if (req.method === "GET" && path5 === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(DASHBOARD_HTML);
@@ -7753,7 +7854,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       res.end(JSON.stringify({
         flows: flowData,
         stats: { flows: flows.length, runs: runs.length, passed, failed },
-        version: "1.0.0"
+        version: getGhostrunPkgVersion()
       }));
       return;
     }
@@ -7848,95 +7949,91 @@ data: ${JSON.stringify(data)}
       return;
     }
     if (req.method === "POST" && path5 === "/api/chat") {
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk.toString();
-      });
-      req.on("end", async () => {
-        try {
-          const { message } = JSON.parse(body);
-          const flows = db.listFlows();
-          const runs = db.listRuns(void 0, 20);
-          const runMatch = message.toLowerCase().match(/^run\s+(.+)$/);
-          if (runMatch) {
-            const query = runMatch[1].trim().toLowerCase();
-            const found = flows.find((f) => f.name.toLowerCase().includes(query) || f.id === query);
-            if (found) {
-              try {
-                const result = await executeFlow(found.id);
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({
-                  reply: `Running "${found.name}"...`,
-                  runResult: { passed: result.passed, duration: result.duration, error: result.error }
-                }));
-              } catch (err) {
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ reply: `Error running flow: ${err.message}`, runResult: { passed: false } }));
-              }
-              return;
+      try {
+        const input = await parseJsonBody(req);
+        const message = String(input.message || "").trim();
+        if (!message || message.length > 4e3) throw new Error("Message must be between 1 and 4000 characters");
+        const flows = db.listFlows();
+        const runs = db.listRuns(void 0, 20);
+        const runMatch = message.toLowerCase().match(/^run\s+(.+)$/);
+        if (runMatch) {
+          const query = runMatch[1].trim().toLowerCase();
+          const found = flows.find((f) => f.name.toLowerCase().includes(query) || f.id === query);
+          if (found) {
+            try {
+              const result = await executeFlow(found.id);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                reply: `Running "${found.name}"...`,
+                runResult: { passed: result.passed, duration: result.duration, error: result.error }
+              }));
+            } catch (err) {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ reply: `Error running flow: ${err.message}`, runResult: { passed: false } }));
             }
+            return;
           }
-          const flowList = flows.map((f) => `- ${f.name} (id: ${f.id})`).join("\n");
-          const recentRuns = runs.slice(0, 10).map((r) => {
-            const f = flows.find((fl) => fl.id === r.flowId);
-            return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.startedAt}`;
-          }).join("\n");
-          const systemPrompt = `You are GhostRun's assistant. GhostRun is a browser automation CLI tool.
+        }
+        const flowList = flows.map((f) => `- ${f.name} (id: ${f.id})`).join("\n");
+        const recentRuns = runs.slice(0, 10).map((r) => {
+          const f = flows.find((fl) => fl.id === r.flowId);
+          return `- ${f?.name || r.flowId}: ${r.status} (${r.duration}ms) at ${r.startedAt}`;
+        }).join("\n");
+        const systemPrompt = `You are GhostRun's assistant. GhostRun is a browser automation CLI tool.
 Current flows:
 ${flowList || "(none)"}
 Recent runs:
 ${recentRuns || "(none)"}
 Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>".`;
-          let reply = "";
-          try {
-            const ollamaRes = await fetch("http://localhost:11434/api/chat", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                model: "gemma3:4b",
-                stream: false,
-                messages: [
-                  { role: "system", content: systemPrompt },
-                  { role: "user", content: message }
-                ]
-              }),
-              signal: AbortSignal.timeout(getOllamaTimeoutMs(15e3))
-            });
-            const d = await ollamaRes.json();
-            reply = d.message?.content || "(no response)";
-          } catch {
-            const apiKey = process.env.ANTHROPIC_API_KEY;
-            if (apiKey) {
-              try {
-                const Anthropic = (await import("@anthropic-ai/sdk")).default;
-                const client = new Anthropic({ apiKey });
-                const msg = await client.messages.create({
-                  model: "claude-3-5-haiku-20241022",
-                  max_tokens: 512,
-                  system: systemPrompt,
-                  messages: [{ role: "user", content: message }]
-                });
-                reply = msg.content[0].text || "(no response)";
-              } catch {
-                reply = "AI is not available. Install Ollama: https://ollama.ai";
-              }
-            } else {
-              reply = "AI is not available. Install Ollama (https://ollama.ai) or set ANTHROPIC_API_KEY.";
+        let reply = "";
+        try {
+          const ollamaRes = await fetch("http://localhost:11434/api/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "gemma3:4b",
+              stream: false,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: message }
+              ]
+            }),
+            signal: AbortSignal.timeout(getOllamaTimeoutMs(15e3))
+          });
+          const d = await ollamaRes.json();
+          reply = d.message?.content || "(no response)";
+        } catch {
+          const apiKey = process.env.ANTHROPIC_API_KEY;
+          if (apiKey) {
+            try {
+              const Anthropic = (await import("@anthropic-ai/sdk")).default;
+              const client = new Anthropic({ apiKey });
+              const msg = await client.messages.create({
+                model: "claude-3-5-haiku-20241022",
+                max_tokens: 512,
+                system: systemPrompt,
+                messages: [{ role: "user", content: message }]
+              });
+              reply = msg.content[0].text || "(no response)";
+            } catch {
+              reply = "AI is not available. Install Ollama: https://ollama.ai";
             }
+          } else {
+            reply = "AI is not available. Install Ollama (https://ollama.ai) or set ANTHROPIC_API_KEY.";
           }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ reply }));
-        } catch (err) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: err.message }));
         }
-      });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ reply }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
     res.writeHead(404);
     res.end("Not found");
   });
-  server.listen(port, () => {
+  server.listen(port, "127.0.0.1", () => {
     printLogo();
     divider();
     console.log(import_chalk.default.bold(`
@@ -10749,11 +10846,12 @@ async function runInteractive(initialState) {
   const activeProfile = readConfig().activeProfile || "(none)";
   intro(import_chalk.default.cyan(" GhostRun \u2014 your QA agent "));
   let homeState = initialState || detectHomeState();
+  const suggested = suggestHomeActions(homeState);
   const hints = [];
-  if (!homeState.hasFlows) hints.push("\u2192 Record your first flow to get started");
-  if (homeState.hasFlows && !homeState.activeProfile) hints.push("\u2192 Set a profile: ghostrun profile use staging");
-  if (homeState.lastFailedRun) hints.push(`\u2192 Last failure: ${homeState.lastFailedRun.flowName}`);
-  if (homeState.openRepairs > 0) hints.push(`\u2192 ${homeState.openRepairs} repair proposal(s) waiting for review`);
+  if (suggested.includes("record-first-flow")) hints.push("\u2192 Record your first flow to get started");
+  if (suggested.includes("create-profile")) hints.push("\u2192 Set a profile: ghostrun profile use staging");
+  if (suggested.includes("review-failure") && homeState.lastFailedRun) hints.push(`\u2192 Last failure: ${homeState.lastFailedRun.flowName}`);
+  if (suggested.includes("review-repairs")) hints.push(`\u2192 ${homeState.openRepairs} repair proposal(s) waiting for review`);
   if (hints.length) {
     note(hints.map((h) => `  ${h}`).join("\n"), "Suggested");
   }
@@ -11815,6 +11913,9 @@ async function runSecurityAudit(exitOnFailure = true) {
   const config = readConfig();
   if (config.policies?.allowAutoRepairApply) {
     warnings.push("allowAutoRepairApply is enabled \u2014 flows may mutate without review outside CI");
+  }
+  if (config.policies?.allowPageScripts) {
+    warnings.push("allowPageScripts is enabled \u2014 trusted flows may execute JavaScript inside browser pages");
   }
   console.log(import_chalk.default.bold("  Passed"));
   if (passes.length === 0) console.log(import_chalk.default.gray("  (none)"));

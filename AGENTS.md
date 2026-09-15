@@ -446,7 +446,7 @@ Standards: [docs/reporting-standards.md](docs/reporting-standards.md)
 - Multi-repo dashboard (each repo is isolated)
 - Package still monolith CLI (executor packages exist but CLI is primary)
 
-**Verdict:** Ready as a **staging QA agent** for typical SaaS (form login, OTP bypass, CRUD flows, API checks, RLS assertions, CI gates). Treat **2.0.0-alpha.3** as alpha — pin version, run `ghostrun doctor` after upgrades.
+**Verdict:** Ready as a **staging QA agent** for typical SaaS (form login, OTP bypass, CRUD flows, API checks, RLS assertions, CI gates). Treat **2.0.0-alpha.16** as alpha — pin version, run `ghostrun doctor` after upgrades.
 
 ---
 

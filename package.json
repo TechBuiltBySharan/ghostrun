@@ -28,7 +28,7 @@
   },
   "scripts": {
     "build": "npm run typecheck && npm run build:bin",
-    "build:bin": "esbuild ghostrun.ts --bundle --platform=node --format=cjs --target=node18 --packages=external --outfile=ghostrun.js && esbuild mcp-server.ts --bundle --platform=node --format=cjs --target=node18 --packages=external --outfile=mcp-server.js && chmod +x ghostrun.js mcp-server.js",
+    "build:bin": "node scripts/build-binaries.mjs",
     "dev": "npx tsx ghostrun.ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
