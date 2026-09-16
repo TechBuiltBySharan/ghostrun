@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- Gate browser-page `eval` steps behind the explicit `policies.allowPageScripts` project setting; the safe default is disabled.
+- Refresh compatible dependencies and lockfile to remove known npm advisories.
+
+### Security
+
+- Hardened `ghostrun serve --ui` as a loopback-only control surface with exact Host/Origin validation, an ephemeral request token for run/delete/chat actions, browser security headers, bounded JSON/chat input, and escaped database-backed dashboard rendering.
+
+### Fixed
+
+- Replaced the Unix-only `chmod` bundle command with a cross-platform Node/esbuild script; Windows now passes the same release validation as macOS and Linux.
+- The dashboard reports the installed Ghostrun package version instead of the stale hard-coded `1.0.0` label.
+- Home-action tests now import production decision logic rather than testing a duplicate implementation.
+
 ## [2.0.0-alpha.16] — 2026-07-22
 
 ### Added

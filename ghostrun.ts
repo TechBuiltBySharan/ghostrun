@@ -10,7 +10,10 @@ import chalk from 'chalk';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import { createHash, randomUUID as uuidv4 } from 'crypto';
+import { createHash, randomBytes, randomUUID as uuidv4 } from 'crypto';
+import { dashboardSecurityHeaders, evaluateDashboardRequest } from './dashboard-security';
+import { assertPageScriptAllowed } from './packages/security/src/page-script-policy';
+import { suggestHomeActions, type HomeActionState } from './home-state';
 import { DatabaseManager } from './packages/database/src/manager';
 import {
   escapeHtml,
@@ -109,6 +112,7 @@ interface GhostrunConfig {
   };
   policies?: {
     allowAutoRepairApply?: boolean;
+    allowPageScripts?: boolean;
     allowAiInCi?: AiCiPolicy;
     requireApprovalForFlowMutation?: boolean;
     requireApprovalForSecretUse?: boolean;
@@ -326,6 +330,7 @@ function defaultConfig(): GhostrunConfig {
     },
     policies: {
       allowAutoRepairApply: false,
+      allowPageScripts: false,
       allowAiInCi: 'summary-only',
       requireApprovalForFlowMutation: true,
       requireApprovalForSecretUse: true,
@@ -3501,10 +3506,9 @@ async function executeAction(page: import('playwright').Page | null, action: str
     }
 
     case 'eval': {
-      // Execute arbitrary JavaScript on the page — value = JS expression
       const script = node.value as string;
-      if (!script) throw new Error('eval: value must be a JavaScript expression');
-      await p.evaluate(new Function(script) as () => unknown);
+      assertPageScriptAllowed(readConfig().policies?.allowPageScripts === true, script);
+      await p.evaluate(script);
       break;
     }
 
@@ -5587,6 +5591,7 @@ async function runServeDashboard(port: number) {
 
   const logBus = new EventEmitter();
   logBus.setMaxListeners(100);
+  const dashboardToken = randomBytes(32).toString('hex');
 
   // Active run SSE subscribers: flowId → Set<response>
   const sseClients = new Set<any>();
@@ -6071,6 +6076,11 @@ async function runServeDashboard(port: number) {
 </div>
 
 <script>
+const DASHBOARD_TOKEN = '${dashboardToken}';
+function html(value) {
+  const chars = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return String(value ?? '').replace(/[&<>"']/g, character => chars[character]);
+}
 // ─── Tab switching ───────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
@@ -6115,18 +6125,26 @@ function renderFlows(flows) {
   }
   tbody.innerHTML = flows.map(f => \`
     <tr>
-      <td><span class="flow-name">\${f.name}</span></td>
-      <td><span class="flow-steps">\${f.steps} steps</span></td>
-      <td><span style="color:var(--dim);font-size:12px">\${f.lastRun ? timeAgo(f.lastRun) : '—'}</span></td>
-      <td id="status-\${f.id}">\${f.lastStatus ? badgeHtml(f.lastStatus) : '<span style="color:var(--dim)">—</span>'}</td>
+      <td><span class="flow-name">\${html(f.name)}</span></td>
+      <td><span class="flow-steps">\${Number(f.steps) || 0} steps</span></td>
+      <td><span style="color:var(--dim);font-size:12px">\${f.lastRun ? html(timeAgo(f.lastRun)) : '—'}</span></td>
+      <td id="status-\${html(f.id)}">\${f.lastStatus ? badgeHtml(f.lastStatus) : '<span style="color:var(--dim)">—</span>'}</td>
       <td>
         <div class="flow-actions">
-          <button class="btn btn-run" id="run-btn-\${f.id}" onclick="runFlow('\${f.id}','\${f.name}')">▶ Run</button>
-          <button class="btn btn-delete" onclick="deleteFlow('\${f.id}','\${f.name}')">✕</button>
+          <button class="btn btn-run" id="run-btn-\${html(f.id)}" data-run-flow="\${html(f.id)}">▶ Run</button>
+          <button class="btn btn-delete" data-delete-flow="\${html(f.id)}">✕</button>
         </div>
       </td>
     </tr>
   \`).join('');
+  tbody.querySelectorAll('[data-run-flow]').forEach(button => button.addEventListener('click', () => {
+    const flow = flows.find(item => item.id === button.dataset.runFlow);
+    if (flow) runFlow(flow.id, flow.name);
+  }));
+  tbody.querySelectorAll('[data-delete-flow]').forEach(button => button.addEventListener('click', () => {
+    const flow = flows.find(item => item.id === button.dataset.deleteFlow);
+    if (flow) deleteFlow(flow.id, flow.name);
+  }));
 }
 
 // ─── Commands tab ────────────────────────────────────────────────
@@ -6147,13 +6165,14 @@ function renderCommandHistory(history) {
   }
   tbody.innerHTML = history.map(item => \`
     <tr>
-      <td>\${item.command} \${(item.args || []).join(' ')}</td>
+      <td>\${html(item.command)} \${html((item.args || []).join(' '))}</td>
       <td>\${badgeHtml(item.status)}</td>
-      <td>\${item.duration ? item.duration + 'ms' : '—'}</td>
-      <td>\${item.startedAt ? timeAgo(item.startedAt) : '—'}</td>
-      <td><button class="btn btn-run" onclick="showCommandOutput('\${item.id}')">Output</button></td>
+      <td>\${item.duration ? Number(item.duration) + 'ms' : '—'}</td>
+      <td>\${item.startedAt ? html(timeAgo(item.startedAt)) : '—'}</td>
+      <td><button class="btn btn-run" data-command-output="\${html(item.id)}">Output</button></td>
     </tr>
   \`).join('');
+  tbody.querySelectorAll('[data-command-output]').forEach(button => button.addEventListener('click', () => showCommandOutput(button.dataset.commandOutput)));
 }
 
 async function runCommand() {
@@ -6165,7 +6184,7 @@ async function runCommand() {
   try {
     const r = await fetch('/api/commands/run', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
       body: JSON.stringify({ command, args: argsText ? argsText.split(/\\s+/) : [] })
     });
     const data = await r.json();
@@ -6186,7 +6205,7 @@ function badgeHtml(status) {
   if (status === 'passed') return '<span class="badge badge-pass">✓ passed</span>';
   if (status === 'failed') return '<span class="badge badge-fail">✗ failed</span>';
   if (status === 'running') return '<span class="badge badge-running">⟳ running</span>';
-  return \`<span style="color:var(--dim)">\${status}</span>\`;
+  return \`<span style="color:var(--dim)">\${html(status)}</span>\`;
 }
 
 function timeAgo(iso) {
@@ -6211,7 +6230,7 @@ async function runFlow(id, name) {
   document.getElementById('log-dot').classList.add('active');
   document.getElementById('log-status').textContent = 'Running: ' + name;
 
-  const es = new EventSource('/api/run?id=' + id);
+  const es = new EventSource('/api/run?id=' + encodeURIComponent(id) + '&token=' + encodeURIComponent(DASHBOARD_TOKEN));
   activeRun = es;
   es.addEventListener('log', e => {
     const d = JSON.parse(e.data);
@@ -6242,7 +6261,10 @@ async function runFlow(id, name) {
 // ─── Delete flow ─────────────────────────────────────────────────
 async function deleteFlow(id, name) {
   if (!confirm('Delete flow "' + name + '"?')) return;
-  await fetch('/api/flows/' + id, { method: 'DELETE' });
+  await fetch('/api/flows/' + encodeURIComponent(id), {
+    method: 'DELETE',
+    headers: { 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
+  });
   loadFlows();
 }
 
@@ -6257,11 +6279,11 @@ async function loadRuns() {
   }
   tbody.innerHTML = runs.map(r => \`
     <tr>
-      <td>\${r.flowName || r.flowId}</td>
+      <td>\${html(r.flowName || r.flowId)}</td>
       <td>\${badgeHtml(r.status)}</td>
-      <td>\${r.duration ? r.duration + 'ms' : '—'}</td>
-      <td>\${r.stepsTotal || '—'}</td>
-      <td>\${r.createdAt ? timeAgo(r.createdAt) : '—'}</td>
+      <td>\${r.duration ? Number(r.duration) + 'ms' : '—'}</td>
+      <td>\${Number(r.stepsTotal) || '—'}</td>
+      <td>\${r.createdAt ? html(timeAgo(r.createdAt)) : '—'}</td>
     </tr>
   \`).join('');
 }
@@ -6300,7 +6322,7 @@ async function sendChat() {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ghostrun-dashboard': DASHBOARD_TOKEN },
       body: JSON.stringify({ message: text })
     });
     const data = await r.json();
@@ -6441,9 +6463,29 @@ setInterval(loadFlows, 10000); // refresh every 10s
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url!, `http://localhost:${port}`);
     const path = url.pathname;
-
-    // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const stateChanging = !['GET', 'HEAD', 'OPTIONS'].includes(req.method || '') || path === '/api/run';
+    const headerToken = Array.isArray(req.headers['x-ghostrun-dashboard'])
+      ? req.headers['x-ghostrun-dashboard'][0]
+      : req.headers['x-ghostrun-dashboard'];
+    const policy = evaluateDashboardRequest({
+      host: req.headers.host,
+      origin: Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin,
+      port,
+      stateChanging,
+      expectedToken: dashboardToken,
+      providedToken: headerToken || url.searchParams.get('token') || undefined,
+    });
+    for (const [name, value] of Object.entries(dashboardSecurityHeaders())) res.setHeader(name, value);
+    if (!policy.ok) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: policy.error }));
+      return;
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'Allow': 'GET, HEAD, POST, DELETE, OPTIONS' });
+      res.end();
+      return;
+    }
 
     // ── GET /  ─ dashboard HTML
     if (req.method === 'GET' && path === '/') {
@@ -6479,7 +6521,7 @@ setInterval(loadFlows, 10000); // refresh every 10s
       res.end(JSON.stringify({
         flows: flowData,
         stats: { flows: flows.length, runs: runs.length, passed, failed },
-        version: '1.0.0',
+        version: getGhostrunPkgVersion(),
       }));
       return;
     }
@@ -6576,11 +6618,10 @@ setInterval(loadFlows, 10000); // refresh every 10s
 
     // ── POST /api/chat
     if (req.method === 'POST' && path === '/api/chat') {
-      let body = '';
-      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-      req.on('end', async () => {
-        try {
-          const { message } = JSON.parse(body);
+      try {
+          const input = await parseJsonBody(req);
+          const message = String(input.message || '').trim();
+          if (!message || message.length > 4_000) throw new Error('Message must be between 1 and 4000 characters');
           const flows = db.listFlows();
           const runs = db.listRuns(undefined, 20);
 
@@ -6656,11 +6697,10 @@ Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>"
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ reply }));
-        } catch (err: any) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
+      } catch (err: any) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
 
@@ -6668,7 +6708,7 @@ Answer briefly and helpfully. To run a flow, the user can type "run <flow-name>"
     res.end('Not found');
   });
 
-  server.listen(port, () => {
+  server.listen(port, '127.0.0.1', () => {
     printLogo(); divider();
     console.log(chalk.bold(`\n  Dashboard running at: `) + chalk.cyan(`http://localhost:${port}`));
     console.log(chalk.gray('  Press Ctrl+C to stop.\n'));
@@ -9657,7 +9697,7 @@ When a flow fails, check if recent runs have the same issue. Suggest specific fi
 // HOME — zero-config entry (just `ghostrun`)
 // ============================================
 
-interface HomeState {
+interface HomeState extends HomeActionState {
   globalReady: boolean;
   projectReady: boolean;
   hasFlows: boolean;
@@ -9816,11 +9856,12 @@ async function runInteractive(initialState?: HomeState) {
   intro(chalk.cyan(' GhostRun — your QA agent '));
 
   let homeState = initialState || detectHomeState();
+  const suggested = suggestHomeActions(homeState);
   const hints: string[] = [];
-  if (!homeState.hasFlows) hints.push('→ Record your first flow to get started');
-  if (homeState.hasFlows && !homeState.activeProfile) hints.push('→ Set a profile: ghostrun profile use staging');
-  if (homeState.lastFailedRun) hints.push(`→ Last failure: ${homeState.lastFailedRun.flowName}`);
-  if (homeState.openRepairs > 0) hints.push(`→ ${homeState.openRepairs} repair proposal(s) waiting for review`);
+  if (suggested.includes('record-first-flow')) hints.push('→ Record your first flow to get started');
+  if (suggested.includes('create-profile')) hints.push('→ Set a profile: ghostrun profile use staging');
+  if (suggested.includes('review-failure') && homeState.lastFailedRun) hints.push(`→ Last failure: ${homeState.lastFailedRun.flowName}`);
+  if (suggested.includes('review-repairs')) hints.push(`→ ${homeState.openRepairs} repair proposal(s) waiting for review`);
   if (hints.length) {
     note(hints.map(h => `  ${h}`).join('\n'), 'Suggested');
   }
@@ -10923,6 +10964,9 @@ async function runSecurityAudit(exitOnFailure = true) {
   const config = readConfig();
   if (config.policies?.allowAutoRepairApply) {
     warnings.push('allowAutoRepairApply is enabled — flows may mutate without review outside CI');
+  }
+  if (config.policies?.allowPageScripts) {
+    warnings.push('allowPageScripts is enabled — trusted flows may execute JavaScript inside browser pages');
   }
 
   console.log(chalk.bold('  Passed'));

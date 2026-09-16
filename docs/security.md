@@ -64,6 +64,14 @@ ghostrun run --ci --ai off
 
 ---
 
+## Local dashboard boundary
+
+`ghostrun serve --ui` listens on `127.0.0.1` only. Its control routes reject untrusted Host and Origin values, and run/delete/chat requests require an ephemeral token embedded in the locally served page. The token changes whenever the process restarts and is never written to disk.
+
+The dashboard is a local operator surface. Put a separately designed authentication proxy in front of it if you deliberately expose it beyond the machine; do not bind the Ghostrun process directly to a LAN or public interface.
+
+---
+
 ## Project audit
 
 Run before committing or releasing:

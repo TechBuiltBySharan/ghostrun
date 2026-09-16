@@ -4,27 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-interface HomeState {
-  globalReady: boolean;
-  projectReady: boolean;
-  hasFlows: boolean;
-  flowCount: number;
-  hasProfiles: boolean;
-  openRepairs: number;
-  lastFailedRun: { id: string; flowName: string } | null;
-}
-
-function suggestHomeActions(state: HomeState): string[] {
-  const hints: string[] = [];
-  if (!state.globalReady) hints.push('setup-global');
-  if (!state.projectReady) hints.push('setup-project');
-  if (!state.hasFlows) hints.push('record-first-flow');
-  if (state.hasFlows && !state.hasProfiles) hints.push('create-profile');
-  if (state.lastFailedRun) hints.push('review-failure');
-  if (state.openRepairs > 0) hints.push('review-repairs');
-  if (state.hasFlows && state.hasProfiles) hints.push('run-flow');
-  return hints;
-}
+import { suggestHomeActions, type HomeActionState } from '../../home-state';
 
 describe('suggestHomeActions', () => {
   it('guides brand-new user through setup then record', () => {
@@ -36,7 +16,7 @@ describe('suggestHomeActions', () => {
       hasProfiles: false,
       openRepairs: 0,
       lastFailedRun: null,
-    })).toEqual(['setup-global', 'setup-project', 'record-first-flow']);
+    } satisfies HomeActionState)).toEqual(['setup-global', 'setup-project', 'record-first-flow']);
   });
 
   it('prioritizes failure review when run failed', () => {
@@ -48,7 +28,7 @@ describe('suggestHomeActions', () => {
       hasProfiles: true,
       openRepairs: 1,
       lastFailedRun: { id: 'run-1', flowName: 'Checkout' },
-    });
+    } satisfies HomeActionState);
     expect(hints).toContain('review-failure');
     expect(hints).toContain('review-repairs');
     expect(hints).toContain('run-flow');
